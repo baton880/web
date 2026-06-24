@@ -9,10 +9,7 @@ export const EMPTY_VEHICLE_THRESHOLD_KG = 50;
 export const ANOMALY_THRESHOLD_KG = 200;
 export const ANOMALY_CONFIRM_DELTA_KG = 40;
 export const ANOMALY_CONFIRM_PACKETS = 3;
-// После выезда из зоны загрузки разрешаем короткую "липкую" привязку
-// к последнему компоненту, чтобы не терять его на границе зон.
-export const LOADING_ZONE_STICKY_SECONDS = 180;
 export const DEFAULT_ZONE_DEBOUNCE_MS = 3000;
-// Подтверждение смены зоны по нескольким пакетам:
-// помогает убрать дребезг при близко расположенных зонах.
+// Null zone is confirmed only after this many seconds since the last real loading zone hit.
+export const NULL_ZONE_CONFIRM_SECONDS = 120;
 export const ZONE_CHANGE_CONFIRM_PACKETS = 2;

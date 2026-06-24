@@ -6,6 +6,15 @@ const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const envPath = path.resolve(__dirname, '../.env')
 
+function normalizeEnvValue(key, value) {
+  if (key === 'DATABASE_URL' && value === 'file:./dev.db') {
+    const dbPath = path.resolve(__dirname, '../prisma/dev.db').replace(/\\/g, '/')
+    return `file:${dbPath}`
+  }
+
+  return value
+}
+
 if (fs.existsSync(envPath)) {
   const lines = fs.readFileSync(envPath, 'utf8').split(/\r?\n/)
 
@@ -24,7 +33,7 @@ if (fs.existsSync(envPath)) {
     }
 
     if (key && process.env[key] === undefined) {
-      process.env[key] = value
+      process.env[key] = normalizeEnvValue(key, value)
     }
   }
 }

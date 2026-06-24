@@ -110,6 +110,7 @@ model TelemetrySettings {
   anomalyConfirmPackets  Int      @default(3)
   loadingZoneStickySeconds Int    @default(180)
   zoneChangeDebounceMs   Int      @default(3000)
+  nullZoneConfirmSeconds Int      @default(120)
   zoneChangeConfirmPackets Int    @default(2)
   deviationPercentThreshold Int   @default(10)
   deviationMinKgThreshold   Int   @default(10)

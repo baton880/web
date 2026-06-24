@@ -19,6 +19,11 @@ server/prisma/dev.db
 dist/
 build/
 
+# Server snapshots and local backups
+server_full_files/
+*.backup
+*.backup.*
+
 # System files
 .DS_Store
 Thumbs.db

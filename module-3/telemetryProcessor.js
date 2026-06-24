@@ -11,8 +11,8 @@ import {
   ANOMALY_THRESHOLD_KG,
   ANOMALY_CONFIRM_DELTA_KG,
   ANOMALY_CONFIRM_PACKETS,
-  LOADING_ZONE_STICKY_SECONDS,
   DEFAULT_ZONE_DEBOUNCE_MS,
+  NULL_ZONE_CONFIRM_SECONDS,
   ZONE_CHANGE_CONFIRM_PACKETS
 } from './config.js';
 
@@ -36,8 +36,11 @@ export class TelemetryProcessor {
       lastAcceptedWeight: null,
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
-      lastLoadingZone: null,
-      lastLoadingZoneAtMs: null,
+      visitedZones: [],
+      lastActiveZoneKey: null,
+      lastZoneDwellAtMs: null,
+      currentZoneDwellMs: 0,
+      lastRealZoneSeenAtMs: null,
       // Дебаунс смены зоны
       pendingZoneName: null,
       pendingZoneEnteredAtMs: null,
@@ -63,8 +66,10 @@ export class TelemetryProcessor {
       anomalyThresholdKg: Number(settings.anomalyThresholdKg) > 0 ? Number(settings.anomalyThresholdKg) : ANOMALY_THRESHOLD_KG,
       anomalyConfirmDeltaKg: Number(settings.anomalyConfirmDeltaKg) > 0 ? Number(settings.anomalyConfirmDeltaKg) : ANOMALY_CONFIRM_DELTA_KG,
       anomalyConfirmPackets: Number(settings.anomalyConfirmPackets) > 0 ? Number(settings.anomalyConfirmPackets) : ANOMALY_CONFIRM_PACKETS,
-      loadingZoneStickySeconds: Number(settings.loadingZoneStickySeconds) > 0 ? Number(settings.loadingZoneStickySeconds) : LOADING_ZONE_STICKY_SECONDS,
       zoneChangeDebounceMs: Number(settings.zoneChangeDebounceMs) > 0 ? Number(settings.zoneChangeDebounceMs) : DEFAULT_ZONE_DEBOUNCE_MS,
+      nullZoneConfirmMs: Number(settings.nullZoneConfirmSeconds) > 0
+        ? Number(settings.nullZoneConfirmSeconds) * 1000
+        : (Number(settings.nullZoneConfirmMs) > 0 ? Number(settings.nullZoneConfirmMs) : NULL_ZONE_CONFIRM_SECONDS * 1000),
       zoneChangeConfirmPackets: Number(settings.zoneChangeConfirmPackets) > 0 ? Number(settings.zoneChangeConfirmPackets) : ZONE_CHANGE_CONFIRM_PACKETS
     };
   }
@@ -79,16 +84,118 @@ export class TelemetryProcessor {
     return Number.isFinite(ts) ? ts : Date.now();
   }
 
-  _hasActiveStickyZone(state, thresholds, packetTimeMs) {
-    if (!state?.lastLoadingZone) return false;
-    if (!Number.isFinite(Number(state.lastLoadingZoneAtMs))) return false;
-    const ttlMs = Number(thresholds.loadingZoneStickySeconds || LOADING_ZONE_STICKY_SECONDS) * 1000;
-    const ageMs = packetTimeMs - Number(state.lastLoadingZoneAtMs);
-    return ageMs >= 0 && ageMs <= ttlMs;
+  _zoneVisitKey(zoneObject, zoneName) {
+    if (zoneObject?.id !== undefined && zoneObject?.id !== null) {
+      return `zone:${zoneObject.id}`;
+    }
+    return zoneName ? `name:${zoneName}` : null;
   }
 
-  _resolveStickyIngredient(state) {
-    return state?.lastLoadingZone?.ingredient || state?.lastLoadingZone?.name || null;
+  _getOrCreateZoneVisit(state, zoneKey, zoneObject, ingredientName, packetTimeMs) {
+    if (!Array.isArray(state.visitedZones)) {
+      state.visitedZones = [];
+    }
+
+    let visit = state.visitedZones.find((item) => item.key === zoneKey);
+    if (!visit) {
+      visit = {
+        key: zoneKey,
+        zoneId: zoneObject?.id ?? null,
+        name: zoneObject?.name || ingredientName || null,
+        ingredient: ingredientName || zoneObject?.ingredient || zoneObject?.name || null,
+        firstSeenAtMs: packetTimeMs,
+        lastSeenAtMs: packetTimeMs,
+        dwellMs: 0,
+        maxContinuousDwellMs: 0,
+        samples: 0
+      };
+      state.visitedZones.push(visit);
+    }
+
+    visit.lastSeenAtMs = packetTimeMs;
+    visit.name = visit.name || zoneObject?.name || ingredientName || null;
+    visit.ingredient = visit.ingredient || ingredientName || zoneObject?.ingredient || zoneObject?.name || null;
+    return visit;
+  }
+
+  _recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs) {
+    if (!Array.isArray(state.visitedZones)) {
+      state.visitedZones = [];
+    }
+
+    const activeZoneKey = this._zoneVisitKey(activeZone, activeZoneName);
+    const previousZoneKey = state.lastActiveZoneKey || null;
+    const previousTimeMs = Number(state.lastZoneDwellAtMs);
+    const elapsedMs = Number.isFinite(previousTimeMs)
+      ? Math.max(0, Math.min(30000, packetTimeMs - previousTimeMs))
+      : 0;
+
+    if (previousZoneKey && elapsedMs > 0) {
+      const previousVisit = state.visitedZones.find((item) => item.key === previousZoneKey);
+      if (previousVisit) {
+        previousVisit.dwellMs = Number(previousVisit.dwellMs || 0) + elapsedMs;
+        const continuousDwellMs = previousZoneKey === activeZoneKey
+          ? Number(state.currentZoneDwellMs || 0) + elapsedMs
+          : elapsedMs;
+        previousVisit.maxContinuousDwellMs = Math.max(
+          Number(previousVisit.maxContinuousDwellMs || 0),
+          continuousDwellMs
+        );
+      }
+    }
+
+    if (previousZoneKey && previousZoneKey === activeZoneKey) {
+      state.currentZoneDwellMs = Number(state.currentZoneDwellMs || 0) + elapsedMs;
+    } else {
+      state.currentZoneDwellMs = 0;
+    }
+
+    if (activeZoneKey) {
+      const activeVisit = this._getOrCreateZoneVisit(
+        state,
+        activeZoneKey,
+        activeZone,
+        activeIngredientName,
+        packetTimeMs
+      );
+      activeVisit.samples = Number(activeVisit.samples || 0) + 1;
+    }
+
+    state.lastActiveZoneKey = activeZoneKey;
+    state.lastZoneDwellAtMs = packetTimeMs;
+  }
+
+  _pickVisitedZoneIngredient(state) {
+    if (!Array.isArray(state?.visitedZones)) return null;
+
+    const candidates = state.visitedZones
+      .filter((visit) => Number(visit.dwellMs || 0) > 0 && (visit.ingredient || visit.name))
+      .sort((a, b) => {
+        const dwellDiff = Number(b.dwellMs || 0) - Number(a.dwellMs || 0);
+        if (dwellDiff !== 0) return dwellDiff;
+        return Number(b.lastSeenAtMs || 0) - Number(a.lastSeenAtMs || 0);
+      });
+
+    return candidates[0]?.ingredient || candidates[0]?.name || null;
+  }
+
+  _resetVisitedZones(state, packetTimeMs = Date.now()) {
+    state.visitedZones = [];
+    state.lastActiveZoneKey = null;
+    state.lastZoneDwellAtMs = packetTimeMs;
+    state.currentZoneDwellMs = 0;
+  }
+
+  _serializeZoneCandidates(state) {
+    if (!Array.isArray(state?.visitedZones)) return [];
+
+    return state.visitedZones.map((visit) => ({
+      name: visit.name,
+      ingredient: visit.ingredient,
+      dwellSeconds: Math.round(Number(visit.dwellMs || 0) / 100) / 10,
+      maxContinuousSeconds: Math.round(Number(visit.maxContinuousDwellMs || 0) / 100) / 10,
+      samples: Number(visit.samples || 0)
+    }));
   }
 
   _buildSkippedResult(deviceId) {
@@ -102,16 +209,8 @@ export class TelemetryProcessor {
     };
   }
 
-  _resolveSegmentIngredient(state, thresholds, options = {}) {
-    const directIngredient = state?.currentZone?.ingredient || state?.currentZone?.name;
-    if (directIngredient) return directIngredient;
-
-    const packetTimeMs = Number(options.packetTimeMs || Date.now());
-    if (this._hasActiveStickyZone(state, thresholds, packetTimeMs)) {
-      const stickyIngredient = this._resolveStickyIngredient(state);
-      if (stickyIngredient) return stickyIngredient;
-    }
-    return 'Unknown';
+  _resolveSegmentIngredient(state) {
+    return this._pickVisitedZoneIngredient(state) || 'Unknown';
   }
 
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
@@ -134,9 +233,7 @@ export class TelemetryProcessor {
       });
     }
 
-    const ingredientName = this._resolveSegmentIngredient(state, thresholds, {
-      packetTimeMs: options.packetTimeMs
-    });
+    const ingredientName = this._resolveSegmentIngredient(state);
     state.isMixing = true;
     state.lastIngredientName = ingredientName;
 
@@ -145,6 +242,8 @@ export class TelemetryProcessor {
       ingredientName,
       actualWeight: Math.round(delta)
     });
+
+    this._resetVisitedZones(state, Number(options.packetTimeMs || Date.now()));
 
     return true;
   }
@@ -225,6 +324,10 @@ export class TelemetryProcessor {
     const activeZone = detectZoneObject(lat, lon, zonesConfig);
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
+    this._recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs);
+    if (activeZoneName) {
+      state.lastRealZoneSeenAtMs = packetTimeMs;
+    }
 
     // БАННЕР: показываем сразу при первом детектировании (для отзывчивости UI)
     if (activeZoneName && activeZoneName !== state.lastZoneName) {
@@ -237,7 +340,31 @@ export class TelemetryProcessor {
 
     // ДЕБАУНС/ПОДТВЕРЖДЕНИЕ смены зоны (бизнес-логика)
     const confirmedZoneName = state.confirmedZoneName || null;
-    if (activeZoneName !== confirmedZoneName) {
+    const lastRealZoneSeenAtMs = Number(state.lastRealZoneSeenAtMs);
+    const shouldConfirmNullZone = !activeZoneName &&
+      confirmedZoneName !== null &&
+      Number.isFinite(lastRealZoneSeenAtMs) &&
+      packetTimeMs - lastRealZoneSeenAtMs >= thresholds.nullZoneConfirmMs;
+
+    if (shouldConfirmNullZone) {
+      this._confirmZoneChange(
+        state,
+        null,
+        null,
+        null,
+        currentWeight,
+        thresholds,
+        result,
+        { suppressLoading, packetTimeMs }
+      );
+      state.pendingZoneName = null;
+      state.pendingZoneEnteredAtMs = null;
+      state.pendingZoneCount = 0;
+    } else if (!activeZoneName) {
+      state.pendingZoneName = null;
+      state.pendingZoneEnteredAtMs = null;
+      state.pendingZoneCount = 0;
+    } else if (activeZoneName !== confirmedZoneName) {
       if (activeZoneName === state.pendingZoneName) {
         state.pendingZoneCount = Number(state.pendingZoneCount || 0) + 1;
         const timeInPending = packetTimeMs - Number(state.pendingZoneEnteredAtMs || packetTimeMs);
@@ -271,12 +398,6 @@ export class TelemetryProcessor {
       state.pendingZoneCount = 0;
     }
 
-    // Sticky-зона: обновляется на КАЖДОМ пакете с активной зоной, независимо от дебаунса
-    if (activeZoneName) {
-      state.lastLoadingZone = activeZone ? { ...activeZone, ingredient: activeIngredientName } : null;
-      state.lastLoadingZoneAtMs = packetTimeMs;
-    }
-
     // Базовый вес обновляется только в спокойном режиме
     if (!state.isMixing && !state.isUnloading) {
       if (currentWeight < state.zoneStartWeight) {
@@ -298,7 +419,7 @@ export class TelemetryProcessor {
     ) {
       state.isBatchStarted = true;
       state.isMixing = true;
-      state.lastIngredientName = this._resolveSegmentIngredient(state, thresholds, { packetTimeMs });
+      state.lastIngredientName = this._resolveSegmentIngredient(state);
 
       result.dbActions.push({
         type: 'START_BATCH',
@@ -393,7 +514,8 @@ export class TelemetryProcessor {
       peakWeight: state.peakWeight,
       lastIngredientName: state.lastIngredientName,
       isBatchStarted: state.isBatchStarted,
-      currentMode: this._getCurrentMode(state)
+      currentMode: this._getCurrentMode(state),
+      zoneCandidates: this._serializeZoneCandidates(state)
     };
 
     state.lastAcceptedWeight = currentWeight;
@@ -406,7 +528,8 @@ export class TelemetryProcessor {
       ...state,
       currentZone: state.confirmedZoneName || null,
       currentIngredient: state.currentZone?.ingredient || state.lastIngredientName || null,
-      currentMode: this._getCurrentMode(state)
+      currentMode: this._getCurrentMode(state),
+      zoneCandidates: this._serializeZoneCandidates(state)
     };
   }
 

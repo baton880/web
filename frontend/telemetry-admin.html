@@ -522,11 +522,6 @@
                                         <small class="form-text text-muted">Сколько подряд пакетов нужно, чтобы принять резкий переход как реальный.</small>
                                     </div>
                                     <div class="col-xl-4 col-md-6 mb-3">
-                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryLoadingZoneStickySeconds">Sticky после зоны, сек</label>
-                                        <input type="number" min="1" step="1" class="form-control" id="telemetryLoadingZoneStickySeconds" name="loadingZoneStickySeconds" required>
-                                        <small class="form-text text-muted">Как долго после выезда из зоны относить набор веса к последнему компоненту.</small>
-                                    </div>
-                                    <div class="col-xl-4 col-md-6 mb-3">
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneChangeDebounceMs">Дебаунс смены зоны, мс</label>
                                         <input type="number" min="1" step="1" class="form-control" id="telemetryZoneChangeDebounceMs" name="zoneChangeDebounceMs" required>
                                         <small class="form-text text-muted">Минимальная длительность нового положения перед сменой подтверждённой зоны.</small>
@@ -550,6 +545,11 @@
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryRtkTrackResetTime">Автоочистка треков</label>
                                         <input type="time" step="60" class="form-control" id="telemetryRtkTrackResetTime" name="rtkTrackResetTime" required>
                                         <small class="form-text text-muted">Фоновая очистка треков «Хозяин» и «Погрузчик» каждый день по расписанию (часовой пояс сервера).</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryNullZoneConfirmSeconds">Null-зона, сек</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryNullZoneConfirmSeconds" name="nullZoneConfirmSeconds" required>
+                                        <small class="form-text text-muted">Сколько секунд должно пройти с последнего попадания в зону хранения, чтобы подтвердить выезд вне зон.</small>
                                     </div>
                                 </div>
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
