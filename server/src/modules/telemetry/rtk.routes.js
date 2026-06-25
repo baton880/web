@@ -10,6 +10,7 @@ const MAX_RTK_HISTORY_LIMIT = 5000
 const DEFAULT_ZONE_SECONDS = 30
 const MAX_ZONE_SECONDS = 3600
 const MAX_ZONE_SCAN_ROWS = 5000
+const MAX_BULK_RTK_PACKETS = 1000
 
 function parseTimestamp(value) {
   if (!value) return new Date()
@@ -170,6 +171,26 @@ function validateRtkPacket(packet) {
   return null
 }
 
+function extractRtkPayloads(body) {
+  if (Array.isArray(body)) {
+    return body
+  }
+
+  if (Array.isArray(body?.packets)) {
+    return body.packets
+  }
+
+  if (Array.isArray(body?.items)) {
+    return body.items
+  }
+
+  if (Array.isArray(body?.data)) {
+    return body.data
+  }
+
+  return [body || {}]
+}
+
 function buildEmptyRtkResponse(deviceId = null) {
   return {
     id: null,
@@ -198,7 +219,9 @@ function buildEmptyRtkResponse(deviceId = null) {
     wifiProfile: null,
     rssiDbm: null,
     sdReady: null,
+    sdQueueLen: null,
     ramQueueLen: null,
+    queueLen: null,
     freeHeapBytes: null,
     zone: null
   }
@@ -271,7 +294,9 @@ function serializeRtkTelemetry(row, zones = []) {
     wifiProfile,
     rssiDbm,
     sdReady: parseBoolean(raw.sd_ready ?? raw.sdReady),
+    sdQueueLen: parseInteger(raw.sd_queue_len ?? raw.sdQueueLen),
     ramQueueLen: parseInteger(raw.ram_queue_len ?? raw.ramQueueLen),
+    queueLen: parseInteger(raw.queue_len ?? raw.queueLen),
     freeHeapBytes: parseInteger(raw.free_heap_bytes ?? raw.freeHeapBytes),
     zone: serializeZone(zone, row.lat, row.lon)
   }
@@ -327,18 +352,43 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
 
 router.post('/', async (req, res) => {
   try {
-    const packet = normalizeRtkPacket(req.body || {})
-    const validationError = validateRtkPacket(packet)
+    const payloads = extractRtkPayloads(req.body)
 
-    if (validationError) {
-      return res.status(400).json({ error: validationError })
+    if (!payloads.length) {
+      return res.status(400).json({ error: 'Empty RTK buffer' })
     }
 
-    const created = await prisma.rtkTelemetry.create({
-      data: packet
+    if (payloads.length > MAX_BULK_RTK_PACKETS) {
+      return res.status(413).json({
+        error: `RTK buffer is too large: max ${MAX_BULK_RTK_PACKETS} packets`
+      })
+    }
+
+    const packets = payloads.map((payload) => normalizeRtkPacket(payload || {}))
+    const invalidPacket = packets
+      .map((packet, index) => ({ index, error: validateRtkPacket(packet) }))
+      .find((item) => item.error)
+
+    if (invalidPacket) {
+      return res.status(400).json({
+        error: invalidPacket.error,
+        index: invalidPacket.index
+      })
+    }
+
+    if (packets.length === 1) {
+      const created = await prisma.rtkTelemetry.create({
+        data: packets[0]
+      })
+
+      return res.status(201).json({ status: 'ok', id: created.id, count: 1 })
+    }
+
+    const created = await prisma.rtkTelemetry.createMany({
+      data: packets
     })
 
-    res.status(201).json({ status: 'ok', id: created.id })
+    res.status(201).json({ status: 'ok', count: created.count })
   } catch (error) {
     console.error('[Ошибка POST /api/telemetry/rtk]:', error)
     res.status(500).json({ error: 'Internal server error' })

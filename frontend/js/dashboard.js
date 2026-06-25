@@ -13,6 +13,9 @@ const HISTORY_POLL_HIDDEN_MS = 30000;
 const ZONES_POLL_VISIBLE_MS = 20000;
 const ZONES_POLL_HIDDEN_MS = 60000;
 const OFFLINE_THRESHOLD_MS = 15000;
+const TRACK_MAX_GAP_MS = 45000;
+const TRACK_MAX_SPEED_MPS = 12;
+const TRACK_MIN_JUMP_DISTANCE_M = 30;
 const DEFAULT_MAP_TYPE = "yandex#satellite";
 const ZONE_BANNER_DISPLAY_MS = 4500;
 const DEFAULT_ZONE_RADIUS = 20;
@@ -28,8 +31,8 @@ const RTK_MARKER_IMAGE_URL = "img/rtk.svg";
 let map;
 let placemark;
 let rtkPlacemark = null;
-let routePolyline = null;
-let rtkRoutePolyline = null;
+let routePolylines = [];
+let rtkRoutePolylines = [];
 let latestTelemetry = null;
 let latestRtkTelemetry = null;
 let storageZones = [];
@@ -1389,20 +1392,29 @@ function renderZones() {
 }
 
 function clearRoutePolyline() {
-    if (!routePolyline) return;
+    if (!routePolylines.length) return;
 
-    map.geoObjects.remove(routePolyline);
-    routePolyline = null;
+    routePolylines.forEach((polyline) => map.geoObjects.remove(polyline));
+    routePolylines = [];
 }
 
 function clearRtkRoutePolyline() {
-    if (!rtkRoutePolyline) return;
+    if (!rtkRoutePolylines.length) return;
 
-    map.geoObjects.remove(rtkRoutePolyline);
-    rtkRoutePolyline = null;
+    rtkRoutePolylines.forEach((polyline) => map.geoObjects.remove(polyline));
+    rtkRoutePolylines = [];
 }
 
-function buildRouteCoords(historyRows) {
+function parseRouteTimestampMs(value) {
+    if (!value) {
+        return null;
+    }
+
+    const timestamp = new Date(value).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function buildRoutePoints(historyRows) {
     if (!Array.isArray(historyRows)) {
         return [];
     }
@@ -1411,66 +1423,147 @@ function buildRouteCoords(historyRows) {
         .filter((row) => hasValidCoordinates(row?.lat, row?.lon))
         .slice()
         .reverse()
-        .map((row) => [Number(row.lat), Number(row.lon)]);
+        .map((row) => ({
+            lat: Number(row.lat),
+            lon: Number(row.lon),
+            timestampMs: parseRouteTimestampMs(row.timestamp),
+        }));
+}
+
+function calculateDistanceMeters(pointA, pointB) {
+    const toRadians = (degrees) => degrees * Math.PI / 180;
+    const earthRadiusMeters = 6371000;
+    const lat1 = toRadians(pointA.lat);
+    const lat2 = toRadians(pointB.lat);
+    const deltaLat = toRadians(pointB.lat - pointA.lat);
+    const deltaLon = toRadians(pointB.lon - pointA.lon);
+    const sinLat = Math.sin(deltaLat / 2);
+    const sinLon = Math.sin(deltaLon / 2);
+    const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+
+    return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function shouldRenderDashedTrackGap(previousPoint, currentPoint) {
+    if (!previousPoint || !currentPoint) {
+        return false;
+    }
+
+    const distanceMeters = calculateDistanceMeters(previousPoint, currentPoint);
+    const hasTimestamps = previousPoint.timestampMs !== null && currentPoint.timestampMs !== null;
+
+    if (!hasTimestamps) {
+        return distanceMeters > TRACK_MIN_JUMP_DISTANCE_M * 4;
+    }
+
+    const gapMs = Math.max(0, currentPoint.timestampMs - previousPoint.timestampMs);
+    const gapSeconds = gapMs / 1000;
+    const speedMps = gapSeconds > 0 ? distanceMeters / gapSeconds : 0;
+
+    return (
+        speedMps > TRACK_MAX_SPEED_MPS ||
+        (gapMs > TRACK_MAX_GAP_MS && distanceMeters > TRACK_MIN_JUMP_DISTANCE_M)
+    );
+}
+
+function buildTrackSegments(historyRows) {
+    const points = buildRoutePoints(historyRows);
+    const segments = [];
+    let currentSegment = [];
+
+    points.forEach((point) => {
+        const previousPoint = currentSegment[currentSegment.length - 1];
+
+        if (shouldRenderDashedTrackGap(previousPoint, point)) {
+            if (currentSegment.length >= 2) {
+                segments.push({
+                    coords: currentSegment.map((item) => [item.lat, item.lon]),
+                    dashed: false,
+                });
+            }
+
+            segments.push({
+                coords: [
+                    [previousPoint.lat, previousPoint.lon],
+                    [point.lat, point.lon],
+                ],
+                dashed: true,
+            });
+
+            currentSegment = [point];
+            return;
+        }
+
+        currentSegment.push(point);
+    });
+
+    if (currentSegment.length >= 2) {
+        segments.push({
+            coords: currentSegment.map((item) => [item.lat, item.lon]),
+            dashed: false,
+        });
+    }
+
+    return segments;
+}
+
+function createTrackPolylines(segments, options) {
+    return segments.map((segment) => {
+        const polyline = new ymaps.Polyline(segment.coords, {
+            balloonContent: options.balloonContent,
+        }, {
+            strokeColor: options.strokeColor,
+            strokeWidth: options.strokeWidth,
+            strokeOpacity: options.strokeOpacity,
+            ...(segment.dashed ? { strokeStyle: "dash" } : {}),
+        });
+
+        map.geoObjects.add(polyline);
+        return polyline;
+    });
 }
 
 function renderRoute(historyRows) {
     if (!map) return;
 
-    const routeCoords = buildRouteCoords(historyRows);
+    const routeSegments = buildTrackSegments(historyRows);
 
-    if (routeCoords.length < 2) {
+    if (!routeSegments.length) {
         clearRoutePolyline();
         return;
     }
 
-    if (routePolyline) {
-        routePolyline.geometry.setCoordinates(routeCoords);
-        routePolyline.options.set("strokeColor", HOST_TRACK_COLOR);
-        return;
-    }
-
-    routePolyline = new ymaps.Polyline(routeCoords, {
+    clearRoutePolyline();
+    routePolylines = createTrackPolylines(routeSegments, {
         balloonContent: "Маршрут хозяина",
-    }, {
         strokeColor: HOST_TRACK_COLOR,
         strokeWidth: 4,
         strokeOpacity: 0.75,
     });
-
-    map.geoObjects.add(routePolyline);
 }
 
 function renderRtkRoute(historyRows) {
     if (!map) return;
 
-    const routeCoords = buildRouteCoords(historyRows);
+    const routeSegments = buildTrackSegments(historyRows);
     const latestRoutePoint = Array.isArray(historyRows)
         ? historyRows.find((row) => hasValidCoordinates(row?.lat, row?.lon))
         : null;
 
-    if (routeCoords.length < 2) {
+    if (!routeSegments.length) {
         clearRtkRoutePolyline();
         return;
     }
 
     const routeColor = getRtkFixColor(latestRtkTelemetry || latestRoutePoint, true);
 
-    if (rtkRoutePolyline) {
-        rtkRoutePolyline.geometry.setCoordinates(routeCoords);
-        rtkRoutePolyline.options.set("strokeColor", routeColor);
-        return;
-    }
-
-    rtkRoutePolyline = new ymaps.Polyline(routeCoords, {
+    clearRtkRoutePolyline();
+    rtkRoutePolylines = createTrackPolylines(routeSegments, {
         balloonContent: "Маршрут погрузчика",
-    }, {
         strokeColor: routeColor,
         strokeWidth: 4,
         strokeOpacity: 0.8,
     });
-
-    map.geoObjects.add(rtkRoutePolyline);
 }
 
 function getRetainableTelemetry(track, snapshotRows = []) {

@@ -182,6 +182,22 @@ function formatExtra(row) {
     return parts.join(", ");
 }
 
+function formatQueueLen(row) {
+    const total = row?.queueLen;
+    const sd = row?.sdQueueLen;
+    const ram = row?.ramQueueLen;
+
+    if (total != null) {
+        return `${total} (SD ${sd ?? 0}/RAM ${ram ?? 0})`;
+    }
+
+    if (sd != null || ram != null) {
+        return `${Number(sd || 0) + Number(ram || 0)} (SD ${sd ?? 0}/RAM ${ram ?? 0})`;
+    }
+
+    return "--";
+}
+
 async function readErrorMessage(response) {
     const contentType = response.headers.get("content-type") || "";
 
@@ -496,7 +512,7 @@ function renderRtkSummary(latest, missing) {
     setText("rtkVacc", latest?.vacc != null ? `${formatShortNumber(latest.vacc, 3)} м` : "--");
     setText("rtkWifiProfile", latest?.wifiProfile || "--");
     setText("rtkRssi", latest?.rssiDbm != null ? `${latest.rssiDbm} dBm` : "--");
-    setText("rtkQueue", latest?.ramQueueLen != null ? String(latest.ramQueueLen) : "--");
+    setText("rtkQueue", formatQueueLen(latest));
 }
 
 function renderRtkTable(rows, missing) {
@@ -528,7 +544,7 @@ function renderRtkTable(rows, missing) {
             <td>${row.corrAgeS != null ? `${formatShortNumber(row.corrAgeS, 1)} c` : "--"}</td>
             <td>${row.wifiProfile || "--"}</td>
             <td>${row.rssiDbm != null ? `${row.rssiDbm} dBm` : "--"}</td>
-            <td>${row.ramQueueLen != null ? row.ramQueueLen : "--"}</td>
+            <td>${formatQueueLen(row)}</td>
             <td>${row.zone?.name || "--"}</td>
         </tr>
     `).join("");
