@@ -146,7 +146,7 @@ function getZoneTypeColor(zone, isSelected) {
         : { fillColor: "rgba(47,159,85,0.36)", strokeColor: "#18B35B" };
 }
 
-function getMarkerLayout(color, imageUrl) {
+function getImageMarkerLayout(color, imageUrl) {
     const safeColor = /^#[0-9a-f]{6}$/i.test(color) ? color : OFFLINE_MARKER_COLOR;
     const safeImageUrl = String(imageUrl || "").replace(/"/g, "&quot;");
 
@@ -158,6 +158,21 @@ function getMarkerLayout(color, imageUrl) {
                     <img src="${safeImageUrl}" alt="" style="display:block;width:22px;height:22px;object-fit:contain;">
                 </div>
             </div>
+        </div>
+    `);
+}
+
+function getNavigationMarkerLayout(color, heading) {
+    const safeColor = /^#[0-9a-f]{6}$/i.test(color) ? color : RTK_FIX_COLOR;
+    const rotation = ((Number(heading) % 360) + 360) % 360;
+
+    return ymaps.templateLayoutFactory.createClass(`
+        <div style="position:relative;left:-27px;top:-27px;width:54px;height:54px;filter:drop-shadow(0 3px 5px rgba(0,0,0,0.35));">
+            <svg width="54" height="54" viewBox="0 0 54 54" style="display:block;transform:rotate(${rotation}deg);transform-origin:27px 27px;">
+                <polygon points="27,2 27,37 4,50" fill="#0b5f9f"></polygon>
+                <polygon points="27,2 50,50 27,37" fill="${safeColor}"></polygon>
+                <polyline points="27,2 50,50 27,37 4,50 27,2" fill="none" stroke="rgba(255,255,255,0.72)" stroke-width="1.25" stroke-linejoin="round"></polyline>
+            </svg>
         </div>
     `);
 }
@@ -176,6 +191,16 @@ function getRtkFixColor(data, isOnline = true) {
     return isRtkFixed(data) ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR;
 }
 
+function getRtkHeading(data) {
+    if (data?.relPosValid === false || data?.relPosHeadingValid === false) {
+        return null;
+    }
+
+    const heading = data?.heading ?? data?.course;
+    const parsedHeading = Number(heading);
+    return Number.isFinite(parsedHeading) ? parsedHeading : null;
+}
+
 function getMarkerOptions(kind, isOnline, data = null) {
     const color = !isOnline
         ? OFFLINE_MARKER_COLOR
@@ -183,12 +208,15 @@ function getMarkerOptions(kind, isOnline, data = null) {
             ? getRtkFixColor(data, isOnline)
             : HOST_TRACK_COLOR;
     const imageUrl = kind === "rtk" ? RTK_MARKER_IMAGE_URL : HOST_MARKER_IMAGE_URL;
+    const heading = kind === "rtk" ? getRtkHeading(data) : null;
 
     return {
-        iconLayout: getMarkerLayout(color, imageUrl),
+        iconLayout: heading == null
+            ? getImageMarkerLayout(color, imageUrl)
+            : getNavigationMarkerLayout(color, heading),
         iconShape: {
             type: "Rectangle",
-            coordinates: [[-22, -22], [22, 22]],
+            coordinates: heading == null ? [[-22, -22], [22, 22]] : [[-27, -27], [27, 27]],
         },
     };
 }
@@ -1695,11 +1723,13 @@ function updateRtkMarker(data) {
     const qualityLabel = getRtkQualityLabel(data);
     const zoneName = data?.zone?.name || "Вне зоны";
     const packetState = isFreshTelemetry(data?.timestamp) ? "свежий" : "устаревший";
+    const heading = getRtkHeading(data);
     const balloonContent = `
         <strong>Погрузчик</strong><br>
         Устройство: ${escapeHtml(data.deviceId || "--")}<br>
         Пакет: ${packetState}<br>
         Quality: ${escapeHtml(qualityLabel)}<br>
+        Heading: ${heading == null ? "--" : `${heading.toFixed(1)}°`}<br>
         Координаты: ${coords[0].toFixed(6)}, ${coords[1].toFixed(6)}<br>
         Зона: ${escapeHtml(zoneName)}
     `;

@@ -482,7 +482,7 @@ function setVehicleStatus(isOnline) {
     element.classList.toggle("offline", !isOnline);
 }
 
-function getMarkerLayout(color, imageUrl) {
+function getImageMarkerLayout(color, imageUrl) {
     const safeColor = /^#[0-9a-f]{6}$/i.test(color) ? color : OFFLINE_MARKER_COLOR;
     const safeImageUrl = String(imageUrl || "").replace(/"/g, "&quot;");
 
@@ -498,6 +498,21 @@ function getMarkerLayout(color, imageUrl) {
     `);
 }
 
+function getNavigationMarkerLayout(color, heading) {
+    const safeColor = /^#[0-9a-f]{6}$/i.test(color) ? color : RTK_FIX_COLOR;
+    const rotation = ((Number(heading) % 360) + 360) % 360;
+
+    return ymaps.templateLayoutFactory.createClass(`
+        <div style="position:relative;left:-27px;top:-27px;width:54px;height:54px;filter:drop-shadow(0 3px 5px rgba(0,0,0,0.35));">
+            <svg width="54" height="54" viewBox="0 0 54 54" style="display:block;transform:rotate(${rotation}deg);transform-origin:27px 27px;">
+                <polygon points="27,2 27,37 4,50" fill="#0b5f9f"></polygon>
+                <polygon points="27,2 50,50 27,37" fill="${safeColor}"></polygon>
+                <polyline points="27,2 50,50 27,37 4,50 27,2" fill="none" stroke="rgba(255,255,255,0.72)" stroke-width="1.25" stroke-linejoin="round"></polyline>
+            </svg>
+        </div>
+    `);
+}
+
 function getRtkFixColor(data, isOnline = true) {
     if (!isOnline) {
         return OFFLINE_MARKER_COLOR;
@@ -506,17 +521,30 @@ function getRtkFixColor(data, isOnline = true) {
     return isRtkFixed(data) ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR;
 }
 
+function getRtkHeading(data) {
+    if (data?.relPosValid === false || data?.relPosHeadingValid === false) {
+        return null;
+    }
+
+    const heading = data?.heading ?? data?.course;
+    const parsedHeading = Number(heading);
+    return Number.isFinite(parsedHeading) ? parsedHeading : null;
+}
+
 function getMarkerOptions(kind, isOnline, data = null) {
     const color = kind === "rtk"
         ? getRtkFixColor(data, isOnline)
         : HOST_TRACK_COLOR;
     const imageUrl = kind === "rtk" ? RTK_MARKER_IMAGE_URL : HOST_MARKER_IMAGE_URL;
+    const heading = kind === "rtk" ? getRtkHeading(data) : null;
 
     return {
-        iconLayout: getMarkerLayout(color, imageUrl),
+        iconLayout: heading == null
+            ? getImageMarkerLayout(color, imageUrl)
+            : getNavigationMarkerLayout(color, heading),
         iconShape: {
             type: "Rectangle",
-            coordinates: [[-22, -22], [22, 22]],
+            coordinates: heading == null ? [[-22, -22], [22, 22]] : [[-27, -27], [27, 27]],
         },
     };
 }
@@ -1256,6 +1284,7 @@ function updateRtkMapPosition(data) {
     const zoneName = getCurrentZoneName(coords[0], coords[1]) || data?.zone?.name || "Вне зоны";
     const isOnline = isPacketOnline(data?.timestamp);
     const packetState = isOnline ? "Свежий пакет" : "Нет свежих пакетов";
+    const heading = getRtkHeading(data);
     const balloonContent = buildMapBalloonContent({
         title: "Погрузчик",
         accentColor: getRtkFixColor(data, isOnline),
@@ -1263,6 +1292,7 @@ function updateRtkMapPosition(data) {
             { label: "Устройство", value: data?.deviceId || "--" },
             { label: "Статус", value: packetState },
             { label: "Fix", value: qualityLabel },
+            { label: "Heading", value: heading == null ? "--" : `${heading.toFixed(1)}°` },
             { label: "Координаты", value: `${coords[0].toFixed(6)}, ${coords[1].toFixed(6)}` },
             { label: "Зона", value: zoneName },
         ],
@@ -1427,6 +1457,7 @@ function buildRoutePoints(historyRows) {
             lat: Number(row.lat),
             lon: Number(row.lon),
             timestampMs: parseRouteTimestampMs(row.timestamp),
+            source: row,
         }));
 }
 
@@ -1507,12 +1538,46 @@ function buildTrackSegments(historyRows) {
     return segments;
 }
 
+function hasRtkHeadingData(row) {
+    if (!row || row.relPosValid === false || row.relPosHeadingValid === false) {
+        return false;
+    }
+
+    const heading = row.heading ?? row.course;
+    return Number.isFinite(Number(heading));
+}
+
+function buildRtkTrackSegments(historyRows) {
+    const points = buildRoutePoints(historyRows).map((point) => ({
+        ...point,
+        hasHeading: hasRtkHeadingData(point.source),
+    }));
+    const segments = [];
+
+    for (let index = 1; index < points.length; index += 1) {
+        const previousPoint = points[index - 1];
+        const currentPoint = points[index];
+        const currentHasHeading = currentPoint.hasHeading;
+
+        segments.push({
+            coords: [
+                [previousPoint.lat, previousPoint.lon],
+                [currentPoint.lat, currentPoint.lon],
+            ],
+            dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
+            strokeColor: currentHasHeading ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
+        });
+    }
+
+    return segments;
+}
+
 function createTrackPolylines(segments, options) {
     return segments.map((segment) => {
         const polyline = new ymaps.Polyline(segment.coords, {
             balloonContent: options.balloonContent,
         }, {
-            strokeColor: options.strokeColor,
+            strokeColor: segment.strokeColor || options.strokeColor,
             strokeWidth: options.strokeWidth,
             strokeOpacity: options.strokeOpacity,
             ...(segment.dashed ? { strokeStyle: "dash" } : {}),
@@ -1545,22 +1610,17 @@ function renderRoute(historyRows) {
 function renderRtkRoute(historyRows) {
     if (!map) return;
 
-    const routeSegments = buildTrackSegments(historyRows);
-    const latestRoutePoint = Array.isArray(historyRows)
-        ? historyRows.find((row) => hasValidCoordinates(row?.lat, row?.lon))
-        : null;
+    const routeSegments = buildRtkTrackSegments(historyRows);
 
     if (!routeSegments.length) {
         clearRtkRoutePolyline();
         return;
     }
 
-    const routeColor = getRtkFixColor(latestRtkTelemetry || latestRoutePoint, true);
-
     clearRtkRoutePolyline();
     rtkRoutePolylines = createTrackPolylines(routeSegments, {
         balloonContent: "Маршрут погрузчика",
-        strokeColor: routeColor,
+        strokeColor: RTK_GPS_FIX_COLOR,
         strokeWidth: 4,
         strokeOpacity: 0.8,
     });

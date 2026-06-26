@@ -19,7 +19,11 @@ router.put('/', authenticate, requireAdmin, async (req, res) => {
     const settings = await upsertTelemetrySettings(req.body || {})
     res.json({ status: 'ok', settings })
   } catch (error) {
-    if (error.message?.includes('должен быть положительным') || error.message?.includes('формате HH:mm')) {
+    if (
+      error.message?.includes('должен быть положительным') ||
+      error.message?.includes('формате HH:mm') ||
+      error.message?.includes('rtkHeadingOffsetDeg')
+    ) {
       return res.status(400).json({ error: error.message })
     }
 

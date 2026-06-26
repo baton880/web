@@ -222,11 +222,13 @@
                                         <thead>
                                             <tr>
                                                 <th>ID</th>
+                                                <th>deviceId</th>
                                                 <th>timestamp</th>
                                                 <th>lat</th>
                                                 <th>lon</th>
                                                 <th>gpsValid</th>
                                                 <th>gpsSatellites</th>
+                                                <th>speedKmh</th>
                                                 <th>weight</th>
                                                 <th>weightValid</th>
                                                 <th>gpsQuality</th>
@@ -239,7 +241,7 @@
                                         </thead>
                                         <tbody id="hostTelemetryTable">
                                             <tr>
-                                                <td colspan="15" class="telemetry-empty-state">Загрузка данных...</td>
+                                                <td colspan="16" class="telemetry-empty-state">Загрузка данных...</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -367,8 +369,16 @@
                                         <div class="font-weight-bold text-gray-800" id="rtkHacc">--</div>
                                     </div>
                                     <div class="col-lg-4 col-md-6 mb-3">
-                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">VACC</div>
-                                        <div class="font-weight-bold text-gray-800" id="rtkVacc">--</div>
+                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Тип пакета</div>
+                                        <div class="font-weight-bold text-gray-800" id="rtkPacketType">--</div>
+                                    </div>
+                                    <div class="col-lg-4 col-md-6 mb-3 mb-lg-0">
+                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Heading</div>
+                                        <div class="font-weight-bold text-gray-800" id="rtkHeading">--</div>
+                                    </div>
+                                    <div class="col-lg-4 col-md-6 mb-3 mb-lg-0">
+                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Baseline</div>
+                                        <div class="font-weight-bold text-gray-800" id="rtkBaseline">--</div>
                                     </div>
                                     <div class="col-lg-4 col-md-6 mb-3 mb-lg-0">
                                         <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">Возраст поправок</div>
@@ -409,6 +419,7 @@
                                         <thead>
                                             <tr>
                                                 <th>Время</th>
+                                                <th>Тип</th>
                                                 <th>Устройство</th>
                                                 <th>Lat</th>
                                                 <th>Lon</th>
@@ -416,8 +427,16 @@
                                                 <th>Quality</th>
                                                 <th>Quality flag</th>
                                                 <th>Спутники</th>
+                                                <th>Speed</th>
                                                 <th>HACC</th>
-                                                <th>VACC</th>
+                                                <th>Heading</th>
+                                                <th>Heading acc</th>
+                                                <th>Baseline</th>
+                                                <th>Baseline acc</th>
+                                                <th>Rel valid</th>
+                                                <th>Head valid</th>
+                                                <th>Carrier</th>
+                                                <th>Flags</th>
                                                 <th>Corr age</th>
                                                 <th>Wi-Fi профиль</th>
                                                 <th>RSSI</th>
@@ -427,7 +446,7 @@
                                         </thead>
                                         <tbody id="rtkTelemetryTable">
                                             <tr>
-                                                <td colspan="15" class="telemetry-empty-state">Загрузка данных погрузчика...</td>
+                                                <td colspan="24" class="telemetry-empty-state">Загрузка данных погрузчика...</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -545,6 +564,11 @@
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryRtkTrackResetTime">Автоочистка треков</label>
                                         <input type="time" step="60" class="form-control" id="telemetryRtkTrackResetTime" name="rtkTrackResetTime" required>
                                         <small class="form-text text-muted">Фоновая очистка треков «Хозяин» и «Погрузчик» каждый день по расписанию (часовой пояс сервера).</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryRtkHeadingOffsetDeg">RTK heading offset, °</label>
+                                        <input type="number" min="-360" max="360" step="0.1" class="form-control" id="telemetryRtkHeadingOffsetDeg" name="rtkHeadingOffsetDeg" required>
+                                        <small class="form-text text-muted">Поправка направления погрузчика: например 90 или -90, если baseline антенн смотрит вбок.</small>
                                     </div>
                                     <div class="col-xl-4 col-md-6 mb-3">
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryNullZoneConfirmSeconds">Null-зона, сек</label>
@@ -692,7 +716,7 @@
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
-    <script src="js/telemetry.js?v=20260507b"></script>
+    <script src="js/telemetry.js?v=20260627c"></script>
     <script src="js/admin-users.js?v=20260501a"></script>
 
 </body>

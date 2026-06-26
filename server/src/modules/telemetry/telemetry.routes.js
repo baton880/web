@@ -57,6 +57,12 @@ function parseLimit(rawValue, fallback, maxLimit = MAX_TELEMETRY_HISTORY_LIMIT) 
   return parsed
 }
 
+function parseOptionalNumber(value) {
+  if (value === undefined || value === null || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function normalizeTelemetryPacket(packet) {
   return {
     deviceId: packet.deviceId || packet.device_id || 'host_01',
@@ -65,6 +71,7 @@ function normalizeTelemetryPacket(packet) {
     lon: Number(packet.lon || 0),
     gpsValid: parseBoolean(packet.gpsValid ?? packet.gps_valid),
     gpsSatellites: Number(packet.gpsSatellites ?? packet.gps_satellites ?? 0),
+    speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
     weightValid: parseBoolean(packet.weightValid ?? packet.weight_valid),
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
@@ -80,7 +87,7 @@ function normalizeTelemetryPacket(packet) {
 function buildEmptyLatestResponse(deviceId = null) {
   return {
     id: null, deviceId, timestamp: null, lat: null, lon: null,
-    weight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
+    speedKmh: null, weight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
     gpsQuality: 0, wifiClients: null, cpuTempC: null, lteRssiDbm: null,
     lteAccessTech: null, eventsReaderOk: false, banner: null,
     mode: 'Ожидание',
@@ -247,6 +254,7 @@ router.post('/', async (req, res) => {
           lon: packet.lon,
           gpsValid: packet.gpsValid,
           gpsSatellites: packet.gpsSatellites,
+          speedKmh: packet.speedKmh,
           weight: packet.weight,
           weightValid: packet.weightValid,
           gpsQuality: packet.gpsQuality,
@@ -709,7 +717,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
       orderBy: { timestamp: 'desc' }, take: limit,
-      select: { id: true, timestamp: true, lat: true, lon: true, weight: true, weightValid: true, gpsValid: true, deviceId: true }
+      select: { id: true, timestamp: true, lat: true, lon: true, speedKmh: true, weight: true, weightValid: true, gpsValid: true, deviceId: true }
     });
     res.json(data);
   } catch (error) {

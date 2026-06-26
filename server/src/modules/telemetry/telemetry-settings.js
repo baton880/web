@@ -23,7 +23,8 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   zoneChangeConfirmPackets: 2,
   deviationPercentThreshold: 10,
   deviationMinKgThreshold: 10,
-  rtkTrackResetTime: '03:00'
+  rtkTrackResetTime: '03:00',
+  rtkHeadingOffsetDeg: 0
 }
 
 function toPositiveInteger(value, fallback) {
@@ -46,6 +47,15 @@ function normalizeTime(value, fallback) {
   }
 
   return normalized
+}
+
+function normalizeHeadingOffset(value, fallback) {
+  const parsed = Number(value)
+  if (!Number.isFinite(parsed) || parsed < -360 || parsed > 360) {
+    return fallback
+  }
+
+  return parsed
 }
 
 export function coerceTelemetrySettings(row = {}) {
@@ -71,6 +81,7 @@ export function coerceTelemetrySettings(row = {}) {
     deviationPercentThreshold: toPositiveInteger(row.deviationPercentThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationPercentThreshold),
     deviationMinKgThreshold: toPositiveInteger(row.deviationMinKgThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationMinKgThreshold),
     rtkTrackResetTime: normalizeTime(row.rtkTrackResetTime, DEFAULT_TELEMETRY_SETTINGS.rtkTrackResetTime),
+    rtkHeadingOffsetDeg: normalizeHeadingOffset(row.rtkHeadingOffsetDeg, DEFAULT_TELEMETRY_SETTINGS.rtkHeadingOffsetDeg),
     createdAt: row.createdAt || null,
     updatedAt: row.updatedAt || null
   }
@@ -145,6 +156,21 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     }
 
     data.rtkTrackResetTime = normalizedTime
+  }
+
+  if (payload.rtkHeadingOffsetDeg === undefined) {
+    if (!partial) {
+      data.rtkHeadingOffsetDeg = DEFAULT_TELEMETRY_SETTINGS.rtkHeadingOffsetDeg
+    }
+  } else {
+    const parsedOffset = Number(payload.rtkHeadingOffsetDeg)
+    if (!Number.isFinite(parsedOffset) || parsedOffset < -360 || parsedOffset > 360) {
+      return {
+        error: 'rtkHeadingOffsetDeg должен быть числом от -360 до 360'
+      }
+    }
+
+    data.rtkHeadingOffsetDeg = parsedOffset
   }
 
   return { data }

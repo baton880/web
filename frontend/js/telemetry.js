@@ -108,6 +108,52 @@ function formatShortNumber(value, digits = 1) {
     return Number.isNaN(number) ? "--" : number.toFixed(digits);
 }
 
+function escapeHtml(value) {
+    return String(value ?? "")
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;")
+        .replace(/'/g, "&#39;");
+}
+
+function formatPacketType(value) {
+    const normalized = String(value || "").trim().toLowerCase();
+    if (normalized === "moving_base") return "PVT+RELPOSNED";
+    if (normalized === "pvt") return "PVT";
+    return value ? String(value) : "--";
+}
+
+function formatHeading(row) {
+    const heading = row?.heading ?? row?.course;
+    if (heading === null || heading === undefined || heading === "") {
+        return "--";
+    }
+
+    const accuracy = row?.headingAccDeg;
+    const accuracyText = accuracy != null ? ` ±${formatShortNumber(accuracy, 2)}°` : "";
+    const validText = row?.relPosHeadingValid === false ? " invalid" : "";
+    return `${formatShortNumber(heading, 2)}°${accuracyText}${validText}`;
+}
+
+function formatBaseline(row) {
+    const baseline = row?.baselineM;
+    if (baseline === null || baseline === undefined || baseline === "") {
+        return "--";
+    }
+
+    const accuracy = row?.baselineAccM;
+    const accuracyText = accuracy != null ? ` ±${formatShortNumber(accuracy, 3)} м` : "";
+    const carrierText = row?.relPosCarrierSolution ? ` ${row.relPosCarrierSolution}` : "";
+    const validText = row?.relPosValid === false ? " invalid" : "";
+    return `${formatShortNumber(baseline, 3)} м${accuracyText}${carrierText}${validText}`;
+}
+
+function formatSpeedKmh(value) {
+    const formatted = formatShortNumber(value, 2);
+    return formatted === "--" ? "--" : `${formatted} км/ч`;
+}
+
 function formatBytes(value) {
     if (value === null || value === undefined || value === "") return "--";
 
@@ -322,6 +368,11 @@ function fillTelemetrySettingsForm(settings) {
     if (resetTimeInput) {
         resetTimeInput.value = settings.rtkTrackResetTime || "03:00";
     }
+
+    const headingOffsetInput = form.elements.namedItem("rtkHeadingOffsetDeg");
+    if (headingOffsetInput) {
+        headingOffsetInput.value = settings.rtkHeadingOffsetDeg != null ? String(settings.rtkHeadingOffsetDeg) : "0";
+    }
 }
 
 async function loadTelemetrySettings() {
@@ -372,6 +423,15 @@ async function saveTelemetrySettings(event) {
 
     payload.rtkTrackResetTime = resetTime;
 
+    const headingOffsetRaw = String(formData.get("rtkHeadingOffsetDeg") || "").trim();
+    const headingOffset = Number(headingOffsetRaw);
+    if (!headingOffsetRaw || !Number.isFinite(headingOffset) || headingOffset < -360 || headingOffset > 360) {
+        window.AppAuth?.showAlert?.("RTK heading offset должен быть числом от -360 до 360", "warning");
+        return;
+    }
+
+    payload.rtkHeadingOffsetDeg = headingOffset;
+
     try {
         setTelemetrySettingsButtonState(true);
         const response = await fetch(endpoints.settings.current, {
@@ -419,18 +479,20 @@ function renderHostTable(rows) {
     if (!tbody) return;
 
     if (!Array.isArray(rows) || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="14" class="telemetry-empty-state">По хозяину пока нет записей.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="16" class="telemetry-empty-state">По хозяину пока нет записей.</td></tr>';
         return;
     }
 
     tbody.innerHTML = rows.map((row) => `
         <tr>
             <td>${row.id ?? "--"}</td>
+            <td>${row.deviceId || "--"}</td>
             <td>${formatDateTime(row.timestamp)}</td>
             <td>${formatNumber(row.lat)}</td>
             <td>${formatNumber(row.lon)}</td>
             <td>${boolBadge(row.gpsValid)}</td>
             <td>${row.gpsSatellites ?? "--"}</td>
+            <td>${formatSpeedKmh(row.speedKmh)}</td>
             <td>${row.weight != null ? formatShortNumber(row.weight, 1) : "--"}</td>
             <td>${boolBadge(row.weightValid)}</td>
             <td>${row.gpsQuality ?? "--"}</td>
@@ -509,7 +571,9 @@ function renderRtkSummary(latest, missing) {
     setText("rtkZone", latest?.zone?.name || "--");
     setText("rtkSatellites", latest?.satellites != null ? String(latest.satellites) : "--");
     setText("rtkHacc", latest?.hacc != null ? `${formatShortNumber(latest.hacc, 3)} м` : "--");
-    setText("rtkVacc", latest?.vacc != null ? `${formatShortNumber(latest.vacc, 3)} м` : "--");
+    setText("rtkPacketType", formatPacketType(latest?.packetType));
+    setText("rtkHeading", formatHeading(latest));
+    setText("rtkBaseline", formatBaseline(latest));
     setText("rtkWifiProfile", latest?.wifiProfile || "--");
     setText("rtkRssi", latest?.rssiDbm != null ? `${latest.rssiDbm} dBm` : "--");
     setText("rtkQueue", formatQueueLen(latest));
@@ -520,18 +584,19 @@ function renderRtkTable(rows, missing) {
     if (!tbody) return;
 
     if (missing) {
-        tbody.innerHTML = '<tr><td colspan="15" class="telemetry-empty-state">Данные погрузчика недоступны.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="24" class="telemetry-empty-state">Данные погрузчика недоступны.</td></tr>';
         return;
     }
 
     if (!Array.isArray(rows) || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="15" class="telemetry-empty-state">По погрузчику пока нет записей.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="24" class="telemetry-empty-state">По погрузчику пока нет записей.</td></tr>';
         return;
     }
 
     tbody.innerHTML = rows.map((row) => `
         <tr>
             <td>${formatDateTime(row.timestamp)}</td>
+            <td>${escapeHtml(formatPacketType(row.packetType))}</td>
             <td>${row.deviceId || "--"}</td>
             <td>${formatNumber(row.lat)}</td>
             <td>${formatNumber(row.lon)}</td>
@@ -539,8 +604,16 @@ function renderRtkTable(rows, missing) {
             <td>${row.quality != null ? row.quality : "--"}</td>
             <td>${qualityBadge(row.qualityFlag || row.qualityLabel || row.rtkQuality, row.quality)}</td>
             <td>${row.satellites != null ? row.satellites : "--"}</td>
+            <td>${formatSpeedKmh(row.speedKmh ?? row.speed)}</td>
             <td>${row.hacc != null ? `${formatShortNumber(row.hacc, 3)} м` : "--"}</td>
-            <td>${row.vacc != null ? `${formatShortNumber(row.vacc, 3)} м` : "--"}</td>
+            <td>${row.heading != null ? `${formatShortNumber(row.heading, 2)}°` : "--"}</td>
+            <td>${row.headingAccDeg != null ? `${formatShortNumber(row.headingAccDeg, 2)}°` : "--"}</td>
+            <td>${row.baselineM != null ? `${formatShortNumber(row.baselineM, 3)} м` : "--"}</td>
+            <td>${row.baselineAccM != null ? `${formatShortNumber(row.baselineAccM, 3)} м` : "--"}</td>
+            <td>${row.relPosValid == null ? "--" : boolBadge(row.relPosValid)}</td>
+            <td>${row.relPosHeadingValid == null ? "--" : boolBadge(row.relPosHeadingValid)}</td>
+            <td>${escapeHtml(row.relPosCarrierSolution || "--")}</td>
+            <td>${row.relPosFlags ?? "--"}</td>
             <td>${row.corrAgeS != null ? `${formatShortNumber(row.corrAgeS, 1)} c` : "--"}</td>
             <td>${row.wifiProfile || "--"}</td>
             <td>${row.rssiDbm != null ? `${row.rssiDbm} dBm` : "--"}</td>

@@ -15,6 +15,7 @@ model Telemetry {
   lon            Float
   gpsValid       Boolean  @default(false)
   gpsSatellites  Int      @default(0)
+  speedKmh       Float?
   weight         Float
   weightValid    Boolean  @default(false)
   gpsQuality     Int      @default(0)
@@ -115,6 +116,7 @@ model TelemetrySettings {
   deviationPercentThreshold Int   @default(10)
   deviationMinKgThreshold   Int   @default(10)
   rtkTrackResetTime         String @default("03:00")
+  rtkHeadingOffsetDeg       Float  @default(0)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
