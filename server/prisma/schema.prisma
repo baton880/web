@@ -109,6 +109,8 @@ model TelemetrySettings {
   anomalyThresholdKg     Int      @default(200)
   anomalyConfirmDeltaKg  Int      @default(40)
   anomalyConfirmPackets  Int      @default(3)
+  movementSpeedThresholdKmh Int   @default(3)
+  movementConfirmPackets  Int     @default(3)
   loadingZoneStickySeconds Int    @default(180)
   zoneChangeDebounceMs   Int      @default(3000)
   nullZoneConfirmSeconds Int      @default(120)

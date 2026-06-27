@@ -17,6 +17,8 @@ const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "anomalyThresholdKg",
     "anomalyConfirmDeltaKg",
     "anomalyConfirmPackets",
+    "movementSpeedThresholdKmh",
+    "movementConfirmPackets",
     "zoneChangeDebounceMs",
     "nullZoneConfirmSeconds",
     "zoneChangeConfirmPackets",

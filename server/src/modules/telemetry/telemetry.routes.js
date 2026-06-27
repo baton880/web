@@ -5,6 +5,8 @@ import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { buildIngredientSummary, buildUnloadProgress, recalculateBatchViolations } from '../batches/batch-violations.js'
 import { getZoneByCoordinates, resolveEffectiveCoordinates, resolveGroupByCoordinates } from './telemetry-helpers.js'
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
+import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../../../module-3/config.js'
+import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 
@@ -61,6 +63,34 @@ function parseOptionalNumber(value) {
   if (value === undefined || value === null || value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryState = {}) {
+  if (memoryState?.isMoving) {
+    return true
+  }
+
+  const speedThreshold = Number(telemetrySettings.movementSpeedThresholdKmh) > 0
+    ? Number(telemetrySettings.movementSpeedThresholdKmh)
+    : MOVEMENT_SPEED_THRESHOLD_KMH
+  const confirmPackets = Number(telemetrySettings.movementConfirmPackets) > 0
+    ? Number(telemetrySettings.movementConfirmPackets)
+    : MOVEMENT_CONFIRM_PACKETS
+
+  let streak = 0
+  for (const point of Array.isArray(recentPoints) ? recentPoints : []) {
+    const speed = Number(point?.speedKmh)
+    if (Number.isFinite(speed) && speed > speedThreshold) {
+      streak += 1
+      if (streak >= confirmPackets) {
+        return true
+      }
+    } else {
+      break
+    }
+  }
+
+  return false
 }
 
 function normalizeTelemetryPacket(packet) {
@@ -149,7 +179,7 @@ async function inferMachineStateFromDatabase(
       where: telemetryWhere,
       orderBy: { timestamp: 'desc' },
       take: 8,
-      select: { weight: true, timestamp: true }
+      select: { weight: true, speedKmh: true, timestamp: true }
     }),
     prisma.telemetry.aggregate({
       where: telemetryWhere,
@@ -159,6 +189,7 @@ async function inferMachineStateFromDatabase(
 
   const currentWeight = Number(latestTelemetry.weight || 0)
   const previousWeight = Number(recentPoints[1]?.weight ?? currentWeight)
+  const isMoving = resolveMovementState(recentPoints, telemetrySettings, memoryState)
   const peakWeight = Math.max(
     Number(peakTelemetry._max.weight || 0),
     Number(activeBatch.startWeight || 0),
@@ -170,11 +201,11 @@ async function inferMachineStateFromDatabase(
   let mode = 'Ожидание'
   if (memoryState?.isUnloading) {
     mode = 'Выгрузка'
-  } else if (memoryState?.isMixing) {
+  } else if (memoryState?.isMixing && !isMoving) {
     mode = 'Загрузка'
-  } else if (dropFromPeak > modeUnloadDropHintKg) {
+  } else if (!isMoving && dropFromPeak > modeUnloadDropHintKg) {
     mode = 'Выгрузка'
-  } else if (recentDelta > modeLoadingDeltaHintKg || (activeBatch.actualIngredients || []).length > 0) {
+  } else if (!isMoving && (recentDelta > modeLoadingDeltaHintKg || (activeBatch.actualIngredients || []).length > 0)) {
     mode = 'Загрузка'
   }
 
@@ -183,6 +214,7 @@ async function inferMachineStateFromDatabase(
     mode,
     isMixing: mode === 'Загрузка',
     isUnloading: mode === 'Выгрузка',
+    isMoving,
     peakWeight,
     currentZone
   }
@@ -345,13 +377,34 @@ router.post('/', async (req, res) => {
               })
             }
 
-            await tx.batchIngredient.create({
-              data: {
-                batchId: activeBatch.id,
-                ingredientName: action.ingredientName,
-                actualWeight: action.actualWeight
+            {
+              const ingredientName = String(action.ingredientName || '').trim() || 'Unknown'
+              const actualWeight = Number(action.actualWeight || 0)
+              const latestIngredient = await tx.batchIngredient.findFirst({
+                where: { batchId: activeBatch.id },
+                orderBy: { addedAt: 'desc' }
+              })
+
+              if (
+                latestIngredient &&
+                normalizeIngredientName(latestIngredient.ingredientName) === normalizeIngredientName(ingredientName)
+              ) {
+                await tx.batchIngredient.update({
+                  where: { id: latestIngredient.id },
+                  data: {
+                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight
+                  }
+                })
+              } else {
+                await tx.batchIngredient.create({
+                  data: {
+                    batchId: activeBatch.id,
+                    ingredientName,
+                    actualWeight
+                  }
+                })
               }
-            })
+            }
             batchIdsToRecalculate.add(activeBatch.id)
             console.log(`Добавлен ингредиент: ${action.ingredientName} (${action.actualWeight} кг)`)
             break

@@ -526,6 +526,16 @@
                                         <small class="form-text text-muted">Порог прироста между соседними пакетами для подсказки режима “Загрузка”.</small>
                                     </div>
                                     <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryMovementSpeedThresholdKmh">Порог движения, км/ч</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryMovementSpeedThresholdKmh" name="movementSpeedThresholdKmh" required>
+                                        <small class="form-text text-muted">Если скорость выше этого порога несколько пакетов подряд, весовые скачки во время поездки игнорируются.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryMovementConfirmPackets">Пакетов движения подряд</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryMovementConfirmPackets" name="movementConfirmPackets" required>
+                                        <small class="form-text text-muted">Сколько подряд пакетов выше порога нужно, чтобы считать технику в движении и не учитывать вес.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryAnomalyThresholdKg">Скачок аномалии, кг</label>
                                         <input type="number" min="1" step="1" class="form-control" id="telemetryAnomalyThresholdKg" name="anomalyThresholdKg" required>
                                         <small class="form-text text-muted">Если скачок между пакетами выше порога, пакет не принимается сразу.</small>
@@ -577,7 +587,7 @@
                                     </div>
                                 </div>
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
-                                    <div class="small text-muted" id="telemetrySettingsState">Настройки влияют на замес, нарушения, антишум и ежедневную очистку треков.</div>
+                                    <div class="small text-muted" id="telemetrySettingsState">Настройки влияют на замес, движения, нарушения, антишум и ежедневную очистку треков.</div>
                                     <button type="submit" class="btn btn-primary" id="telemetrySettingsSubmitButton">Сохранить настройки</button>
                                 </div>
                             </form>

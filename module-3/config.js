@@ -9,6 +9,8 @@ export const EMPTY_VEHICLE_THRESHOLD_KG = 50;
 export const ANOMALY_THRESHOLD_KG = 200;
 export const ANOMALY_CONFIRM_DELTA_KG = 40;
 export const ANOMALY_CONFIRM_PACKETS = 3;
+export const MOVEMENT_SPEED_THRESHOLD_KMH = 3;
+export const MOVEMENT_CONFIRM_PACKETS = 3;
 export const DEFAULT_ZONE_DEBOUNCE_MS = 3000;
 // Null zone is confirmed only after this many seconds since the last real loading zone hit.
 export const NULL_ZONE_CONFIRM_SECONDS = 120;

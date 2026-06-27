@@ -11,6 +11,8 @@ import {
   ANOMALY_THRESHOLD_KG,
   ANOMALY_CONFIRM_DELTA_KG,
   ANOMALY_CONFIRM_PACKETS,
+  MOVEMENT_SPEED_THRESHOLD_KMH,
+  MOVEMENT_CONFIRM_PACKETS,
   DEFAULT_ZONE_DEBOUNCE_MS,
   NULL_ZONE_CONFIRM_SECONDS,
   ZONE_CHANGE_CONFIRM_PACKETS
@@ -36,6 +38,10 @@ export class TelemetryProcessor {
       lastAcceptedWeight: null,
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
+      lastStationaryWeight: weight,
+      isMoving: false,
+      movingSpeedStreak: 0,
+      stationarySpeedStreak: 0,
       visitedZones: [],
       lastActiveZoneKey: null,
       lastZoneDwellAtMs: null,
@@ -66,11 +72,49 @@ export class TelemetryProcessor {
       anomalyThresholdKg: Number(settings.anomalyThresholdKg) > 0 ? Number(settings.anomalyThresholdKg) : ANOMALY_THRESHOLD_KG,
       anomalyConfirmDeltaKg: Number(settings.anomalyConfirmDeltaKg) > 0 ? Number(settings.anomalyConfirmDeltaKg) : ANOMALY_CONFIRM_DELTA_KG,
       anomalyConfirmPackets: Number(settings.anomalyConfirmPackets) > 0 ? Number(settings.anomalyConfirmPackets) : ANOMALY_CONFIRM_PACKETS,
+      movementSpeedThresholdKmh: Number(settings.movementSpeedThresholdKmh) > 0
+        ? Number(settings.movementSpeedThresholdKmh)
+        : MOVEMENT_SPEED_THRESHOLD_KMH,
+      movementConfirmPackets: Number(settings.movementConfirmPackets) > 0
+        ? Number(settings.movementConfirmPackets)
+        : MOVEMENT_CONFIRM_PACKETS,
       zoneChangeDebounceMs: Number(settings.zoneChangeDebounceMs) > 0 ? Number(settings.zoneChangeDebounceMs) : DEFAULT_ZONE_DEBOUNCE_MS,
       nullZoneConfirmMs: Number(settings.nullZoneConfirmSeconds) > 0
         ? Number(settings.nullZoneConfirmSeconds) * 1000
         : (Number(settings.nullZoneConfirmMs) > 0 ? Number(settings.nullZoneConfirmMs) : NULL_ZONE_CONFIRM_SECONDS * 1000),
       zoneChangeConfirmPackets: Number(settings.zoneChangeConfirmPackets) > 0 ? Number(settings.zoneChangeConfirmPackets) : ZONE_CHANGE_CONFIRM_PACKETS
+    };
+  }
+
+  _updateMovementState(state, speedKmh, thresholds) {
+    const speed = Number.isFinite(Number(speedKmh)) ? Math.max(0, Number(speedKmh)) : 0;
+    const isAboveThreshold = speed > thresholds.movementSpeedThresholdKmh;
+
+    if (isAboveThreshold) {
+      state.movingSpeedStreak = Number(state.movingSpeedStreak || 0) + 1;
+      state.stationarySpeedStreak = 0;
+    } else {
+      state.stationarySpeedStreak = Number(state.stationarySpeedStreak || 0) + 1;
+      state.movingSpeedStreak = 0;
+    }
+
+    const wasMoving = Boolean(state.isMoving);
+
+    if (!wasMoving && state.movingSpeedStreak >= thresholds.movementConfirmPackets) {
+      state.isMoving = true;
+      state.stationarySpeedStreak = 0;
+    } else if (wasMoving && !isAboveThreshold) {
+      state.isMoving = false;
+      state.movingSpeedStreak = 0;
+    }
+
+    return {
+      speed,
+      speedAboveThreshold: isAboveThreshold,
+      suppressMotion: isAboveThreshold || Boolean(state.isMoving),
+      isMoving: Boolean(state.isMoving),
+      enteredMoving: !wasMoving && Boolean(state.isMoving),
+      exitedMoving: wasMoving && !state.isMoving
     };
   }
 
@@ -210,7 +254,7 @@ export class TelemetryProcessor {
   }
 
   _resolveSegmentIngredient(state) {
-    return this._pickVisitedZoneIngredient(state) || 'Unknown';
+    return this._pickVisitedZoneIngredient(state) || state.currentZone?.ingredient || state.lastIngredientName || 'Unknown';
   }
 
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
@@ -292,41 +336,68 @@ export class TelemetryProcessor {
       this.deviceStates.set(deviceId, state);
     }
 
+    const movement = this._updateMovementState(state, packet.speedKmh, thresholds);
+    const isMotionSuppressed = Boolean(movement.suppressMotion);
+
     if (state.lastAcceptedWeight === null) {
       state.lastAcceptedWeight = currentWeight;
     }
 
     // Фильтр аномалий веса
-    const deltaFromAccepted = Math.abs(currentWeight - state.lastAcceptedWeight);
-    if (deltaFromAccepted > thresholds.anomalyThresholdKg) {
-      if (
-        state.anomalyCandidateWeight !== null &&
-        Math.abs(currentWeight - state.anomalyCandidateWeight) <= thresholds.anomalyConfirmDeltaKg
-      ) {
-        state.anomalyCandidateCount += 1;
-      } else {
-        state.anomalyCandidateWeight = currentWeight;
-        state.anomalyCandidateCount = 1;
-      }
+    if (movement.enteredMoving) {
+      const departureWeight = Number(state.lastStationaryWeight ?? state.lastAcceptedWeight ?? currentWeight);
+      this._flushCurrentSegment(
+        state,
+        departureWeight,
+        thresholds,
+        result,
+        { suppressLoading, packetTimeMs }
+      );
+      state.zoneStartWeight = departureWeight;
+      this._resetVisitedZones(state, packetTimeMs);
+      state.pendingZoneName = null;
+      state.pendingZoneEnteredAtMs = null;
+      state.pendingZoneCount = 0;
+    }
 
-      if (state.anomalyCandidateCount < thresholds.anomalyConfirmPackets) {
-        return this._buildSkippedResult(deviceId);
-      }
-
-      state.lastAcceptedWeight = state.anomalyCandidateWeight;
+    if (isMotionSuppressed) {
+      state.lastAcceptedWeight = currentWeight;
       state.anomalyCandidateWeight = null;
       state.anomalyCandidateCount = 0;
-    } else if (state.anomalyCandidateWeight !== null || state.anomalyCandidateCount > 0) {
-      state.anomalyCandidateWeight = null;
-      state.anomalyCandidateCount = 0;
+    } else {
+      const deltaFromAccepted = Math.abs(currentWeight - state.lastAcceptedWeight);
+      if (deltaFromAccepted > thresholds.anomalyThresholdKg) {
+        if (
+          state.anomalyCandidateWeight !== null &&
+          Math.abs(currentWeight - state.anomalyCandidateWeight) <= thresholds.anomalyConfirmDeltaKg
+        ) {
+          state.anomalyCandidateCount += 1;
+        } else {
+          state.anomalyCandidateWeight = currentWeight;
+          state.anomalyCandidateCount = 1;
+        }
+
+        if (state.anomalyCandidateCount < thresholds.anomalyConfirmPackets) {
+          return this._buildSkippedResult(deviceId);
+        }
+
+        state.lastAcceptedWeight = state.anomalyCandidateWeight;
+        state.anomalyCandidateWeight = null;
+        state.anomalyCandidateCount = 0;
+      } else if (state.anomalyCandidateWeight !== null || state.anomalyCandidateCount > 0) {
+        state.anomalyCandidateWeight = null;
+        state.anomalyCandidateCount = 0;
+      }
     }
 
     const activeZone = detectZoneObject(lat, lon, zonesConfig);
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
-    this._recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs);
-    if (activeZoneName) {
-      state.lastRealZoneSeenAtMs = packetTimeMs;
+    if (!isMotionSuppressed) {
+      this._recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs);
+      if (activeZoneName) {
+        state.lastRealZoneSeenAtMs = packetTimeMs;
+      }
     }
 
     // БАННЕР: показываем сразу при первом детектировании (для отзывчивости UI)
@@ -345,8 +416,11 @@ export class TelemetryProcessor {
       confirmedZoneName !== null &&
       Number.isFinite(lastRealZoneSeenAtMs) &&
       packetTimeMs - lastRealZoneSeenAtMs >= thresholds.nullZoneConfirmMs;
+    const looksLikeUnloadDrop = state.isMixing &&
+      state.peakWeight > thresholds.unloadMinPeakKg &&
+      currentWeight < state.peakWeight - thresholds.unloadDropThresholdKg;
 
-    if (shouldConfirmNullZone) {
+    if (!isMotionSuppressed && shouldConfirmNullZone && !looksLikeUnloadDrop) {
       this._confirmZoneChange(
         state,
         null,
@@ -360,6 +434,8 @@ export class TelemetryProcessor {
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
       state.pendingZoneCount = 0;
+    } else if (isMotionSuppressed) {
+      // Speed-filtered packets must not affect zone confirmation.
     } else if (!activeZoneName) {
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
@@ -370,6 +446,7 @@ export class TelemetryProcessor {
         const timeInPending = packetTimeMs - Number(state.pendingZoneEnteredAtMs || packetTimeMs);
 
         if (
+          !isMotionSuppressed &&
           state.pendingZoneCount >= thresholds.zoneChangeConfirmPackets &&
           timeInPending >= thresholds.zoneChangeDebounceMs
         ) {
@@ -399,13 +476,13 @@ export class TelemetryProcessor {
     }
 
     // Базовый вес обновляется только в спокойном режиме
-    if (!state.isMixing && !state.isUnloading) {
+    if (!isMotionSuppressed && !state.isMixing && !state.isUnloading) {
       if (currentWeight < state.zoneStartWeight) {
         state.zoneStartWeight = currentWeight;
       }
     }
 
-    if (currentWeight > state.peakWeight) {
+    if (!isMotionSuppressed && currentWeight > state.peakWeight) {
       state.peakWeight = currentWeight;
     }
 
@@ -413,6 +490,7 @@ export class TelemetryProcessor {
     if (
       !state.currentZone &&
       !suppressLoading &&
+      !isMotionSuppressed &&
       !state.isUnloading &&
       !state.isBatchStarted &&
       (currentWeight - Number(state.zoneStartWeight || 0)) > thresholds.batchStartThresholdKg
@@ -429,6 +507,7 @@ export class TelemetryProcessor {
 
     // Защита от недовыгрузки
     if (
+      !isMotionSuppressed &&
       state.isUnloading &&
       Number.isFinite(state.lastUnloadWeight) &&
       currentWeight > state.lastUnloadWeight + thresholds.unloadWeightBufferKg
@@ -458,6 +537,7 @@ export class TelemetryProcessor {
 
     // Детекция выгрузки
     if (
+      !isMotionSuppressed &&
       !state.isUnloading &&
       (
         state.isMixing ||
@@ -484,6 +564,7 @@ export class TelemetryProcessor {
         endWeight: Math.round(currentWeight)
       });
     } else if (
+      !isMotionSuppressed &&
       state.isUnloading &&
       Number.isFinite(state.lastUnloadWeight) &&
       Math.abs(currentWeight - state.lastUnloadWeight) >= thresholds.unloadUpdateDeltaKg
@@ -496,7 +577,7 @@ export class TelemetryProcessor {
     }
 
     // Окончание: если кузов пуст
-    if (state.isUnloading && currentWeight < thresholds.emptyVehicleThresholdKg) {
+    if (!isMotionSuppressed && state.isUnloading && currentWeight < thresholds.emptyVehicleThresholdKg) {
       result.dbActions.push({
         type: 'COMPLETE_BATCH',
         endWeight: Math.round(currentWeight)
@@ -506,11 +587,16 @@ export class TelemetryProcessor {
     }
 
     // Вывод состояния (на основе подтверждённой зоны)
+    if (!isMotionSuppressed) {
+      state.lastStationaryWeight = currentWeight;
+    }
+
     result.state = {
       currentZone: state.confirmedZoneName,
       currentIngredient: state.currentZone?.ingredient || (state.isMixing ? state.lastIngredientName : null),
       isMixing: state.isMixing,
       isUnloading: state.isUnloading,
+      isMoving: movement.isMoving,
       peakWeight: state.peakWeight,
       lastIngredientName: state.lastIngredientName,
       isBatchStarted: state.isBatchStarted,
@@ -528,6 +614,7 @@ export class TelemetryProcessor {
       ...state,
       currentZone: state.confirmedZoneName || null,
       currentIngredient: state.currentZone?.ingredient || state.lastIngredientName || null,
+      isMoving: state.isMoving,
       currentMode: this._getCurrentMode(state),
       zoneCandidates: this._serializeZoneCandidates(state)
     };
