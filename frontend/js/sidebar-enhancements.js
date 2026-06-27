@@ -171,9 +171,9 @@
         mobileNav.setAttribute("aria-label", "Мобильная навигация");
         mobileNav.innerHTML = `
             <div class="mobile-top-nav__bar">
-                <a class="mobile-top-nav__brand" href="index.html" aria-label="KOROVKI">
+                <a class="mobile-top-nav__brand" href="index.html" aria-label="ВИ-КОРМ">
                     <img src="img/cow.svg" alt="">
-                    <span>KOROVKI</span>
+                    <span>ВИ-КОРМ</span>
                 </a>
                 <button class="mobile-menu-toggle" type="button" aria-controls="mobileMenuList" aria-expanded="false">
                     <i class="fas fa-bars" aria-hidden="true"></i>
