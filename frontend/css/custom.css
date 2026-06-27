@@ -1245,6 +1245,53 @@ span.batch-ingredient-editor__trigger {
     padding: 0;
 }
 
+.ration-manual-compound-row td {
+    background: #f8fafc;
+    padding-top: 0.75rem;
+    padding-bottom: 0.75rem;
+}
+
+.ration-compound-editor {
+    border-left: 3px solid #6c757d;
+    padding-left: 0.75rem;
+}
+
+.ration-compound-editor__header {
+    align-items: center;
+    color: #5b6680;
+    display: flex;
+    font-size: 0.8rem;
+    font-weight: 800;
+    justify-content: space-between;
+    margin-bottom: 0.5rem;
+    text-transform: uppercase;
+}
+
+.ration-compound-editor__rows {
+    display: grid;
+    gap: 0.5rem;
+}
+
+.ration-compound-editor__row {
+    display: grid;
+    gap: 0.5rem;
+    grid-template-columns: minmax(220px, 1fr) minmax(130px, 180px) 2rem;
+}
+
+.ration-ingredient-components-list {
+    color: #6b7280;
+    font-size: 0.78rem;
+    line-height: 1.45;
+    margin-top: 0.35rem;
+    padding-left: 0.75rem;
+}
+
+@media (max-width: 767.98px) {
+    .ration-compound-editor__row {
+        grid-template-columns: 1fr;
+    }
+}
+
 .groups-form-hint {
     color: #6b7280;
     font-size: 0.8rem;

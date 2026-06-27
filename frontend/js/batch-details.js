@@ -686,7 +686,22 @@ $(document).ready(function () {
         setText(factTotal, formatWeight(totals.fact));
         setText(deviationTotal, formatSignedPercent(totalDeviationPercent));
 
-        planFactBody.innerHTML = rows.map((row) => `
+        const visibleRows = rows.flatMap((row) => {
+            const componentRows = row?.isCompound && Array.isArray(row?.components)
+                ? row.components.map((component) => ({
+                    name: `  - ${component?.name || "Без названия"}`,
+                    plan: component?.plan,
+                    fact: component?.fact,
+                    deviation_percent: component?.deviation_percent ?? component?.deviationPercent,
+                    isViolation: false,
+                    is_violation: false
+                }))
+                : [];
+
+            return [row, ...componentRows];
+        });
+
+        planFactBody.innerHTML = visibleRows.map((row) => `
             <tr>
                 <td>${escapeHtml(row?.name || "Без названия")}</td>
                 <td>${escapeHtml(formatWeight(row?.plan))}</td>

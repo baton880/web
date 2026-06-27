@@ -152,7 +152,10 @@ export function calculatePlan(parsedRation, headcount) {
     ingredients.push({
       name: item.name,
       targetWeight: targetWeight,
-      targetDryMatter: targetDryMatter
+      targetDryMatter: targetDryMatter,
+      isCompound: Boolean(item.isCompound),
+      componentsJson: item.componentsJson || null,
+      components: Array.isArray(item.components) ? item.components : undefined
     });
   }
 

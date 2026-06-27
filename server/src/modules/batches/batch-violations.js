@@ -6,6 +6,59 @@ function round1(value) {
     return Math.round(Number(value || 0) * 10) / 10;
 }
 
+function parseCompoundComponents(value) {
+    if (Array.isArray(value)) {
+        return value
+            .map((component) => ({
+                name: String(component?.name || '').trim(),
+                plannedWeight: Number(component?.plannedWeight || 0)
+            }))
+            .filter((component) => component.name && component.plannedWeight > 0);
+    }
+
+    if (!value) return [];
+
+    try {
+        const parsed = JSON.parse(value);
+        return parseCompoundComponents(parsed);
+    } catch (error) {
+        return [];
+    }
+}
+
+function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight) {
+    if (!planItem?.isCompound) {
+        return [];
+    }
+
+    const components = parseCompoundComponents(planItem.components || planItem.componentsJson);
+    if (!components.length || parentPlanWeight <= 0) {
+        return [];
+    }
+
+    const componentPlanTotal = components.reduce((sum, component) => sum + component.plannedWeight, 0);
+    const sourceTotal = componentPlanTotal > 0 ? componentPlanTotal : Number(planItem.plannedWeight || 0);
+    const ratio = parentPlanWeight > 0 ? parentFactWeight / parentPlanWeight : 0;
+
+    return components.map((component) => {
+        const componentPlanWeight = sourceTotal > 0
+            ? parentPlanWeight * (component.plannedWeight / sourceTotal)
+            : 0;
+        const componentFactWeight = componentPlanWeight * ratio;
+        const deviationPercent = componentPlanWeight > 0
+            ? Math.round(((componentFactWeight - componentPlanWeight) / componentPlanWeight) * 1000) / 10
+            : 0;
+
+        return {
+            name: component.name,
+            plan: round1(componentPlanWeight),
+            fact: round1(componentFactWeight),
+            deviation_percent: deviationPercent,
+            is_violation: false
+        };
+    });
+}
+
 export function resolveDeviationSettings(options = null) {
     if (typeof options === 'number') {
         return {
@@ -91,6 +144,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
     const hasPlanContext = plan.ingredients.length > 0;
     const factMap = new Map(facts.map((item) => [normalizeIngredientName(item.name), item.actualWeight]));
     const planMap = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.targetWeight]));
+    const planItemMap = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item]));
     const nameMap = new Map([
         ...facts.map((item) => [normalizeIngredientName(item.name), item.name]),
         ...plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.name])
@@ -100,6 +154,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
 
     return Array.from(names).map((key) => {
         const name = toDisplayIngredientName(nameMap.get(key) || key || 'Unknown');
+        const planItem = planItemMap.get(key) || null;
         const planWeight = planMap.get(key) || 0;
         const factWeight = factMap.get(key) || 0;
         const deviationKg = factWeight - planWeight;
@@ -118,7 +173,9 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             plan: round1(planWeight),
             fact: round1(factWeight),
             deviation_percent: deviationPercent,
-            is_violation: isViolation
+            is_violation: isViolation,
+            isCompound: Boolean(planItem?.isCompound),
+            components: buildCompoundComponentSummaries(planItem, planWeight, factWeight)
         };
     });
 }

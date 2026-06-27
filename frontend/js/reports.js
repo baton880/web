@@ -7,6 +7,7 @@
     const state = {
         batches: [],
         violations: [],
+        components: [],
         summary: {
             counts: {
                 batches: 0,
@@ -224,6 +225,32 @@
         };
     }
 
+    const REPORT_NO_RATION = "\u0411\u0435\u0437 \u0440\u0430\u0446\u0438\u043e\u043d\u0430";
+    const REPORT_NO_GROUP = "\u0411\u0435\u0437 \u0433\u0440\u0443\u043f\u043f\u044b";
+    const REPORT_BATCH_PREFIX = "\u0417\u0430\u043c\u0435\u0441";
+
+    function normalizeComponent(item) {
+        const date = item.date ?? item.createdAt ?? item.timestamp ?? "";
+        const batchId = item.batchId ?? null;
+        const plan = toNumber(item.plan ?? item.planned ?? item.planWeight) ?? 0;
+        const fact = toNumber(item.fact ?? item.actual ?? item.actualWeight) ?? 0;
+        const deviation = toNumber(item.deviation ?? item.delta ?? (fact - plan)) ?? 0;
+
+        return {
+            batchId,
+            date,
+            dateKey: getDateKey(date),
+            batchLabel: item.batchLabel ?? (batchId ? `${REPORT_BATCH_PREFIX} #${batchId}` : REPORT_BATCH_PREFIX),
+            rationName: item.rationName ?? item.ration ?? REPORT_NO_RATION,
+            groupName: item.groupName ?? item.group ?? REPORT_NO_GROUP,
+            parentComponent: item.parentComponent ?? "",
+            component: item.component ?? item.name ?? "\u2014",
+            plan,
+            fact,
+            deviation,
+        };
+    }
+
     function normalizeTopItems(items) {
         if (!Array.isArray(items)) return [];
         return items
@@ -423,6 +450,7 @@
                     : [];
 
         const violations = Array.isArray(payload?.violations) ? payload.violations : [];
+        const components = Array.isArray(payload?.components) ? payload.components : [];
         const summary = normalizeSummary(payload?.summary);
 
         if (!summary.counts.batches) summary.counts.batches = batches.length;
@@ -434,6 +462,7 @@
         return {
             batches: batches.map(normalizeBatch).sort(sortByDateDesc),
             violations: violations.map(normalizeViolation).sort(sortByDateDesc),
+            components: components.map(normalizeComponent).sort(sortByDateDesc),
             summary,
         };
     }
@@ -441,6 +470,7 @@
     function applyReportData(reportData, lastError = "") {
         state.batches = reportData.batches;
         state.violations = reportData.violations;
+        state.components = reportData.components || [];
         state.summary = reportData.summary;
         state.lastError = lastError;
         render();
@@ -527,8 +557,6 @@
             ["Замесов", String(state.summary.counts.batches || 0)],
             ["Замесов с нарушениями", String(state.summary.counts.batchesWithViolations || 0)],
             ["Нарушений всего", String(state.summary.counts.violationsTotal || 0)],
-            ["Открытых нарушений", String(state.summary.counts.violationsActive || 0)],
-            ["Закрытых нарушений", String(state.summary.counts.violationsResolved || 0)],
         ];
 
         const batches = [
@@ -559,51 +587,176 @@
             ]),
         ];
 
-        return { summary, batches, violations };
+        const components = [
+            ["Дата", "Замес", "Рацион", "Группа", "Компонент", "В составе", "План", "Факт", "Отклонение"],
+            ...state.components.map((item) => [
+                formatDateTime(item.date),
+                item.batchLabel,
+                item.rationName,
+                item.groupName,
+                item.component,
+                item.parentComponent || "",
+                formatWeight(item.plan),
+                formatWeight(item.fact),
+                formatSignedWeight(item.deviation),
+            ]),
+        ];
+
+        return { summary, batches, violations, components };
     }
 
-    function buildExportTable(title, rows) {
-        const body = rows.map((row, rowIndex) => {
-            const cellTag = rowIndex === 0 ? "th" : "td";
-            const cells = row.map((cell) => `<${cellTag}>${escapeHtml(cell)}</${cellTag}>`).join("");
-            return `<tr>${cells}</tr>`;
-        }).join("");
+    function normalizeIssuedRationName(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return REPORT_NO_RATION;
+
+        const lower = raw.toLocaleLowerCase("ru-RU");
+        if (
+            lower.includes("\u0434\u043e\u0439\u043d")
+            && (lower.includes("\u0431\u0430\u0437") || lower.includes("\u0431\u0440\u0438\u0433") || /\b[124]\b/.test(lower))
+        ) {
+            return "\u0414\u043e\u0439\u043d\u044b\u0435 \u0411\u0430\u0437\u043e\u0432\u044b\u0439";
+        }
+
+        return raw;
+    }
+
+    function buildIssuedFactRows(dateKey = null) {
+        const rationNames = [];
+        const rationSeen = new Set();
+        const componentNames = [];
+        const componentSeen = new Set();
+        const totals = new Map();
+
+        for (const item of state.components) {
+            if (dateKey && getDateKey(item.date) !== dateKey) {
+                continue;
+            }
+
+            const rationName = normalizeIssuedRationName(item.rationName);
+            const componentName = String(item.component || "").trim();
+            const fact = toNumber(item.fact) ?? 0;
+
+            if (!componentName || componentName === "\u2014") {
+                continue;
+            }
+
+            if (!rationSeen.has(rationName)) {
+                rationSeen.add(rationName);
+                rationNames.push(rationName);
+            }
+
+            const componentKey = componentName.toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
+            if (!componentSeen.has(componentKey)) {
+                componentSeen.add(componentKey);
+                componentNames.push(componentName);
+            }
+
+            const totalKey = `${componentKey}\u0000${rationName}`;
+            totals.set(totalKey, (totals.get(totalKey) || 0) + fact);
+        }
+
+        const rows = [
+            ["\u043d\u0430\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043a\u043e\u0440\u043c\u0430", ...rationNames],
+            ["", ...rationNames.map(() => "\u0432\u044b\u0434\u0430\u043d\u043e \u043f\u043e \u0444\u0430\u043a\u0442\u0443")],
+        ];
+
+        for (const componentName of componentNames) {
+            const componentKey = componentName.toLocaleLowerCase("ru-RU").replace(/\s+/g, " ");
+            rows.push([
+                componentName,
+                ...rationNames.map((rationName) => Math.round((totals.get(`${componentKey}\u0000${rationName}`) || 0) * 10) / 10),
+            ]);
+        }
+
+        return rows;
+    }
+
+    function buildIssuedFactSheets() {
+        const dateKeys = Array.from(new Set(
+            state.components
+                .map((item) => getDateKey(item.date))
+                .filter(Boolean)
+        )).sort();
+
+        if (!dateKeys.length) {
+            return [{
+                name: "\u0412\u044b\u0434\u0430\u043d\u043e \u043f\u043e \u0444\u0430\u043a\u0442\u0443",
+                rows: buildIssuedFactRows(),
+            }];
+        }
+
+        return dateKeys.map((dateKey) => ({
+            name: `\u0412\u044b\u0434\u0430\u043d\u043e ${dateKey}`,
+            rows: buildIssuedFactRows(dateKey),
+        }));
+    }
+
+    function xmlEscape(value) {
+        return String(value ?? "")
+            .replace(/&/g, "&amp;")
+            .replace(/</g, "&lt;")
+            .replace(/>/g, "&gt;")
+            .replace(/"/g, "&quot;");
+    }
+
+    function sanitizeWorksheetName(value) {
+        const name = String(value || "Sheet").replace(/[\\/?*:[\]]/g, " ").trim() || "Sheet";
+        return name.slice(0, 31);
+    }
+
+    function buildWorkbookCell(value, rowIndex) {
+        const numericValue = typeof value === "number" && Number.isFinite(value) ? value : null;
+        const styleId = rowIndex === 0 ? ' ss:StyleID="Header"' : "";
+
+        if (numericValue !== null) {
+            return `<Cell${styleId}><Data ss:Type="Number">${numericValue}</Data></Cell>`;
+        }
+
+        return `<Cell${styleId}><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
+    }
+
+    function buildWorkbookWorksheet(name, rows) {
+        const tableRows = rows.map((row, rowIndex) => (
+            `<Row>${row.map((cell) => buildWorkbookCell(cell, rowIndex)).join("")}</Row>`
+        )).join("");
 
         return `
-            <h2>${escapeHtml(title)}</h2>
-            <table>
-                <tbody>${body}</tbody>
-            </table>
+            <Worksheet ss:Name="${xmlEscape(sanitizeWorksheetName(name))}">
+                <Table>${tableRows}</Table>
+            </Worksheet>
         `;
+    }
+
+    function buildWorkbookXml(sheets) {
+        return `<?xml version="1.0" encoding="UTF-8"?>
+<?mso-application progid="Excel.Sheet"?>
+<Workbook
+    xmlns="urn:schemas-microsoft-com:office:spreadsheet"
+    xmlns:o="urn:schemas-microsoft-com:office:office"
+    xmlns:x="urn:schemas-microsoft-com:office:excel"
+    xmlns:ss="urn:schemas-microsoft-com:office:spreadsheet"
+    xmlns:html="http://www.w3.org/TR/REC-html40">
+    <Styles>
+        <Style ss:ID="Header">
+            <Font ss:Bold="1"/>
+            <Interior ss:Color="#EEF3FF" ss:Pattern="Solid"/>
+        </Style>
+    </Styles>
+    ${sheets.map((sheet) => buildWorkbookWorksheet(sheet.name, sheet.rows)).join("")}
+</Workbook>`;
     }
 
     function exportToExcel() {
         const rows = buildExportRows();
-        const html = `
-            <html xmlns:o="urn:schemas-microsoft-com:office:office"
-                  xmlns:x="urn:schemas-microsoft-com:office:excel"
-                  xmlns="http://www.w3.org/TR/REC-html40">
-                <head>
-                    <meta charset="utf-8">
-                    <style>
-                        body { font-family: Arial, sans-serif; }
-                        h1, h2 { margin: 0 0 12px; }
-                        h2 { margin-top: 24px; }
-                        table { border-collapse: collapse; margin-bottom: 16px; width: 100%; }
-                        th, td { border: 1px solid #cfd4dc; padding: 6px 8px; text-align: left; vertical-align: top; }
-                        th { background: #eef3ff; }
-                    </style>
-                </head>
-                <body>
-                    <h1>Отчет по замесам и нарушениям</h1>
-                    ${buildExportTable("Сводка", rows.summary)}
-                    ${buildExportTable("Замесы", rows.batches)}
-                    ${buildExportTable("Нарушения", rows.violations)}
-                </body>
-            </html>
-        `;
+        const workbookXml = buildWorkbookXml([
+            { name: "\u0421\u0432\u043e\u0434\u043a\u0430", rows: rows.summary },
+            { name: "\u0417\u0430\u043c\u0435\u0441\u044b", rows: rows.batches },
+            { name: "\u041d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u044f", rows: rows.violations },
+            { name: "\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u044b \u0437\u0430\u043c\u0435\u0441\u043e\u0432", rows: rows.components },
+            ...buildIssuedFactSheets(),
+        ]);
 
-        const blob = new Blob(["\ufeff", html], {
+        const blob = new Blob(["\ufeff", workbookXml], {
             type: "application/vnd.ms-excel;charset=utf-8;",
         });
 

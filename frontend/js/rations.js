@@ -13,6 +13,7 @@ $(document).ready(function () {
     const manualGroupsSelect = document.getElementById("rationManualGroups");
     const manualIngredientsBody = document.getElementById("rationManualIngredientsBody");
     const manualAddIngredientButton = document.getElementById("rationManualAddIngredientButton");
+    const manualAddCompoundIngredientButton = document.getElementById("rationManualAddCompoundIngredientButton");
     const manualGroupsPreview = document.getElementById("rationManualGroupsPreview");
     const manualSummary = document.getElementById("rationManualSummary");
     const manualCancelButton = document.getElementById("rationManualCancelButton");
@@ -188,7 +189,31 @@ $(document).ready(function () {
             localId: `ingredient-${state.ingredientSeq}`,
             name: item.name || "",
             plannedWeight: item.plannedWeight ?? "",
+            isCompound: Boolean(item.isCompound),
+            components: Array.isArray(item.components)
+                ? item.components.map((component) => makeCompoundComponentRow(component))
+                : [],
         };
+    }
+
+    function makeCompoundComponentRow(source) {
+        const item = source || {};
+        state.ingredientSeq += 1;
+
+        return {
+            localId: `component-${state.ingredientSeq}`,
+            name: item.name || "",
+            plannedWeight: item.plannedWeight ?? "",
+        };
+    }
+
+    function getIngredientPlannedWeight(ingredient) {
+        if (ingredient?.isCompound) {
+            return (Array.isArray(ingredient.components) ? ingredient.components : [])
+                .reduce((sum, component) => sum + (parseFormNumber(component.plannedWeight) || 0), 0);
+        }
+
+        return parseFormNumber(ingredient?.plannedWeight) || 0;
     }
 
     function getGroupsByRationId() {
@@ -315,6 +340,85 @@ $(document).ready(function () {
         renderGroupsPreview(selectedGroupsPreview, state.uploadSelectedGroupIds);
     }
 
+    function renderCompoundComponentsEditor(ingredient) {
+        if (!ingredient?.isCompound) {
+            return "";
+        }
+
+        if (!Array.isArray(ingredient.components) || !ingredient.components.length) {
+            ingredient.components = [makeCompoundComponentRow()];
+        }
+
+        const parentId = escapeHtml(ingredient.localId);
+        const disabledAttr = state.isManualSaving ? "disabled" : "";
+
+        return `
+            <tr class="ration-manual-compound-row" data-compound-for="${parentId}">
+                <td colspan="3">
+                    <div class="ration-compound-editor">
+                        <div class="ration-compound-editor__header">
+                            <span>Состав</span>
+                            <button
+                                type="button"
+                                class="btn btn-outline-primary btn-sm"
+                                data-action="add-compound-component"
+                                data-parent-id="${parentId}"
+                                ${disabledAttr}
+                            >
+                                <i class="fas fa-plus mr-1" aria-hidden="true"></i>
+                                Добавить компонент
+                            </button>
+                        </div>
+                        <div class="ration-compound-editor__rows">
+                            ${ingredient.components.map((component) => {
+                                const componentId = escapeHtml(component.localId);
+                                return `
+                                    <div
+                                        class="ration-compound-editor__row"
+                                        data-compound-parent-id="${parentId}"
+                                        data-component-id="${componentId}"
+                                    >
+                                        <input
+                                            type="text"
+                                            class="form-control form-control-sm"
+                                            data-component-field="name"
+                                            maxlength="120"
+                                            value="${escapeHtml(component.name)}"
+                                            placeholder="Сода пищевая"
+                                            ${disabledAttr}
+                                        >
+                                        <input
+                                            type="number"
+                                            class="form-control form-control-sm ration-manual-number"
+                                            data-component-field="plannedWeight"
+                                            min="0.01"
+                                            step="0.01"
+                                            value="${escapeHtml(component.plannedWeight)}"
+                                            placeholder="0.12"
+                                            ${disabledAttr}
+                                        >
+                                        <button
+                                            type="button"
+                                            class="btn btn-outline-danger btn-sm ration-manual-remove"
+                                            data-action="remove-compound-component"
+                                            data-parent-id="${parentId}"
+                                            data-component-id="${componentId}"
+                                            ${ingredient.components.length <= 1 || state.isManualSaving ? "disabled" : ""}
+                                            title="Удалить компонент"
+                                            aria-label="Удалить компонент"
+                                        >
+                                            <i class="fas fa-trash-alt" aria-hidden="true"></i>
+                                        </button>
+                                    </div>
+                                `;
+                            }).join("")}
+                        </div>
+                    </div>
+                </td>
+            </tr>
+        `;
+    }
+
     function renderManualIngredientsEditor() {
         if (!manualIngredientsBody) {
             return;
@@ -327,9 +431,13 @@ $(document).ready(function () {
         manualIngredientsBody.innerHTML = state.manualIngredients.map((ingredient) => {
             const rowId = escapeHtml(ingredient.localId);
             const rowClass = ingredient.localId === state.highlightedIngredientId ? "ration-manual-row is-highlighted" : "ration-manual-row";
+            const plannedWeightValue = ingredient.isCompound ? getIngredientPlannedWeight(ingredient) || "" : ingredient.plannedWeight;
+            const compoundBadge = ingredient.isCompound ? '<span class="badge badge-secondary mb-2">Составной</span>' : "";
+            const compoundAttributes = ingredient.isCompound ? 'readonly tabindex="-1"' : "";
             return `
                 <tr class="${rowClass}" data-ingredient-id="${rowId}">
                     <td>
+                        ${compoundBadge}
                         <input
                             type="text"
                             class="form-control form-control-sm"
@@ -346,8 +454,9 @@ $(document).ready(function () {
                             data-ingredient-field="plannedWeight"
                             min="0.01"
                             step="0.01"
-                            value="${escapeHtml(ingredient.plannedWeight)}"
+                            value="${escapeHtml(plannedWeightValue)}"
                             placeholder="1200"
+                            ${compoundAttributes}
                         >
                     </td>
                     <td>
@@ -363,6 +472,7 @@ $(document).ready(function () {
                         </button>
                     </td>
                 </tr>
+                ${renderCompoundComponentsEditor(ingredient)}
             `;
         }).join("");
     }
@@ -372,7 +482,7 @@ $(document).ready(function () {
             return;
         }
 
-        const plannedTotal = state.manualIngredients.reduce((sum, ingredient) => sum + (parseFormNumber(ingredient.plannedWeight) || 0), 0);
+        const plannedTotal = state.manualIngredients.reduce((sum, ingredient) => sum + getIngredientPlannedWeight(ingredient), 0);
         manualSummary.textContent = `Ингредиентов: ${state.manualIngredients.length} | Вес: ${weightFormatter.format(plannedTotal)} кг`;
     }
 
@@ -415,6 +525,19 @@ $(document).ready(function () {
         clearIngredientHighlightLater(ingredient.localId);
     }
 
+    function addManualCompoundIngredientRow() {
+        syncManualRowsFromInputs();
+        const ingredient = makeIngredientRow({
+            isCompound: true,
+            components: [makeCompoundComponentRow()]
+        });
+        state.manualIngredients.push(ingredient);
+        state.highlightedIngredientId = ingredient.localId;
+        updateManualState();
+        focusManualIngredientRow(ingredient.localId);
+        clearIngredientHighlightLater(ingredient.localId);
+    }
+
     function updateManualState() {
         const isEditing = Number.isInteger(state.editingRationId) && state.editingRationId > 0;
         const disabled = !canWrite || state.isManualSaving;
@@ -433,7 +556,7 @@ $(document).ready(function () {
             manualIdInput.value = isEditing ? String(state.editingRationId) : "";
         }
 
-        [manualNameInput, manualIsActiveInput, manualAddIngredientButton].forEach((element) => {
+        [manualNameInput, manualIsActiveInput, manualAddIngredientButton, manualAddCompoundIngredientButton].forEach((element) => {
             if (element) {
                 element.disabled = disabled;
             }
@@ -485,6 +608,25 @@ $(document).ready(function () {
         `;
     }
 
+    function renderIngredientNameWithComponents(ingredient) {
+        const name = escapeHtml(ingredient?.name || "Без названия");
+        const components = Array.isArray(ingredient?.components) ? ingredient.components : [];
+        if (!ingredient?.isCompound || !components.length) {
+            return name;
+        }
+
+        return `
+            <div class="ration-ingredient-compound-name">
+                <div>${name} <span class="badge badge-secondary">Составной</span></div>
+                <div class="ration-ingredient-components-list">
+                    ${components.map((component) => `
+                        <div>${escapeHtml(component?.name || "Без названия")} - ${formatWeight(component?.plannedWeight)}</div>
+                    `).join("")}
+                </div>
+            </div>
+        `;
+    }
+
     function renderIngredientsTable(ingredients) {
         const items = Array.isArray(ingredients) ? ingredients : [];
         if (!items.length) {
@@ -507,7 +649,7 @@ $(document).ready(function () {
                         ${items.map((ingredient, index) => `
                             <tr>
                                 <td class="ration-ingredients-table__index">${index + 1}</td>
-                                <td class="ration-ingredients-table__name">${escapeHtml(ingredient?.name || "Без названия")}</td>
+                                <td class="ration-ingredients-table__name">${renderIngredientNameWithComponents(ingredient)}</td>
                                 <td class="ration-ingredients-table__weight">${formatWeight(ingredient?.plannedWeight)}</td>
                             </tr>
                         `).join("")}
@@ -735,12 +877,58 @@ $(document).ready(function () {
             }
             seenIngredients.add(normalizedIngredientName);
 
-            const plannedWeight = parseFormNumber(row.plannedWeight);
+            let plannedWeight = parseFormNumber(row.plannedWeight);
+            let components = [];
+
+            if (row.isCompound) {
+                const seenComponents = new Set();
+                components = Array.isArray(row.components) ? row.components : [];
+
+                if (!components.length) {
+                    return { ok: false, message: `Составной ингредиент "${name}": добавьте состав` };
+                }
+
+                for (let componentIndex = 0; componentIndex < components.length; componentIndex += 1) {
+                    const component = components[componentIndex];
+                    const componentName = normalizeText(component?.name);
+
+                    if (!componentName) {
+                        return { ok: false, message: `Составной ингредиент "${name}", строка #${componentIndex + 1}: укажите название` };
+                    }
+
+                    const normalizedComponentName = normalizeComparableName(componentName);
+                    if (seenComponents.has(normalizedComponentName)) {
+                        return { ok: false, message: `Составной ингредиент "${name}": компонент "${componentName}" дублируется` };
+                    }
+                    seenComponents.add(normalizedComponentName);
+
+                    const componentWeight = parseFormNumber(component?.plannedWeight);
+                    if (componentWeight === null || componentWeight <= 0) {
+                        return { ok: false, message: `Составной ингредиент "${name}", "${componentName}": вес должен быть больше 0` };
+                    }
+
+                    components[componentIndex] = {
+                        ...component,
+                        name: componentName,
+                        plannedWeight: componentWeight,
+                    };
+                }
+
+                plannedWeight = components.reduce((sum, component) => sum + (parseFormNumber(component.plannedWeight) || 0), 0);
+            }
             if (plannedWeight === null || plannedWeight <= 0) {
                 return { ok: false, message: `Ингредиент "${name}": вес должен быть больше 0` };
             }
 
-            ingredients.push({ name, plannedWeight });
+            ingredients.push({
+                name,
+                plannedWeight,
+                isCompound: Boolean(row.isCompound),
+                components: row.isCompound ? components.map((component) => ({
+                    name: component.name,
+                    plannedWeight: parseFormNumber(component.plannedWeight) || 0,
+                })) : [],
+            });
         }
 
         if (!ingredients.length) {
@@ -773,6 +961,21 @@ $(document).ready(function () {
             row.querySelectorAll("[data-ingredient-field]").forEach((input) => {
                 const field = input.getAttribute("data-ingredient-field");
                 item[field] = input.value;
+            });
+        });
+
+        manualIngredientsBody.querySelectorAll("[data-compound-parent-id][data-component-id]").forEach((row) => {
+            const parentId = row.getAttribute("data-compound-parent-id");
+            const componentId = row.getAttribute("data-component-id");
+            const parent = state.manualIngredients.find((ingredient) => ingredient.localId === parentId);
+            const component = parent?.components?.find((item) => item.localId === componentId);
+            if (!component) {
+                return;
+            }
+
+            row.querySelectorAll("[data-component-field]").forEach((input) => {
+                const field = input.getAttribute("data-component-field");
+                component[field] = input.value;
             });
         });
 
@@ -859,6 +1062,8 @@ $(document).ready(function () {
             .map((ingredient) => makeIngredientRow({
                 name: ingredient?.name || "",
                 plannedWeight: ingredient?.plannedWeight ?? "",
+                isCompound: Boolean(ingredient?.isCompound),
+                components: Array.isArray(ingredient?.components) ? ingredient.components : [],
             }));
 
         if (!state.manualIngredients.length) {
@@ -1065,6 +1270,10 @@ $(document).ready(function () {
         addManualIngredientRow();
     });
 
+    manualAddCompoundIngredientButton?.addEventListener("click", function () {
+        addManualCompoundIngredientRow();
+    });
+
     manualGroupsSelect?.addEventListener("change", function () {
         state.manualSelectedGroupIds = Array.from(manualGroupsSelect.selectedOptions)
             .map((option) => Number(option.value))
@@ -1073,6 +1282,28 @@ $(document).ready(function () {
     });
 
     manualIngredientsBody?.addEventListener("input", function (event) {
+        const componentInput = event.target.closest("[data-component-field]");
+        if (componentInput) {
+            const row = componentInput.closest("[data-compound-parent-id][data-component-id]");
+            const parentId = row?.getAttribute("data-compound-parent-id");
+            const componentId = row?.getAttribute("data-component-id");
+            const parent = state.manualIngredients.find((ingredient) => ingredient.localId === parentId);
+            const component = parent?.components?.find((item) => item.localId === componentId);
+            if (!component) {
+                return;
+            }
+
+            component[componentInput.getAttribute("data-component-field")] = componentInput.value;
+            const parentRow = Array.from(manualIngredientsBody.querySelectorAll("tr[data-ingredient-id]"))
+                .find((item) => item.getAttribute("data-ingredient-id") === parentId);
+            const parentWeightInput = parentRow?.querySelector("[data-ingredient-field='plannedWeight']");
+            if (parentWeightInput) {
+                parentWeightInput.value = getIngredientPlannedWeight(parent) || "";
+            }
+            updateManualSummary();
+            return;
+        }
+
         const input = event.target.closest("[data-ingredient-field]");
         if (!input) {
             return;
@@ -1090,6 +1321,32 @@ $(document).ready(function () {
     });
 
     manualIngredientsBody?.addEventListener("click", function (event) {
+        const addComponentButton = event.target.closest("[data-action='add-compound-component']");
+        if (addComponentButton && !state.isManualSaving) {
+            syncManualRowsFromInputs();
+            const parentId = addComponentButton.getAttribute("data-parent-id");
+            const parent = state.manualIngredients.find((ingredient) => ingredient.localId === parentId);
+            if (parent?.isCompound) {
+                parent.components = Array.isArray(parent.components) ? parent.components : [];
+                parent.components.push(makeCompoundComponentRow());
+                updateManualState();
+            }
+            return;
+        }
+
+        const removeComponentButton = event.target.closest("[data-action='remove-compound-component']");
+        if (removeComponentButton && !state.isManualSaving) {
+            syncManualRowsFromInputs();
+            const parentId = removeComponentButton.getAttribute("data-parent-id");
+            const componentId = removeComponentButton.getAttribute("data-component-id");
+            const parent = state.manualIngredients.find((ingredient) => ingredient.localId === parentId);
+            if (parent?.isCompound && Array.isArray(parent.components) && parent.components.length > 1) {
+                parent.components = parent.components.filter((component) => component.localId !== componentId);
+                updateManualState();
+            }
+            return;
+        }
+
         const actionButton = event.target.closest("[data-action='remove-ingredient']");
         if (!actionButton || state.manualIngredients.length <= 1 || state.isManualSaving) {
             return;

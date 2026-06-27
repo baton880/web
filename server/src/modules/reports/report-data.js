@@ -1,5 +1,5 @@
 import prisma from '../../database.js';
-import { aggregateFacts, getBatchPlan } from '../batches/batch-violations.js';
+import { aggregateFacts, buildIngredientSummary, getBatchPlan } from '../batches/batch-violations.js';
 
 export const DEFAULT_LIMIT = 500;
 export const MAX_LIMIT = 1000;
@@ -10,6 +10,14 @@ export const WORKFLOW_STATUSES_RESOLVED = new Set(['CLOSED', 'RESOLVED']);
 
 function round1(value) {
     return Math.round(Number(value || 0) * 10) / 10;
+}
+
+const REPORT_NO_RATION = '\u0411\u0435\u0437 \u0440\u0430\u0446\u0438\u043e\u043d\u0430';
+const REPORT_NO_GROUP = '\u0411\u0435\u0437 \u0433\u0440\u0443\u043f\u043f\u044b';
+const REPORT_BATCH_PREFIX = '\u0417\u0430\u043c\u0435\u0441';
+
+function buildReportBatchLabel(batchId) {
+    return `${REPORT_BATCH_PREFIX} #${batchId}`;
 }
 
 export function parsePositiveInt(value, fallback) {
@@ -93,7 +101,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                                     id: true,
                                     name: true,
                                     plannedWeight: true,
-                                    dryMatterWeight: true
+                                    dryMatterWeight: true,
+                                    isCompound: true,
+                                    componentsJson: true
                                 }
                             }
                         }
@@ -109,7 +119,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                             id: true,
                             name: true,
                             plannedWeight: true,
-                            dryMatterWeight: true
+                            dryMatterWeight: true,
+                            isCompound: true,
+                            componentsJson: true
                         }
                     }
                 }
@@ -165,6 +177,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
 
     const reportBatches = [];
     const reportViolations = [];
+    const reportComponents = [];
     const componentsCounter = new Map();
     const groupsCounter = new Map();
     let activeViolationsCount = 0;
@@ -188,8 +201,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         reportBatches.push({
             id: batch.id,
             date: batchDate,
-            rationName: batch.ration?.name || 'Без рациона',
-            groupName: batch.group?.name || 'Без группы',
+                        rationName: batch.ration?.name || REPORT_NO_RATION,
+                        groupName: batch.group?.name || REPORT_NO_GROUP,
             planTotal: round1(plan.totalBatchWeight || 0),
             factTotal: round1(factTotal),
             violationsCount,
@@ -197,6 +210,42 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             resolvedViolationsCount: resolvedForBatchCount,
             hasViolations: violationsCount > 0
         });
+
+        const componentRows = buildIngredientSummary(batch);
+        for (const componentRow of componentRows) {
+            if (componentRow.isCompound && Array.isArray(componentRow.components) && componentRow.components.length > 0) {
+                for (const child of componentRow.components) {
+                    reportComponents.push({
+                        batchId: batch.id,
+                        date: batchDate,
+                        batchLabel: buildReportBatchLabel(batch.id),
+                        rationName: batch.ration?.name || REPORT_NO_RATION,
+                        groupName: batch.group?.name || REPORT_NO_GROUP,
+                        parentComponent: componentRow.name,
+                        component: child.name,
+                        plan: round1(child.plan || 0),
+                        fact: round1(child.fact || 0),
+                        deviation: round1((child.fact || 0) - (child.plan || 0)),
+                        deviationPercent: child.deviation_percent ?? 0
+                    });
+                }
+                continue;
+            }
+
+            reportComponents.push({
+                batchId: batch.id,
+                date: batchDate,
+                        batchLabel: buildReportBatchLabel(batch.id),
+                        rationName: batch.ration?.name || REPORT_NO_RATION,
+                        groupName: batch.group?.name || REPORT_NO_GROUP,
+                parentComponent: '',
+                component: componentRow.name,
+                plan: round1(componentRow.plan || 0),
+                fact: round1(componentRow.fact || 0),
+                deviation: round1((componentRow.fact || 0) - (componentRow.plan || 0)),
+                deviationPercent: componentRow.deviation_percent ?? 0
+            });
+        }
     }
 
     for (const violation of violations) {
@@ -252,6 +301,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         },
         batches: reportBatches,
         violations: reportViolations,
+        components: reportComponents,
         summary: {
             counts: {
                 batches: reportBatches.length,

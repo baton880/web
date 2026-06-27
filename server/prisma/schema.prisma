@@ -150,6 +150,8 @@ model RationIngredient {
   name            String   
   plannedWeight   Float    
   dryMatterWeight Float    
+  isCompound      Boolean  @default(false)
+  componentsJson  String?
 }
 
 enum UserRole {

@@ -52,6 +52,60 @@ function parseNumber(value) {
   return null;
 }
 
+function serializeCompoundComponents(components) {
+  if (!Array.isArray(components) || components.length === 0) {
+    return null;
+  }
+
+  return JSON.stringify(components.map((component) => ({
+    name: component.name,
+    plannedWeight: component.plannedWeight
+  })));
+}
+
+function parseCompoundComponentsJson(value) {
+  if (!value) return [];
+
+  try {
+    const parsed = JSON.parse(value);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed
+      .map((component) => ({
+        name: normalizeText(component?.name),
+        plannedWeight: parseNumber(component?.plannedWeight)
+      }))
+      .filter((component) => component.name && component.plannedWeight !== null && component.plannedWeight > 0);
+  } catch (error) {
+    return [];
+  }
+}
+
+function formatRationIngredient(ingredient) {
+  const components = parseCompoundComponentsJson(ingredient?.componentsJson);
+
+  return {
+    id: ingredient.id,
+    rationId: ingredient.rationId,
+    name: ingredient.name,
+    plannedWeight: ingredient.plannedWeight,
+    dryMatterWeight: ingredient.dryMatterWeight,
+    isCompound: Boolean(ingredient.isCompound),
+    components
+  };
+}
+
+function formatRation(ration) {
+  if (!ration) return ration;
+
+  return {
+    ...ration,
+    ingredients: Array.isArray(ration.ingredients)
+      ? ration.ingredients.map(formatRationIngredient)
+      : []
+  };
+}
+
 function parseGroupIdsInput(value) {
   if (value === undefined || value === null || value === '') {
     return { ok: true, groupIds: null };
@@ -100,7 +154,43 @@ function validateIngredients(ingredients) {
     }
     seen.add(normalizedIngredientName);
 
-    const plannedWeight = parseNumber(row.plannedWeight);
+    const isCompound = row.isCompound === true || row.type === 'compound';
+    let components = [];
+    let plannedWeight = parseNumber(row.plannedWeight);
+
+    if (isCompound) {
+      if (!Array.isArray(row.components) || row.components.length === 0) {
+        return { ok: false, error: `Составной ингредиент "${ingredientName}": добавьте состав` };
+      }
+
+      const seenComponents = new Set();
+      for (let componentIndex = 0; componentIndex < row.components.length; componentIndex += 1) {
+        const component = row.components[componentIndex] || {};
+        const componentName = normalizeText(component.name);
+
+        if (!componentName) {
+          return { ok: false, error: `Составной ингредиент "${ingredientName}", строка #${componentIndex + 1}: укажите название` };
+        }
+
+        const normalizedComponentName = componentName.toLowerCase();
+        if (seenComponents.has(normalizedComponentName)) {
+          return { ok: false, error: `Составной ингредиент "${ingredientName}": компонент "${componentName}" дублируется` };
+        }
+        seenComponents.add(normalizedComponentName);
+
+        const componentWeight = parseNumber(component.plannedWeight);
+        if (componentWeight === null || componentWeight <= 0) {
+          return { ok: false, error: `Составной ингредиент "${ingredientName}", "${componentName}": вес должен быть > 0` };
+        }
+
+        components.push({
+          name: componentName,
+          plannedWeight: componentWeight
+        });
+      }
+
+      plannedWeight = components.reduce((sum, component) => sum + component.plannedWeight, 0);
+    }
     if (plannedWeight === null || plannedWeight <= 0) {
       return { ok: false, error: `Ингредиент "${ingredientName}": plannedWeight должен быть > 0` };
     }
@@ -124,7 +214,9 @@ function validateIngredients(ingredients) {
     result.push({
       name: ingredientName,
       plannedWeight,
-      dryMatterWeight
+      dryMatterWeight,
+      isCompound,
+      componentsJson: isCompound ? serializeCompoundComponents(components) : null
     });
   }
 
@@ -257,7 +349,7 @@ router.post('/', requireWriteAccess, async (req, res) => {
       });
     });
 
-    res.status(201).json({ status: 'ok', ration });
+    res.status(201).json({ status: 'ok', ration: formatRation(ration) });
   } catch (error) {
     console.error('[Ошибка POST /rations]:', error);
     if (error.code === 'P2002') {
@@ -363,7 +455,7 @@ router.post('/upload', requireWriteAccess, upload.single('file'), async (req, re
     });
 
     console.log(`[Рационы] Загружен рацион "${rationName}"`);
-    res.status(201).json({ status: 'ok', ration: rationWithGroups || newRation });
+    res.status(201).json({ status: 'ok', ration: formatRation(rationWithGroups || newRation) });
 
   } catch (error) {
     console.error('[Ошибка POST /upload]:', error);
@@ -392,7 +484,7 @@ router.get('/', requireReadAccess, async (req, res) => {
       },
       orderBy: { createdAt: 'desc' }
     });
-    res.json(rations);
+    res.json(rations.map(formatRation));
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
   }
@@ -516,7 +608,9 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
               rationId: id,
               name: item.name,
               plannedWeight: item.plannedWeight,
-              dryMatterWeight: item.dryMatterWeight
+              dryMatterWeight: item.dryMatterWeight,
+              isCompound: item.isCompound,
+              componentsJson: item.componentsJson
             }))
           });
         }
@@ -550,7 +644,7 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
       });
     });
 
-    res.json({ status: 'ok', ration });
+    res.json({ status: 'ok', ration: formatRation(ration) });
   } catch (error) {
     console.error('[Ошибка PATCH /rations/:id]:', error);
     if (error.code === 'P2002') {

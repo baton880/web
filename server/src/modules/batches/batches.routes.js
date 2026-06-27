@@ -128,7 +128,16 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
                 id: ing.id,
                 name: ing.name,
                 plannedWeight: ing.plannedWeight,
-                dryMatterWeight: ing.dryMatterWeight
+                dryMatterWeight: ing.dryMatterWeight,
+                isCompound: Boolean(ing.isCompound),
+                components: (() => {
+                    try {
+                        const parsed = JSON.parse(ing.componentsJson || '[]');
+                        return Array.isArray(parsed) ? parsed : [];
+                    } catch (error) {
+                        return [];
+                    }
+                })()
             }))
         } : null,
         group: batch.group ? {
