@@ -19,30 +19,13 @@ $(document).ready(function () {
     const manualCancelButton = document.getElementById("rationManualCancelButton");
     const manualSubmitButton = document.getElementById("rationManualSubmitButton");
 
-    const uploadForm = document.getElementById("rationUploadForm");
-    const uploadNameInput = document.getElementById("rationUploadName");
-    const uploadGroupsSelect = document.getElementById("rationUploadGroups");
-    const uploadDropzone = document.getElementById("rationUploadDropzone");
-    const uploadFileInput = document.getElementById("rationUploadFile");
-    const uploadFileMeta = document.getElementById("rationUploadFileMeta");
-    const uploadClearFileButton = document.getElementById("rationUploadClearFileButton");
-    const uploadSubmitButton = document.getElementById("rationUploadSubmitButton");
-    const selectedGroupsPreview = document.getElementById("rationSelectedGroupsPreview");
-
     if (!rationsTableBody || !rationsPanelMeta) {
         return;
     }
 
     const RATIONS_API_URL = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
-    const RATIONS_UPLOAD_URL = window.AppAuth?.getApiUrl?.("/api/rations/upload") || "/api/rations/upload";
     const GROUPS_API_URL = window.AppAuth?.getApiUrl?.("/api/groups") || "/api/groups";
     const canWrite = Boolean(window.AppAuth?.hasWriteAccess?.());
-    const EXCEL_FILE_ACCEPT = ".xlsx,.xls";
-    const EXCEL_FILE_EXTENSIONS = [".xlsx", ".xls"];
-    const EXCEL_FILE_MIME_TYPES = new Set([
-        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        "application/vnd.ms-excel",
-    ]);
 
     const weightFormatter = new Intl.NumberFormat("ru-RU", {
         minimumFractionDigits: 0,
@@ -53,12 +36,9 @@ $(document).ready(function () {
         rations: [],
         groups: [],
         isLoading: false,
-        isUploading: false,
         isManualSaving: false,
         lastLoadError: "",
         activeLoadId: 0,
-        selectedFile: null,
-        uploadSelectedGroupIds: [],
         manualSelectedGroupIds: [],
         manualIngredients: [],
         editingRationId: null,
@@ -84,33 +64,6 @@ $(document).ready(function () {
 
     function normalizeComparableName(value) {
         return normalizeText(value).toLowerCase();
-    }
-
-    function configureUploadFileInput() {
-        if (!uploadFileInput) {
-            return;
-        }
-
-        uploadFileInput.setAttribute("accept", EXCEL_FILE_ACCEPT);
-        uploadFileInput.removeAttribute("capture");
-        uploadFileInput.removeAttribute("multiple");
-    }
-
-    function isExcelFile(file) {
-        if (!file) {
-            return false;
-        }
-
-        const name = String(file.name || "").toLowerCase();
-        const type = String(file.type || "").toLowerCase();
-        return EXCEL_FILE_EXTENSIONS.some((extension) => name.endsWith(extension)) ||
-            EXCEL_FILE_MIME_TYPES.has(type);
-    }
-
-    function clearUploadFileInput() {
-        if (uploadFileInput) {
-            uploadFileInput.value = "";
-        }
     }
 
     function getHeaders(includeJson) {
@@ -164,15 +117,6 @@ $(document).ready(function () {
 
         const parsed = Number(normalized);
         return Number.isFinite(parsed) ? parsed : null;
-    }
-
-    function formatFileMeta(file) {
-        if (!file) {
-            return "";
-        }
-
-        const sizeKb = Math.max(Math.round(file.size / 102.4) / 10, 0.1);
-        return `${file.name} | ${escapeHtml(weightFormatter.format(sizeKb))} КБ`;
     }
 
     function setPanelMeta(message) {
@@ -270,16 +214,6 @@ $(document).ready(function () {
         state[target] = state[target].filter((id) => validGroupIds.has(Number(id)));
     }
 
-    function renderUploadGroupsSelect() {
-        if (!uploadGroupsSelect) {
-            return;
-        }
-
-        syncSelectedGroupIds("uploadSelectedGroupIds");
-        uploadGroupsSelect.innerHTML = buildGroupOptions(state.uploadSelectedGroupIds);
-        uploadGroupsSelect.disabled = !canWrite || state.isUploading || state.isManualSaving || !state.groups.length;
-    }
-
     function renderManualGroupsSelect() {
         if (!manualGroupsSelect) {
             return;
@@ -304,40 +238,6 @@ $(document).ready(function () {
         host.innerHTML = selectedGroups.map((group) => (
             `<span class="ration-groups-preview__badge">${escapeHtml(group?.name || `Группа #${group?.id || "-"}`)}</span>`
         )).join("");
-    }
-
-    function updateUploadState() {
-        if (uploadNameInput) {
-            uploadNameInput.disabled = !canWrite || state.isUploading || state.isManualSaving;
-        }
-
-        renderUploadGroupsSelect();
-
-        if (uploadFileInput) {
-            uploadFileInput.disabled = !canWrite || state.isUploading || state.isManualSaving;
-        }
-
-        if (uploadDropzone) {
-            uploadDropzone.classList.toggle("is-disabled", !canWrite || state.isUploading || state.isManualSaving);
-        }
-
-        if (uploadSubmitButton) {
-            uploadSubmitButton.disabled = !canWrite || state.isUploading || state.isManualSaving;
-            uploadSubmitButton.innerHTML = state.isUploading
-                ? '<span class="spinner-border spinner-border-sm mr-2" role="status" aria-hidden="true"></span>Загрузка...'
-                : '<i class="fas fa-upload mr-1"></i>Создать рацион';
-        }
-
-        if (uploadFileMeta) {
-            uploadFileMeta.textContent = formatFileMeta(state.selectedFile);
-        }
-
-        if (uploadClearFileButton) {
-            uploadClearFileButton.classList.toggle("d-none", !state.selectedFile);
-            uploadClearFileButton.disabled = !canWrite || state.isUploading || state.isManualSaving || !state.selectedFile;
-        }
-
-        renderGroupsPreview(selectedGroupsPreview, state.uploadSelectedGroupIds);
     }
 
     function renderCompoundComponentsEditor(ingredient) {
@@ -549,7 +449,7 @@ $(document).ready(function () {
         if (manualFormMeta) {
             manualFormMeta.textContent = isEditing
                 ? "Изменения состава и групп сохраняются полной заменой"
-                : "Заполните состав рациона без Excel";
+                : "Заполните состав рациона вручную";
         }
 
         if (manualIdInput) {
@@ -584,7 +484,7 @@ $(document).ready(function () {
         }
 
         if (reloadButton) {
-            reloadButton.disabled = state.isLoading || state.isUploading || state.isManualSaving;
+            reloadButton.disabled = state.isLoading || state.isManualSaving;
         }
     }
 
@@ -785,7 +685,6 @@ $(document).ready(function () {
     function syncUiState() {
         renderTable();
         updateManualState();
-        updateUploadState();
     }
 
     async function fetchJson(url) {
@@ -1084,106 +983,6 @@ $(document).ready(function () {
         manualNameInput?.focus?.();
     }
 
-    function handleSelectedFile(file) {
-        if (file && !isExcelFile(file)) {
-            state.selectedFile = null;
-            clearUploadFileInput();
-            showAlert("Выберите Excel-файл в формате .xlsx или .xls", "danger");
-            updateUploadState();
-            return;
-        }
-
-        state.selectedFile = file || null;
-        if (uploadFileInput && file && uploadFileInput.files?.[0] !== file) {
-            try {
-                const transfer = new DataTransfer();
-                transfer.items.add(file);
-                uploadFileInput.files = transfer.files;
-            } catch (error) {
-                uploadFileInput.value = "";
-            }
-        }
-
-        updateUploadState();
-    }
-
-    function clearSelectedUploadFile() {
-        state.selectedFile = null;
-        clearUploadFileInput();
-        updateUploadState();
-        uploadFileInput?.focus();
-    }
-
-    function resetUploadForm() {
-        state.selectedFile = null;
-        state.uploadSelectedGroupIds = [];
-        clearUploadFileInput();
-
-        if (uploadForm) {
-            uploadForm.reset();
-        }
-
-        updateUploadState();
-    }
-
-    async function uploadRation() {
-        if (!canWrite) {
-            return;
-        }
-
-        const rationName = normalizeText(uploadNameInput?.value || "");
-        if (!rationName) {
-            showAlert("Укажите название рациона", "danger");
-            uploadNameInput?.focus();
-            return;
-        }
-
-        if (!state.selectedFile) {
-            showAlert("Выберите Excel-файл", "danger");
-            uploadFileInput?.focus();
-            return;
-        }
-
-        if (!isExcelFile(state.selectedFile)) {
-            showAlert("Выберите Excel-файл в формате .xlsx или .xls", "danger");
-            uploadFileInput?.focus();
-            return;
-        }
-
-        const formData = new FormData();
-        formData.append("name", rationName);
-        formData.append("file", state.selectedFile);
-
-        if (state.uploadSelectedGroupIds.length) {
-            formData.append("groups", JSON.stringify(state.uploadSelectedGroupIds));
-        }
-
-        state.isUploading = true;
-        syncUiState();
-
-        try {
-            const response = await fetch(RATIONS_UPLOAD_URL, {
-                method: "POST",
-                headers: getHeaders(false),
-                body: formData,
-            });
-
-            if (!response.ok) {
-                const message = await readErrorMessage(response);
-                throw new Error(message || "Не удалось загрузить рацион");
-            }
-
-            showAlert("Рацион успешно загружен", "success");
-            resetUploadForm();
-            await loadPageData({ silentError: false });
-        } catch (error) {
-            showAlert(error.message || "Не удалось загрузить рацион", "danger");
-        } finally {
-            state.isUploading = false;
-            syncUiState();
-        }
-    }
-
     async function toggleRation(rationId) {
         const ration = state.rations.find((item) => Number(item?.id) === Number(rationId));
         if (!ration || !canWrite) {
@@ -1361,90 +1160,8 @@ $(document).ready(function () {
         updateManualState();
     });
 
-    uploadForm?.addEventListener("submit", function (event) {
-        event.preventDefault();
-        uploadRation();
-    });
-
     reloadButton?.addEventListener("click", function () {
         loadPageData({ silentError: false });
-    });
-
-    uploadGroupsSelect?.addEventListener("change", function () {
-        state.uploadSelectedGroupIds = Array.from(uploadGroupsSelect.selectedOptions)
-            .map((option) => Number(option.value))
-            .filter((value) => Number.isInteger(value) && value > 0);
-        renderGroupsPreview(selectedGroupsPreview, state.uploadSelectedGroupIds);
-    });
-
-    uploadFileInput?.addEventListener("change", function () {
-        handleSelectedFile(uploadFileInput.files?.[0] || null);
-    });
-
-    uploadClearFileButton?.addEventListener("click", function () {
-        if (state.isUploading || state.isManualSaving) {
-            return;
-        }
-
-        clearSelectedUploadFile();
-    });
-
-    uploadDropzone?.addEventListener("click", function () {
-        if (!canWrite || state.isUploading || state.isManualSaving) {
-            return;
-        }
-
-        configureUploadFileInput();
-        uploadFileInput?.click();
-    });
-
-    uploadDropzone?.addEventListener("keydown", function (event) {
-        if (event.key !== "Enter" && event.key !== " ") {
-            return;
-        }
-
-        event.preventDefault();
-        if (!canWrite || state.isUploading || state.isManualSaving) {
-            return;
-        }
-
-        configureUploadFileInput();
-        uploadFileInput?.click();
-    });
-
-    ["dragenter", "dragover"].forEach((eventName) => {
-        uploadDropzone?.addEventListener(eventName, function (event) {
-            if (!canWrite || state.isUploading || state.isManualSaving) {
-                return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            uploadDropzone.classList.add("is-dragover");
-        });
-    });
-
-    ["dragleave", "dragend", "drop"].forEach((eventName) => {
-        uploadDropzone?.addEventListener(eventName, function (event) {
-            if (!canWrite || state.isUploading || state.isManualSaving) {
-                return;
-            }
-
-            event.preventDefault();
-            event.stopPropagation();
-            uploadDropzone.classList.remove("is-dragover");
-        });
-    });
-
-    uploadDropzone?.addEventListener("drop", function (event) {
-        if (!canWrite || state.isUploading || state.isManualSaving) {
-            return;
-        }
-
-        const file = event.dataTransfer?.files?.[0] || null;
-        if (file) {
-            handleSelectedFile(file);
-        }
     });
 
     rationsTableBody.addEventListener("click", function (event) {
@@ -1474,8 +1191,6 @@ $(document).ready(function () {
         }
     });
 
-    configureUploadFileInput();
     resetManualForm();
-    updateUploadState();
     loadPageData({ silentError: true });
 });

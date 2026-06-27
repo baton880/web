@@ -953,99 +953,6 @@ span.batch-ingredient-editor__trigger {
     line-height: 1.45;
 }
 
-.ration-upload-dropzone {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    gap: 0.45rem;
-    min-height: 180px;
-    padding: 1.25rem;
-    border: 2px dashed rgba(118, 186, 27, 0.42);
-    border-radius: 1rem;
-    background: linear-gradient(180deg, rgba(248, 249, 252, 0.92), rgba(255, 255, 255, 0.98));
-    color: #4f5d75;
-    text-align: center;
-    cursor: pointer;
-    transition: border-color 0.18s ease, box-shadow 0.18s ease, transform 0.18s ease, background-color 0.18s ease;
-}
-
-.ration-upload-dropzone:hover,
-.ration-upload-dropzone:focus {
-    outline: none;
-    transform: translateY(-1px);
-    border-color: rgba(118, 186, 27, 0.62);
-    box-shadow: 0 14px 28px rgba(45, 90, 39, 0.1);
-}
-
-.ration-upload-dropzone.is-dragover {
-    border-color: #76BA1B;
-    background: linear-gradient(180deg, rgba(234, 243, 229, 0.95), rgba(255, 255, 255, 0.98));
-    box-shadow: 0 16px 32px rgba(45, 90, 39, 0.14);
-}
-
-.ration-upload-dropzone.is-disabled {
-    opacity: 0.65;
-    cursor: not-allowed;
-    transform: none;
-    box-shadow: none;
-}
-
-.ration-upload-dropzone__icon {
-    display: inline-flex;
-    align-items: center;
-    justify-content: center;
-    width: 3.5rem;
-    height: 3.5rem;
-    border-radius: 999px;
-    background: rgba(118, 186, 27, 0.16);
-    color: #2D5A27;
-    font-size: 1.4rem;
-}
-
-.ration-upload-dropzone__title {
-    color: #2f3a4f;
-    font-size: 1rem;
-    font-weight: 800;
-}
-
-.ration-upload-dropzone__meta {
-    color: #6b7a96;
-    font-size: 0.9rem;
-    font-weight: 600;
-}
-
-.ration-upload-input {
-    margin-top: 0.75rem;
-    padding: 0.65rem 0.75rem;
-    border: 1px solid #d1d3e2;
-    border-radius: 0.65rem;
-    background: #fff;
-    color: #4f5d75;
-    font-size: 0.95rem;
-    font-weight: 600;
-}
-
-.ration-upload-input:focus {
-    border-color: #76BA1B;
-    box-shadow: 0 0 0 0.2rem rgba(118, 186, 27, 0.22);
-    outline: none;
-}
-
-.ration-upload-file-row {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    gap: 0.75rem;
-}
-
-.ration-upload-clear-file {
-    display: inline-flex;
-    align-items: center;
-    gap: 0.35rem;
-    white-space: nowrap;
-}
-
 .ration-groups-preview {
     display: flex;
     flex-wrap: wrap;
@@ -1370,17 +1277,6 @@ span.batch-ingredient-editor__trigger {
     gap: 0.45rem;
     font-weight: 700;
     white-space: nowrap;
-}
-
-@media (max-width: 991.98px) {
-    .ration-upload-dropzone {
-        min-height: 150px;
-    }
-
-    .ration-upload-input {
-        min-height: 44px;
-        font-size: 16px;
-    }
 }
 
 .telemetry-page-meta {
@@ -2924,8 +2820,7 @@ h6.text-primary {
 .dropdown-item.active,
 .dropdown-item:active,
 .progress-bar,
-.batch-unloading-card__icon,
-.ration-upload-dropzone__icon {
+.batch-unloading-card__icon {
     color: var(--korovki-primary-text) !important;
     background-color: var(--korovki-primary) !important;
     border-color: var(--korovki-primary) !important;
@@ -2995,19 +2890,6 @@ h6.text-primary {
 .telemetry-table thead th,
 .admin-users-table thead th {
     color: var(--korovki-sidebar) !important;
-}
-
-.ration-upload-dropzone,
-.ration-upload-dropzone:hover,
-.ration-upload-dropzone:focus,
-.ration-upload-dropzone.is-dragover {
-    border-color: rgba(118, 186, 27, 0.5) !important;
-    box-shadow: 0 14px 28px rgba(45, 90, 39, 0.1) !important;
-}
-
-.ration-upload-dropzone__title,
-.ration-upload-dropzone__meta {
-    color: var(--korovki-text) !important;
 }
 
 .violations-summary-card--progress,
@@ -3430,8 +3312,7 @@ ul.sidebar.bg-gradient-primary,
 .dropdown-item.active,
 .dropdown-item:active,
 .progress-bar,
-.batch-unloading-card__icon,
-.ration-upload-dropzone__icon {
+.batch-unloading-card__icon {
   color: var(--dark-main) !important;
   background-color: var(--accent-yellow) !important;
   border-color: var(--accent-yellow) !important;
@@ -3827,15 +3708,6 @@ textarea.form-control,
 
 .dashboard-progress-bar.is-over {
   background: linear-gradient(90deg, var(--warning-main) 0%, var(--danger-main) 100%) !important;
-}
-
-.ration-upload-dropzone,
-.ration-upload-dropzone:hover,
-.ration-upload-dropzone:focus,
-.ration-upload-dropzone.is-dragover {
-  background: var(--bg-surface) !important;
-  border-color: rgba(214, 184, 74, 0.54) !important;
-  box-shadow: var(--shadow-card) !important;
 }
 
 .admin-panel-tabs {

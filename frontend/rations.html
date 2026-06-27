@@ -116,7 +116,7 @@
                     <div class="card shadow mb-4" data-requires-write>
                         <div class="card-header py-3 d-sm-flex align-items-center justify-content-between">
                             <h6 id="rationManualFormTitle" class="m-0 font-weight-bold text-primary">Ручное создание рациона</h6>
-                            <div id="rationManualFormMeta" class="small text-muted mt-2 mt-sm-0">Заполните состав рациона без Excel</div>
+                            <div id="rationManualFormMeta" class="small text-muted mt-2 mt-sm-0">Заполните состав рациона вручную</div>
                         </div>
                         <div class="card-body">
                             <form id="rationManualForm" novalidate>
@@ -179,52 +179,6 @@
                                             Сохранить рацион
                                         </button>
                                     </div>
-                                </div>
-                            </form>
-                        </div>
-                    </div>
-
-                    <div class="card shadow mb-4" data-requires-write hidden>
-                        <div class="card-header py-3">
-                            <h6 class="m-0 font-weight-bold text-primary">Загрузка Excel</h6>
-                        </div>
-                        <div class="card-body">
-                            <form id="rationUploadForm" novalidate>
-                                <div class="form-row">
-                                    <div class="col-lg-4 mb-3">
-                                        <label class="small text-primary font-weight-bold text-uppercase mb-2" for="rationUploadName">Название рациона</label>
-                                        <input id="rationUploadName" name="name" type="text" class="form-control" maxlength="120" placeholder="Например, Рацион для группы 1">
-                                    </div>
-                                    <div class="col-lg-4 mb-3">
-                                        <label class="small text-primary font-weight-bold text-uppercase mb-2" for="rationUploadGroups">Группы</label>
-                                        <select id="rationUploadGroups" name="groups" class="custom-select" multiple size="6"></select>
-                                    </div>
-                                    <div class="col-lg-4 mb-3">
-                                        <label class="small text-primary font-weight-bold text-uppercase mb-2" for="rationUploadFile">Excel-файл</label>
-                                        <div id="rationUploadDropzone" class="ration-upload-dropzone" tabindex="0" role="button" aria-label="Перетащите Excel-файл или выберите его вручную">
-                                            <div class="ration-upload-dropzone__icon">
-                                                <i class="fas fa-file-excel" aria-hidden="true"></i>
-                                            </div>
-                                            <div class="ration-upload-dropzone__title">Перетащите файл сюда</div>
-                                            <div class="ration-upload-dropzone__meta">или выберите `.xlsx` / `.xls` вручную</div>
-                                        </div>
-                                        <input id="rationUploadFile" name="file" type="file" class="form-control-file ration-upload-input" accept=".xlsx,.xls">
-                                        <div class="ration-upload-file-row mt-2">
-                                            <div id="rationUploadFileMeta" class="small text-muted"></div>
-                                            <button id="rationUploadClearFileButton" type="button" class="btn btn-outline-secondary btn-sm ration-upload-clear-file d-none" aria-label="Отменить выбор файла">
-                                                <i class="fas fa-times" aria-hidden="true"></i>
-                                                <span>Отменить выбор</span>
-                                            </button>
-                                        </div>
-                                    </div>
-                                </div>
-
-                                <div class="d-flex flex-column flex-lg-row align-items-lg-center justify-content-between mt-2">
-                                    <div id="rationSelectedGroupsPreview" class="ration-groups-preview mb-3 mb-lg-0"></div>
-                                    <button id="rationUploadSubmitButton" type="submit" class="btn btn-primary">
-                                        <i class="fas fa-upload mr-1"></i>
-                                        Создать рацион
-                                    </button>
                                 </div>
                             </form>
                         </div>

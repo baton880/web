@@ -1,12 +1,3 @@
-/**
- * Обрабатывает массив строк из Excel с рационами
- * @param {Array} rawExelData - Массив объектов с русскими ключами
- * @returns {Object} Результат: { success, data, errors }
- */
-export const NAME_COLUMNS = ['Ингредиент', 'Название', 'Компонент', 'Корм', 'ingredient', 'name'];
-export const PLAN_COLUMNS = ['План', 'Вес на голову в сутки, кг', 'Вес/голову', 'Вес на голову', 'plannedWeight'];
-export const DRY_COLUMNS = ['СВ', 'Вес на голову в сутки СВ, кг', 'Вес СВ/голову', 'Сухое вещество', 'dryMatterWeight'];
-
 export function normalizeIngredientName(name) {
   return String(name || '')
     .trim()
@@ -17,111 +8,6 @@ export function normalizeIngredientName(name) {
 export function areSameIngredient(left, right) {
   return normalizeIngredientName(left) === normalizeIngredientName(right);
 }
-
-function firstValue(row, columns) {
-  for (const column of columns) {
-    if (row[column] !== undefined && row[column] !== null && String(row[column]).trim() !== '') {
-      return row[column];
-    }
-  }
-  return undefined;
-}
-
-function normalizeNumber(value) {
-  if (typeof value === 'number') return value;
-  if (value === undefined || value === null) return NaN;
-  return Number(String(value).replace(',', '.').trim());
-}
-
-export function processRationRows(rawExelData) {
-  const result = {
-    success: true,
-    data: [],
-    errors: []
-  };
-
-  if (!Array.isArray(rawExelData) || rawExelData.length === 0) {
-    return {
-      success: false,
-      data: [],
-      errors: ['В файле не найдено строк с рационом']
-    };
-  }
-
-  const availableColumns = new Set(rawExelData.flatMap(row => Object.keys(row)));
-  const hasColumn = columns => columns.some(column => availableColumns.has(column));
-
-  if (!hasColumn(NAME_COLUMNS)) {
-    result.errors.push(`Не найдена колонка ингредиента. Поддерживаются: ${NAME_COLUMNS.join(', ')}`);
-  }
-  if (!hasColumn(PLAN_COLUMNS)) {
-    result.errors.push(`Не найдена колонка планового веса. Поддерживаются: ${PLAN_COLUMNS.join(', ')}`);
-  }
-
-  if (result.errors.length > 0) {
-    result.success = false;
-    return result;
-  }
-
-  rawExelData.forEach((row, index) => {
-    const lineNumber = index + 1;
-
-    // 1. Пропускаем пустые строки
-    const values = Object.values(row);
-    const isEmptyRow = values.every(val => 
-      val === undefined || val === null || String(val).trim() === ''
-    );
-    if (isEmptyRow) return;
-
-    // 2. Маппинг и очистка
-    const name = firstValue(row, NAME_COLUMNS) ? String(firstValue(row, NAME_COLUMNS)).trim().replace(/\s+/g, ' ') : '';
-    const plannedWeightRaw = firstValue(row, PLAN_COLUMNS);
-    const dryMatterWeightRaw = firstValue(row, DRY_COLUMNS);
-
-    if (!name) {
-      result.errors.push(`Строка ${lineNumber}: Не указано название ингредиента`);
-      result.success = false;
-      return;
-    }
-
-    // 3. Валидация: План
-    const plannedWeight = normalizeNumber(plannedWeightRaw);
-    if (isNaN(plannedWeight) || plannedWeight <= 0) {
-      result.errors.push(`Строка ${lineNumber}: Вес '${plannedWeightRaw}' не является числом или меньше/равен 0`);
-      result.success = false;
-      return;
-    }
-
-    // 4. СВ не обязательно. Если нет в файле — подставляем 0.
-    let dryMatterWeight = 0;
-    if (dryMatterWeightRaw !== undefined && String(dryMatterWeightRaw).trim() !== '') {
-      dryMatterWeight = normalizeNumber(dryMatterWeightRaw);
-      if (isNaN(dryMatterWeight) || dryMatterWeight < 0) {
-        result.errors.push(`Строка ${lineNumber}: Сухое вещество '${dryMatterWeightRaw}' не является числом или меньше 0`);
-        result.success = false;
-        return;
-      }
-
-      // 5. Физика: СВ <= вес
-      if (dryMatterWeight > plannedWeight) {
-        result.errors.push(`Строка ${lineNumber}: Сухое вещество (${dryMatterWeight}) не может быть больше планового веса (${plannedWeight})`);
-        result.success = false;
-        return;
-      }
-    }
-
-    // 6. Успех — добавляем в результат
-    result.data.push({ name, plannedWeight, dryMatterWeight });
-  });
-
-  if (result.success && result.data.length === 0) {
-    result.errors.push('В файле не найдено ни одной строки рациона');
-    result.success = false;
-  }
-
-  return result;
-}
-
 
 /**
  * Рассчитывает план замеса рациона на группу коров
@@ -297,7 +183,6 @@ export function checkViolations(planArr, factArr, thresholdOrOptions = 10, minDe
 }
 
 export default {
-  processRationRows,
   calculatePlan,
   checkViolations,
   normalizeIngredientName,

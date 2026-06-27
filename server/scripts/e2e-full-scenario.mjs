@@ -1,5 +1,3 @@
-import XLSX from 'xlsx'
-
 const BASE_URL = process.env.E2E_BASE_URL || 'http://127.0.0.1:3000'
 const scenarioLog = []
 
@@ -58,31 +56,6 @@ async function request(method, path, options = {}) {
   }
 
   return body
-}
-
-function buildRationWorkbookBuffer() {
-  const rows = [
-    { 'Ингредиент': 'Силос', 'План': 520, 'СВ': 180 },
-    { 'Ингредиент': 'Сено', 'План': 120, 'СВ': 80 }
-  ]
-
-  const worksheet = XLSX.utils.json_to_sheet(rows)
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Рацион')
-  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
-}
-
-function buildDiverseRationWorkbookBuffer() {
-  const rows = [
-    { ingredient: 'Silage', plannedWeight: 90, dryMatterWeight: 35 },
-    { ingredient: 'Hay', plannedWeight: 120, dryMatterWeight: 80 },
-    { ingredient: 'Concentrate', plannedWeight: 150, dryMatterWeight: 120 }
-  ]
-
-  const worksheet = XLSX.utils.json_to_sheet(rows)
-  const workbook = XLSX.utils.book_new()
-  XLSX.utils.book_append_sheet(workbook, worksheet, 'Ration')
-  return XLSX.write(workbook, { type: 'buffer', bookType: 'xlsx' })
 }
 
 function isoAt(baseTimeMs, offsetSeconds) {
@@ -281,22 +254,19 @@ async function main() {
   })
   pushLog('zone_square_barn_create', { status: 'ok', id: squareBarnZone.id })
 
-  const form = new FormData()
-  form.append('name', rationName)
-  form.append(
-    'file',
-    new Blob(
-      [buildDiverseRationWorkbookBuffer()],
-      { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }
-    ),
-    'ration-e2e.xlsx'
-  )
-  const rationUpload = await request('POST', '/api/rations/upload', {
+  const rationCreate = await request('POST', '/api/rations', {
     token: adminToken,
-    form
+    json: {
+      name: rationName,
+      ingredients: [
+        { name: 'Silage', plannedWeight: 90, dryMatterWeight: 35 },
+        { name: 'Hay', plannedWeight: 120, dryMatterWeight: 80 },
+        { name: 'Concentrate', plannedWeight: 150, dryMatterWeight: 120 }
+      ]
+    }
   })
-  const ration = rationUpload.ration
-  pushLog('ration_upload', { status: 'ok', id: ration.id, ingredients: ration.ingredients?.length || 0 })
+  const ration = rationCreate.ration
+  pushLog('ration_create', { status: 'ok', id: ration.id, ingredients: ration.ingredients?.length || 0 })
 
   const mainGroup = await request('POST', '/api/groups', {
     token: adminToken,

@@ -22,10 +22,8 @@
     "express": "^5.2.1",
     "fetch": "^1.1.0",
     "jsonwebtoken": "^9.0.3",
-    "multer": "^2.1.1",
     "nodemailer": "^8.0.5",
-    "prisma": "^6.2.1",
-    "xlsx": "^0.18.5"
+    "prisma": "^6.2.1"
   },
   "devDependencies": {
     "nodemon": "^3.1.14"

@@ -1,13 +1,8 @@
 import { Router } from 'express';
-import multer from 'multer';
-import XLSX from 'xlsx';
 import prisma from '../../database.js'; 
 import { requireReadAccess, requireWriteAccess } from '../../middleware/auth.js';
-import { processRationRows } from '../../../../module-2/rationManager.js';
 
 const router = Router();
-const upload = multer({ storage: multer.memoryStorage() });
-const RATION_UPLOAD_EXTENSIONS = ['.xlsx', '.xls'];
 
 function normalizeRationName(value) {
   return String(value || '').trim().replace(/\s+/g, ' ').toLowerCase();
@@ -30,11 +25,6 @@ function parseStrictBoolean(value) {
 
 function normalizeText(value) {
   return String(value || '').trim().replace(/\s+/g, ' ');
-}
-
-function hasAllowedRationUploadExtension(filename) {
-  const normalized = String(filename || '').trim().toLowerCase();
-  return RATION_UPLOAD_EXTENSIONS.some((extension) => normalized.endsWith(extension));
 }
 
 function parseNumber(value) {
@@ -240,34 +230,6 @@ async function validateGroupIdsExist(groupIds) {
   return { ok: true };
 }
 
-function parseExcel(fileBuffer) {
-  try {
-    const workbook = XLSX.read(fileBuffer, { type: 'buffer' });
-    const firstSheetName = workbook.SheetNames[0];
-
-    if (!firstSheetName) {
-      return { success: false, data: null, error: 'В Excel-файле нет листов' };
-    }
-
-    const rows = XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], { defval: '' });
-    const parsed = processRationRows(rows);
-
-    return {
-      success: parsed.success,
-      data: parsed.success ? parsed.data : null,
-      errors: parsed.errors,
-      error: parsed.errors.join('; ')
-    };
-  } catch (error) {
-    return {
-      success: false,
-      data: null,
-      errors: ['Не удалось прочитать Excel-файл. Проверьте структуру листа и формат данных'],
-      error: 'Не удалось прочитать Excel-файл. Проверьте структуру листа и формат данных'
-    };
-  }
-}
-
 async function findRationByNormalizedName(name) {
   const normalizedName = normalizeRationName(name);
   if (!normalizedName) return null;
@@ -356,113 +318,6 @@ router.post('/', requireWriteAccess, async (req, res) => {
       return res.status(400).json({ error: 'Рацион с таким названием уже существует' });
     }
     res.status(500).json({ error: 'Внутренняя ошибка сервера при создании рациона' });
-  }
-});
-
-// ============================================================================
-// POST /upload - Загрузка Excel и создание рациона
-// ============================================================================
-router.post('/upload', requireWriteAccess, upload.single('file'), async (req, res) => {
-  try {
-    const rationName = String(req.body.name || '').trim().replace(/\s+/g, ' ');
-    
-    if (!rationName) return res.status(400).json({ error: 'Необходимо указать название рациона' });
-    if (!req.file) return res.status(400).json({ error: 'Файл не загружен' });
-    if (!hasAllowedRationUploadExtension(req.file.originalname)) {
-      return res.status(400).json({ error: 'Можно загружать только файлы .xlsx или .xls' });
-    }
-    if (req.body.groupId !== undefined) {
-      return res.status(400).json({ error: 'Используйте единый формат groups: JSON-массив ID групп' });
-    }
-
-    // ЗАДАЧА: Уникальность названий для рационов
-    const existing = await findRationByNormalizedName(rationName);
-    if (existing) {
-      return res.status(400).json({ error: `Рацион с названием "${rationName}" уже существует. Выберите другое имя или удалите старый.` });
-    }
-
-    // Отдаем буфер файла
-    const parsedResult = parseExcel(req.file.buffer);
-
-    // ЗАДАЧА: Обработка ошибок для пользователя в парсинге
-    if (!parsedResult.success) {
-      return res.status(400).json({
-        error: `Ошибка в Excel файле: ${parsedResult.errors?.[0] || parsedResult.error}`,
-        details: parsedResult.errors || []
-      });
-    }
-
-    let selectedGroupIds = [];
-    if (req.body.groups) {
-        try {
-            const groupIds = JSON.parse(req.body.groups);
-            if (!Array.isArray(groupIds)) {
-                return res.status(400).json({ error: 'groups должен быть JSON-массивом ID групп' });
-            }
-            selectedGroupIds = [...new Set(groupIds.map(id => parseInt(id, 10)))];
-        } catch (e) {
-            return res.status(400).json({ error: 'groups должен быть корректным JSON-массивом ID групп' });
-        }
-
-        if (selectedGroupIds.some(id => !Number.isInteger(id))) {
-            return res.status(400).json({ error: 'groups должен содержать только числовые ID групп' });
-        }
-
-        if (selectedGroupIds.length > 0) {
-            const existingGroups = await prisma.livestockGroup.findMany({
-                where: { id: { in: selectedGroupIds } },
-                select: { id: true }
-            });
-            if (existingGroups.length !== selectedGroupIds.length) {
-                return res.status(404).json({ error: 'Одна или несколько групп не найдены' });
-            }
-        }
-    }
-
-    // Сохраняем в базу
-    // Сохраняем рацион и его ингредиенты
-    const newRation = await prisma.ration.create({
-      data: {
-        name: rationName,
-        isActive: false, // Теперь поле есть в базе!
-        ingredients: {
-          create: parsedResult.data
-        }
-      },
-      include: { ingredients: true }
-    });
-
-    // СВЯЗЬ С ГРУППАМИ: единый формат groups = "[1,2]"
-    if (selectedGroupIds.length > 0) {
-        await prisma.livestockGroup.updateMany({
-            where: { id: { in: selectedGroupIds } },
-            data: { rationId: newRation.id }
-        });
-    }
-
-    const rationWithGroups = await prisma.ration.findUnique({
-      where: { id: newRation.id },
-      include: {
-        ingredients: true,
-        livestockGroups: {
-          select: {
-            id: true,
-            name: true,
-            headcount: true
-          }
-        }
-      }
-    });
-
-    console.log(`[Рационы] Загружен рацион "${rationName}"`);
-    res.status(201).json({ status: 'ok', ration: formatRation(rationWithGroups || newRation) });
-
-  } catch (error) {
-    console.error('[Ошибка POST /upload]:', error);
-    if (error.code === 'P2002') {
-      return res.status(400).json({ error: 'Рацион с таким названием уже существует' });
-    }
-    res.status(500).json({ error: 'Внутренняя ошибка сервера при сохранении рациона' });
   }
 });
 
