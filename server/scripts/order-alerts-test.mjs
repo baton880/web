@@ -2,7 +2,9 @@ import assert from 'node:assert/strict'
 
 import prisma from '../src/database.js'
 import { buildOrderViolations, recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
+import { calculatePlan } from '../../module-2/rationManager.js'
 import { buildDigestHtml } from '../src/modules/digest/digest-scheduler.js'
+import { buildDailyDeviationRows } from '../../frontend/js/report-export-utils.mjs'
 import { collectReportData, toUiViolationStatus } from '../src/modules/reports/report-data.js'
 
 function runCase(name, fn) {
@@ -66,6 +68,70 @@ runCase('extra components do not break order validation', () => {
   ]
 
   assert.deepEqual(buildOrderViolations(plan, actual), [])
+})
+
+runCase('daily ration weights are divided by feedings per day', () => {
+  const plan = calculatePlan(
+    [
+      { name: 'silage', sortOrder: 1, plannedWeight: 12, dryMatterWeight: 4 },
+      { name: 'grain', sortOrder: 2, plannedWeight: 6, dryMatterWeight: 2 }
+    ],
+    10,
+    3
+  )
+
+  assert.equal(plan.feedingsPerDay, 3)
+  assert.equal(plan.totalBatchWeight, 60)
+  assert.deepEqual(
+    plan.ingredients.map((item) => ({
+      name: item.name,
+      targetWeight: item.targetWeight,
+      dailyTargetWeight: item.dailyTargetWeight
+    })),
+    [
+      { name: 'silage', targetWeight: 40, dailyTargetWeight: 120 },
+      { name: 'grain', targetWeight: 20, dailyTargetWeight: 60 }
+    ]
+  )
+})
+
+runCase('daily deviation rows sum multiple batches per day', () => {
+  const rows = buildDailyDeviationRows([
+    {
+      date: '2026-06-27T08:00:00.000Z',
+      rationName: 'Дойные',
+      groupName: 'Группа 1',
+      component: 'Силос',
+      plan: 50,
+      fact: 48
+    },
+    {
+      date: '2026-06-27T15:00:00.000Z',
+      rationName: 'Дойные',
+      groupName: 'Группа 1',
+      component: 'Силос',
+      plan: 50,
+      fact: 53
+    },
+    {
+      date: '2026-06-28T08:00:00.000Z',
+      rationName: 'Дойные',
+      groupName: 'Группа 1',
+      component: 'Силос',
+      plan: 50,
+      fact: 50
+    }
+  ])
+
+  assert.deepEqual(rows[1], [
+    '2026-06-27',
+    'Дойные',
+    'Группа 1',
+    'Силос',
+    100,
+    101,
+    1
+  ])
 })
 
 runCase('starting from a later component is still an order violation', () => {
@@ -215,6 +281,88 @@ await (async function runReportIntegrationCase() {
   console.log('PASS report integration exposes ORDER_MISMATCH')
 })().catch((error) => {
   console.error('FAIL report integration exposes ORDER_MISMATCH')
+  throw error
+})
+
+await (async function runFeedingsReportIntegrationCase() {
+  const stamp = Date.now()
+  const rationName = `__feedings_report_ration_${stamp}`
+  const groupName = `__feedings_report_group_${stamp}`
+  const batchStartTime = new Date('2026-06-27T12:00:00.000Z')
+
+  let ration = null
+  let group = null
+  let batch = null
+
+  try {
+    ration = await prisma.ration.create({
+      data: {
+        name: rationName,
+        feedingsPerDay: 2,
+        isActive: true,
+        ingredients: {
+          create: [
+            { name: 'daily-silage', sortOrder: 1, plannedWeight: 10, dryMatterWeight: 0 }
+          ]
+        }
+      }
+    })
+
+    group = await prisma.livestockGroup.create({
+      data: {
+        name: groupName,
+        headcount: 10,
+        rationId: ration.id
+      }
+    })
+
+    batch = await prisma.batch.create({
+      data: {
+        deviceId: `__feedings_report_device_${stamp}`,
+        rationId: ration.id,
+        groupId: group.id,
+        startTime: batchStartTime,
+        actualIngredients: {
+          create: [
+            { ingredientName: 'daily-silage', actualWeight: 50, addedAt: new Date('2026-06-27T12:00:00.000Z') }
+          ]
+        }
+      }
+    })
+
+    await recalculateBatchViolations(prisma, batch.id, { percentThreshold: 10, minDeviationKg: 1 })
+
+    const reportData = await collectReportData({
+      fromDate: new Date('2026-06-27T00:00:00.000Z'),
+      toDate: new Date('2026-06-27T23:59:59.999Z'),
+      limit: 50
+    })
+    const componentRow = reportData.components.find((item) => (
+      item.batchId === batch.id && item.component === 'daily-silage'
+    ))
+
+    assert.ok(componentRow, 'collectReportData should expose the feedings test component')
+    assert.equal(componentRow.feedingsPerDay, 2)
+    assert.equal(componentRow.plan, 50)
+    assert.equal(componentRow.fact, 50)
+    assert.equal(componentRow.deviation, 0)
+  } finally {
+    if (batch?.id) {
+      await prisma.violation.deleteMany({ where: { batchId: batch.id } })
+      await prisma.batchIngredient.deleteMany({ where: { batchId: batch.id } })
+      await prisma.batch.delete({ where: { id: batch.id } })
+    }
+    if (group?.id) {
+      await prisma.livestockGroup.delete({ where: { id: group.id } })
+    }
+    if (ration?.id) {
+      await prisma.ration.delete({ where: { id: ration.id } })
+    }
+  }
+
+  console.log('PASS report integration divides daily ration by feedings')
+})().catch((error) => {
+  console.error('FAIL report integration divides daily ration by feedings')
   throw error
 })
 

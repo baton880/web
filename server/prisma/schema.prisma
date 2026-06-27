@@ -135,6 +135,7 @@ model User {
 model Ration {
   id          Int      @id @default(autoincrement())
   name        String   @unique
+  feedingsPerDay Int   @default(1)
   createdAt   DateTime @default(now())
   isActive        Boolean            @default(false)
   ingredients     RationIngredient[] 

@@ -186,22 +186,32 @@ export function aggregateFacts(ingredients) {
 
 function resolvePlanContext(batch) {
     const groupHeadcount = Number(batch?.group?.headcount || 0);
+    const batchFeedingsPerDay = Number(batch?.ration?.feedingsPerDay || 0);
+    const groupFeedingsPerDay = Number(batch?.group?.ration?.feedingsPerDay || 0);
     const batchRationIngredients = Array.isArray(batch?.ration?.ingredients) ? batch.ration.ingredients : [];
     const groupRationIngredients = Array.isArray(batch?.group?.ration?.ingredients) ? batch.group.ration.ingredients : [];
 
     if (groupHeadcount <= 0) {
-        return { headcount: 0, ingredients: [] };
+        return { headcount: 0, feedingsPerDay: 1, ingredients: [] };
     }
 
     if (batchRationIngredients.length > 0) {
-        return { headcount: groupHeadcount, ingredients: sortPlanIngredients(batchRationIngredients) };
+        return {
+            headcount: groupHeadcount,
+            feedingsPerDay: batchFeedingsPerDay > 0 ? batchFeedingsPerDay : 1,
+            ingredients: sortPlanIngredients(batchRationIngredients)
+        };
     }
 
     if (groupRationIngredients.length > 0) {
-        return { headcount: groupHeadcount, ingredients: sortPlanIngredients(groupRationIngredients) };
+        return {
+            headcount: groupHeadcount,
+            feedingsPerDay: groupFeedingsPerDay > 0 ? groupFeedingsPerDay : 1,
+            ingredients: sortPlanIngredients(groupRationIngredients)
+        };
     }
 
-    return { headcount: groupHeadcount, ingredients: [] };
+    return { headcount: groupHeadcount, feedingsPerDay: 1, ingredients: [] };
 }
 
 export function getBatchPlan(batch) {
@@ -210,7 +220,7 @@ export function getBatchPlan(batch) {
         return { totalBatchWeight: 0, totalDryMatterWeight: 0, ingredients: [] };
     }
 
-    return calculatePlan(context.ingredients, context.headcount);
+    return calculatePlan(context.ingredients, context.headcount, context.feedingsPerDay);
 }
 
 export function buildIngredientSummary(batch, deviationOptions = null) {

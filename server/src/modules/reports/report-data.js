@@ -46,6 +46,15 @@ function buildBatchDate(batch) {
     return batch.endTime || batch.startTime || null;
 }
 
+function getBatchFeedingsPerDay(batch) {
+    const parsed = Number(batch?.ration?.feedingsPerDay || batch?.group?.ration?.feedingsPerDay || 1);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+function getBatchRationName(batch) {
+    return batch?.ration?.name || batch?.group?.ration?.name || REPORT_NO_RATION;
+}
+
 export function toUiViolationStatus(violation) {
     if (violation.status === 'RESOLVED') return 'closed';
     if (violation.status === 'CLOSED') return 'closed';
@@ -96,6 +105,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         select: {
                             id: true,
                             name: true,
+                            feedingsPerDay: true,
                             ingredients: {
                                 select: {
                                     id: true,
@@ -115,6 +125,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 select: {
                     id: true,
                     name: true,
+                    feedingsPerDay: true,
                     ingredients: {
                         select: {
                             id: true,
@@ -191,6 +202,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         const facts = aggregateFacts(batch.actualIngredients || []);
         const factTotal = facts.reduce((sum, item) => sum + Number(item.actualWeight || 0), 0);
         const batchDate = buildBatchDate(batch);
+        const feedingsPerDay = getBatchFeedingsPerDay(batch);
 
         const violationsCount = batch.violations.length;
         const openViolationsCount = batch.violations.reduce((sum, item) => (
@@ -203,8 +215,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         reportBatches.push({
             id: batch.id,
             date: batchDate,
-                        rationName: batch.ration?.name || REPORT_NO_RATION,
-                        groupName: batch.group?.name || REPORT_NO_GROUP,
+            rationName: getBatchRationName(batch),
+            groupName: batch.group?.name || REPORT_NO_GROUP,
+            feedingsPerDay,
             planTotal: round1(plan.totalBatchWeight || 0),
             factTotal: round1(factTotal),
             violationsCount,
@@ -221,8 +234,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         batchId: batch.id,
                         date: batchDate,
                         batchLabel: buildReportBatchLabel(batch.id),
-                        rationName: batch.ration?.name || REPORT_NO_RATION,
+                        rationName: getBatchRationName(batch),
                         groupName: batch.group?.name || REPORT_NO_GROUP,
+                        feedingsPerDay,
                         parentComponent: componentRow.name,
                         component: child.name,
                         plan: round1(child.plan || 0),
@@ -238,8 +252,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 batchId: batch.id,
                 date: batchDate,
                         batchLabel: buildReportBatchLabel(batch.id),
-                        rationName: batch.ration?.name || REPORT_NO_RATION,
+                        rationName: getBatchRationName(batch),
                         groupName: batch.group?.name || REPORT_NO_GROUP,
+                        feedingsPerDay,
                 parentComponent: '',
                 component: componentRow.name,
                 plan: round1(componentRow.plan || 0),

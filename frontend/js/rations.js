@@ -10,6 +10,7 @@ $(document).ready(function () {
     const manualIdInput = document.getElementById("rationManualId");
     const manualNameInput = document.getElementById("rationManualName");
     const manualIsActiveInput = document.getElementById("rationManualIsActive");
+    const manualFeedingsPerDayInput = document.getElementById("rationManualFeedingsPerDay");
     const manualGroupsSelect = document.getElementById("rationManualGroups");
     const manualIngredientsBody = document.getElementById("rationManualIngredientsBody");
     const manualAddIngredientButton = document.getElementById("rationManualAddIngredientButton");
@@ -117,6 +118,11 @@ $(document).ready(function () {
 
         const parsed = Number(normalized);
         return Number.isFinite(parsed) ? parsed : null;
+    }
+
+    function getManualFeedingsPerDay() {
+        const parsed = parseInt(manualFeedingsPerDayInput?.value || "1", 10);
+        return Number.isInteger(parsed) && parsed > 0 ? parsed : 1;
     }
 
     function setPanelMeta(message) {
@@ -446,7 +452,8 @@ $(document).ready(function () {
         }
 
         const plannedTotal = state.manualIngredients.reduce((sum, ingredient) => sum + getIngredientPlannedWeight(ingredient), 0);
-        manualSummary.textContent = `Ингредиентов: ${state.manualIngredients.length} | Вес: ${weightFormatter.format(plannedTotal)} кг`;
+        const feedingsPerDay = getManualFeedingsPerDay();
+        manualSummary.textContent = `Ингредиентов: ${state.manualIngredients.length} | День: ${weightFormatter.format(plannedTotal)} кг | 1 кормление: ${weightFormatter.format(plannedTotal / feedingsPerDay)} кг`;
     }
 
     function focusManualIngredientRow(localId) {
@@ -519,7 +526,7 @@ $(document).ready(function () {
             manualIdInput.value = isEditing ? String(state.editingRationId) : "";
         }
 
-        [manualNameInput, manualIsActiveInput, manualAddIngredientButton, manualAddCompoundIngredientButton].forEach((element) => {
+        [manualNameInput, manualIsActiveInput, manualFeedingsPerDayInput, manualAddIngredientButton, manualAddCompoundIngredientButton].forEach((element) => {
             if (element) {
                 element.disabled = disabled;
             }
@@ -590,13 +597,14 @@ $(document).ready(function () {
         `;
     }
 
-    function renderIngredientsTable(ingredients) {
+    function renderIngredientsTable(ingredients, ration) {
         const items = Array.isArray(ingredients) ? ingredients : [];
         if (!items.length) {
             return '<span class="text-muted">-</span>';
         }
 
         const plannedTotal = items.reduce((sum, ingredient) => sum + getWeightValue(ingredient?.plannedWeight), 0);
+        const feedingsPerDay = Math.max(1, parseInt(ration?.feedingsPerDay || 1, 10) || 1);
 
         return `
             <div class="ration-ingredients-table-wrap">
@@ -605,7 +613,7 @@ $(document).ready(function () {
                         <tr>
                             <th class="ration-ingredients-table__index">№</th>
                             <th>Ингредиент</th>
-                            <th class="ration-ingredients-table__weight">Вес/голову</th>
+                            <th class="ration-ingredients-table__weight">Вес/голову/день</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -619,8 +627,12 @@ $(document).ready(function () {
                     </tbody>
                     <tfoot>
                         <tr>
-                            <td colspan="2">Итого</td>
+                            <td colspan="2">Итого за день</td>
                             <td class="ration-ingredients-table__weight">${formatWeight(plannedTotal)}</td>
+                        </tr>
+                        <tr>
+                            <td colspan="2">На 1 кормление</td>
+                            <td class="ration-ingredients-table__weight">${formatWeight(plannedTotal / feedingsPerDay)}</td>
                         </tr>
                     </tfoot>
                 </table>
@@ -730,11 +742,11 @@ $(document).ready(function () {
                 <tr>
                     <td class="align-middle">
                         <div class="font-weight-bold text-gray-800">#${escapeHtml(ration?.id ?? "-")} ${escapeHtml(ration?.name || "Без названия")}</div>
-                        <div class="small text-muted">${ingredients.length ? `Ингредиентов: ${ingredients.length}` : "Без ингредиентов"}</div>
+                        <div class="small text-muted">${ingredients.length ? `Ингредиентов: ${ingredients.length} | Кормлений/день: ${escapeHtml(ration?.feedingsPerDay || 1)}` : "Без ингредиентов"}</div>
                     </td>
                     <td class="align-middle">${renderStatusBadge(ration?.isActive)}</td>
                     <td class="align-middle ration-ingredients-cell">
-                        ${renderIngredientsTable(ingredients)}
+                        ${renderIngredientsTable(ingredients, ration)}
                     </td>
                     <td class="align-middle">
                         ${renderListCell(linkedGroups, (group) => escapeHtml(group?.name || `Группа #${group?.id || "-"}`))}
@@ -810,6 +822,11 @@ $(document).ready(function () {
         const rationName = normalizeText(manualNameInput?.value || "");
         if (!rationName) {
             return { ok: false, message: "Укажите название рациона", focus: manualNameInput };
+        }
+
+        const feedingsPerDay = parseInt(manualFeedingsPerDayInput?.value || "1", 10);
+        if (!Number.isInteger(feedingsPerDay) || feedingsPerDay <= 0) {
+            return { ok: false, message: "Укажите количество кормлений в день", focus: manualFeedingsPerDayInput };
         }
 
         const normalizedName = normalizeComparableName(rationName);
@@ -904,6 +921,7 @@ $(document).ready(function () {
             ok: true,
             payload: {
                 name: rationName,
+                feedingsPerDay,
                 isActive: Boolean(manualIsActiveInput?.checked),
                 groups: state.manualSelectedGroupIds,
                 ingredients,
@@ -963,6 +981,10 @@ $(document).ready(function () {
 
         if (manualIsActiveInput) {
             manualIsActiveInput.checked = false;
+        }
+
+        if (manualFeedingsPerDayInput) {
+            manualFeedingsPerDayInput.value = "1";
         }
 
         updateManualState();
@@ -1043,6 +1065,10 @@ $(document).ready(function () {
 
         if (manualIsActiveInput) {
             manualIsActiveInput.checked = Boolean(ration?.isActive);
+        }
+
+        if (manualFeedingsPerDayInput) {
+            manualFeedingsPerDayInput.value = String(ration?.feedingsPerDay || 1);
         }
 
         updateManualState();
@@ -1145,6 +1171,10 @@ $(document).ready(function () {
             .map((option) => Number(option.value))
             .filter((value) => Number.isInteger(value) && value > 0);
         renderGroupsPreview(manualGroupsPreview, state.manualSelectedGroupIds);
+    });
+
+    manualFeedingsPerDayInput?.addEventListener("input", function () {
+        updateManualSummary();
     });
 
     manualIngredientsBody?.addEventListener("input", function (event) {

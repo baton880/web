@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import prisma from '../../database.js'; 
 import { requireReadAccess, requireWriteAccess } from '../../middleware/auth.js';
+import { recalculateBatchViolations } from '../batches/batch-violations.js';
 
 const router = Router();
 
@@ -103,6 +104,7 @@ function formatRation(ration) {
 
   return {
     ...ration,
+    feedingsPerDay: parsePositiveInteger(ration.feedingsPerDay) || 1,
     ingredients: ingredients.map(formatRationIngredient)
   };
 }
@@ -253,12 +255,32 @@ async function findRationByNormalizedName(name) {
   return rations.find((item) => normalizeRationName(item.name) === normalizedName) || null;
 }
 
+async function recalculateBatchesForRation(rationId) {
+  const batches = await prisma.batch.findMany({
+    where: {
+      OR: [
+        { rationId },
+        { group: { rationId } }
+      ]
+    },
+    select: { id: true },
+    orderBy: { startTime: 'desc' }
+  });
+
+  for (const batch of batches) {
+    await recalculateBatchViolations(prisma, batch.id);
+  }
+
+  return batches.length;
+}
+
 // ============================================================================
 // POST / - Ручное создание рациона
 // ============================================================================
 router.post('/', requireWriteAccess, async (req, res) => {
   try {
     const rationName = normalizeText(req.body.name);
+    const feedingsPerDay = parsePositiveInteger(req.body.feedingsPerDay) || 1;
     const parsedGroups = parseGroupIdsInput(req.body.groups);
     const parsedIsActive = req.body.isActive === undefined
       ? { ok: true, value: false }
@@ -294,6 +316,7 @@ router.post('/', requireWriteAccess, async (req, res) => {
       const created = await tx.ration.create({
         data: {
           name: rationName,
+          feedingsPerDay,
           isActive: parsedIsActive.value,
           ingredients: {
             create: validatedIngredients.ingredients
@@ -406,11 +429,12 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
     }
 
     const hasName = Object.prototype.hasOwnProperty.call(req.body, 'name');
+    const hasFeedingsPerDay = Object.prototype.hasOwnProperty.call(req.body, 'feedingsPerDay');
     const hasIngredients = Object.prototype.hasOwnProperty.call(req.body, 'ingredients');
     const hasGroups = Object.prototype.hasOwnProperty.call(req.body, 'groups');
     const hasIsActive = Object.prototype.hasOwnProperty.call(req.body, 'isActive');
 
-    if (!hasName && !hasIngredients && !hasGroups && !hasIsActive) {
+    if (!hasName && !hasFeedingsPerDay && !hasIngredients && !hasGroups && !hasIsActive) {
       return res.status(400).json({ error: 'Нет полей для обновления' });
     }
 
@@ -424,6 +448,14 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
       const existingWithSameName = await findRationByNormalizedName(nextName);
       if (existingWithSameName && existingWithSameName.id !== id) {
         return res.status(400).json({ error: `Рацион с названием "${nextName}" уже существует` });
+      }
+    }
+
+    let nextFeedingsPerDay = existingRation.feedingsPerDay || 1;
+    if (hasFeedingsPerDay) {
+      nextFeedingsPerDay = parsePositiveInteger(req.body.feedingsPerDay);
+      if (!nextFeedingsPerDay) {
+        return res.status(400).json({ error: 'feedingsPerDay РґРѕР»Р¶РµРЅ Р±С‹С‚СЊ РїРѕР»РѕР¶РёС‚РµР»СЊРЅС‹Рј С†РµР»С‹Рј С‡РёСЃР»РѕРј' });
       }
     }
 
@@ -458,6 +490,7 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
     const ration = await prisma.$transaction(async (tx) => {
       const updateData = {};
       if (hasName) updateData.name = nextName;
+      if (hasFeedingsPerDay) updateData.feedingsPerDay = nextFeedingsPerDay;
       if (hasIsActive) updateData.isActive = parsedIsActive.value;
 
       if (Object.keys(updateData).length > 0) {
@@ -512,7 +545,11 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
       });
     });
 
-    res.json({ status: 'ok', ration: formatRation(ration) });
+    const recalculatedBatches = (hasFeedingsPerDay || hasIngredients || hasGroups)
+      ? await recalculateBatchesForRation(id)
+      : 0;
+
+    res.json({ status: 'ok', ration: formatRation(ration), recalculatedBatches });
   } catch (error) {
     console.error('[Ошибка PATCH /rations/:id]:', error);
     if (error.code === 'P2002') {

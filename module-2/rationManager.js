@@ -15,7 +15,12 @@ export function areSameIngredient(left, right) {
  * @param {number} headcount - Количество голов в группе
  * @returns {Object} Объект с общими и целевыми весами
  */
-export function calculatePlan(parsedRation, headcount) {
+function resolveFeedingsPerDay(value) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : 1;
+}
+
+export function calculatePlan(parsedRation, headcount, feedingsPerDay = 1) {
   // 1. Базовая защита от некорректных данных
   if (!Array.isArray(parsedRation) || typeof headcount !== 'number' || headcount <= 0) {
     return { totalBatchWeight: 0, totalDryMatterWeight: 0, ingredients: [] };
@@ -34,11 +39,14 @@ export function calculatePlan(parsedRation, headcount) {
   let totalBatchWeight = 0;
   let totalDryMatterWeight = 0;
   const ingredients = [];
+  const feedings = resolveFeedingsPerDay(feedingsPerDay);
 
   // 2. Проходим по каждому ингредиенту и считаем замес
   for (const item of orderedRation) {
-    const targetWeight = item.plannedWeight * headcount;
-    const targetDryMatter = Number(item.dryMatterWeight || 0) * headcount;
+    const dailyTargetWeight = item.plannedWeight * headcount;
+    const dailyTargetDryMatter = Number(item.dryMatterWeight || 0) * headcount;
+    const targetWeight = dailyTargetWeight / feedings;
+    const targetDryMatter = dailyTargetDryMatter / feedings;
 
     // Суммируем общие показатели
     totalBatchWeight += targetWeight;
@@ -50,6 +58,9 @@ export function calculatePlan(parsedRation, headcount) {
       sortOrder: Number(item.sortOrder || ingredients.length + 1),
       targetWeight: targetWeight,
       targetDryMatter: targetDryMatter,
+      dailyTargetWeight,
+      dailyTargetDryMatter,
+      feedingsPerDay: feedings,
       isCompound: Boolean(item.isCompound),
       componentsJson: item.componentsJson || null,
       components: Array.isArray(item.components) ? item.components : undefined
@@ -60,6 +71,7 @@ export function calculatePlan(parsedRation, headcount) {
   return {
     totalBatchWeight,
     totalDryMatterWeight,
+    feedingsPerDay: feedings,
     ingredients
   };
 }

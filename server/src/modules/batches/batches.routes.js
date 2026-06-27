@@ -106,7 +106,8 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
         return null;
     }
 
-    const rationIngredients = [...(batch.ration?.ingredients || [])].sort((left, right) => {
+    const sourceRation = batch.ration || batch.group?.ration || null;
+    const rationIngredients = [...(sourceRation?.ingredients || [])].sort((left, right) => {
         const orderDiff = Number(left.sortOrder || 0) - Number(right.sortOrder || 0);
         if (orderDiff !== 0) return orderDiff;
         return Number(left.id || 0) - Number(right.id || 0);
@@ -124,12 +125,13 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
         endTime: batch.endTime,
         rationId: batch.rationId,
         groupId: batch.groupId,
-        rationName: batch.ration?.name || 'Без рациона',
+        rationName: sourceRation?.name || 'Без рациона',
         groupName: batch.group?.name || 'Без группы',
-        ration: batch.ration ? {
-            id: batch.ration.id,
-            name: batch.ration.name,
-            isActive: batch.ration.isActive,
+        ration: sourceRation ? {
+            id: sourceRation.id,
+            name: sourceRation.name,
+            feedingsPerDay: Number(sourceRation.feedingsPerDay || 1),
+            isActive: sourceRation.isActive,
             ingredients: rationIngredients.map((ing) => ({
                 id: ing.id,
                 name: ing.name,

@@ -1,3 +1,5 @@
+import { buildDailyDeviationRows as buildDailyDeviationExportRows } from "./report-export-utils.mjs";
+
 (function () {
     const API_URL = window.AppAuth?.getApiUrl?.("/api/reports") || "/api/reports";
     const BATCHES_RESET_API_URL = window.AppAuth?.getApiUrl?.("/api/batches/admin/truncate") || "/api/batches/admin/truncate";
@@ -220,6 +222,7 @@
             label: item.label ?? item.batchLabel ?? (batchId ? `Замес #${batchId}` : "Замес"),
             rationName: item.rationName ?? item.ration ?? "Без рациона",
             groupName: item.groupName ?? item.group ?? "Без группы",
+            feedingsPerDay: Math.max(1, parseInt(item.feedingsPerDay || 1, 10) || 1),
             planTotal: toNumber(item.planTotal ?? item.plan ?? item.targetWeight) ?? 0,
             factTotal: toNumber(item.factTotal ?? item.fact ?? item.actualWeight) ?? 0,
             violationsCount,
@@ -270,6 +273,7 @@
             batchLabel: item.batchLabel ?? (batchId ? `${REPORT_BATCH_PREFIX} #${batchId}` : REPORT_BATCH_PREFIX),
             rationName: item.rationName ?? item.ration ?? REPORT_NO_RATION,
             groupName: item.groupName ?? item.group ?? REPORT_NO_GROUP,
+            feedingsPerDay: Math.max(1, parseInt(item.feedingsPerDay || 1, 10) || 1),
             parentComponent: item.parentComponent ?? "",
             component: item.component ?? item.name ?? "\u2014",
             plan,
@@ -649,6 +653,10 @@
         return raw;
     }
 
+    function buildDailyDeviationRows() {
+        return buildDailyDeviationExportRows(state.components);
+    }
+
     function buildIssuedFactRows(dateKey = null) {
         const rationNames = [];
         const rationSeen = new Set();
@@ -744,14 +752,38 @@
         return `<Cell${styleId}><Data ss:Type="String">${xmlEscape(value)}</Data></Cell>`;
     }
 
+    function getWorkbookCellTextLength(value) {
+        if (value === null || value === undefined) {
+            return 0;
+        }
+
+        return String(value).length;
+    }
+
+    function buildWorkbookColumns(rows) {
+        const widths = [];
+
+        rows.forEach((row) => {
+            row.forEach((cell, index) => {
+                widths[index] = Math.max(widths[index] || 0, getWorkbookCellTextLength(cell));
+            });
+        });
+
+        return widths.map((width) => {
+            const excelWidth = Math.max(48, Math.min(320, Math.round((width + 2) * 7)));
+            return `<Column ss:AutoFitWidth="0" ss:Width="${excelWidth}"/>`;
+        }).join("");
+    }
+
     function buildWorkbookWorksheet(name, rows) {
+        const columns = buildWorkbookColumns(rows);
         const tableRows = rows.map((row, rowIndex) => (
             `<Row>${row.map((cell) => buildWorkbookCell(cell, rowIndex)).join("")}</Row>`
         )).join("");
 
         return `
             <Worksheet ss:Name="${xmlEscape(sanitizeWorksheetName(name))}">
-                <Table>${tableRows}</Table>
+                <Table>${columns}${tableRows}</Table>
             </Worksheet>
         `;
     }
@@ -782,6 +814,7 @@
             { name: "\u0417\u0430\u043c\u0435\u0441\u044b", rows: rows.batches },
             { name: "\u041d\u0430\u0440\u0443\u0448\u0435\u043d\u0438\u044f", rows: rows.violations },
             { name: "\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442\u044b \u0437\u0430\u043c\u0435\u0441\u043e\u0432", rows: rows.components },
+            { name: "\u0421\u0443\u0442\u043e\u0447\u043d\u044b\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u044f", rows: buildDailyDeviationRows() },
             ...buildIssuedFactSheets(),
         ]);
 
