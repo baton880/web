@@ -150,6 +150,7 @@ model RationIngredient {
   ration          Ration   @relation(fields: [rationId], references: [id], onDelete: Cascade)
   
   name            String   
+  sortOrder       Int      @default(0)
   plannedWeight   Float    
   dryMatterWeight Float    
   isCompound      Boolean  @default(false)

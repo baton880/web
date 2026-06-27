@@ -46,13 +46,13 @@ function buildBatchDate(batch) {
     return batch.endTime || batch.startTime || null;
 }
 
-function toUiViolationStatus(violation) {
+export function toUiViolationStatus(violation) {
     if (violation.status === 'RESOLVED') return 'closed';
     if (violation.status === 'CLOSED') return 'closed';
     if (violation.status === 'IN_PROGRESS') return 'in_progress';
 
     const deviationPercent = Math.abs(Number(violation?.deviationPercent || 0));
-    if (violation.code === 'MISSING_COMPONENT' || violation.code === 'EXTRA_COMPONENT' || violation.code === 'LEFTOVER_WEIGHT' || deviationPercent >= 20) {
+    if (violation.code === 'MISSING_COMPONENT' || violation.code === 'EXTRA_COMPONENT' || violation.code === 'LEFTOVER_WEIGHT' || violation.code === 'ORDER_MISMATCH' || deviationPercent >= 20) {
         return 'critical';
     }
 
@@ -100,6 +100,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                                 select: {
                                     id: true,
                                     name: true,
+                                    sortOrder: true,
                                     plannedWeight: true,
                                     dryMatterWeight: true,
                                     isCompound: true,
@@ -118,6 +119,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         select: {
                             id: true,
                             name: true,
+                            sortOrder: true,
                             plannedWeight: true,
                             dryMatterWeight: true,
                             isCompound: true,
@@ -286,6 +288,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             status: severityStatus,
             workflowStatus,
             code: violation.code,
+            message: violation.message,
             comment: violation.comment || null
         });
     }

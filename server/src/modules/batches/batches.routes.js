@@ -106,6 +106,12 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
         return null;
     }
 
+    const rationIngredients = [...(batch.ration?.ingredients || [])].sort((left, right) => {
+        const orderDiff = Number(left.sortOrder || 0) - Number(right.sortOrder || 0);
+        if (orderDiff !== 0) return orderDiff;
+        return Number(left.id || 0) - Number(right.id || 0);
+    });
+
     const [weightContext, telemetrySettings] = await Promise.all([
         getBatchWeightContext(batch, prismaClient),
         getTelemetrySettings(prismaClient)
@@ -124,9 +130,10 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
             id: batch.ration.id,
             name: batch.ration.name,
             isActive: batch.ration.isActive,
-            ingredients: batch.ration.ingredients.map((ing) => ({
+            ingredients: rationIngredients.map((ing) => ({
                 id: ing.id,
                 name: ing.name,
+                sortOrder: Number(ing.sortOrder || 0),
                 plannedWeight: ing.plannedWeight,
                 dryMatterWeight: ing.dryMatterWeight,
                 isCompound: Boolean(ing.isCompound),

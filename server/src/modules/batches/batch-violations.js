@@ -26,6 +26,82 @@ function parseCompoundComponents(value) {
     }
 }
 
+function getIngredientSortOrder(ingredient, fallbackIndex = 0) {
+    const parsed = Number(ingredient?.sortOrder);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackIndex + 1;
+}
+
+function sortPlanIngredients(ingredients) {
+    return [...(Array.isArray(ingredients) ? ingredients : [])].sort((left, right) => {
+        const orderDiff = getIngredientSortOrder(left) - getIngredientSortOrder(right);
+        if (orderDiff !== 0) return orderDiff;
+
+        const leftId = Number(left?.id || 0);
+        const rightId = Number(right?.id || 0);
+        if (leftId !== rightId) return leftId - rightId;
+
+        return String(left?.name || '').localeCompare(String(right?.name || ''), 'ru');
+    });
+}
+
+function getIngredientTimestampMs(ingredient) {
+    const parsed = new Date(ingredient?.addedAt || 0).getTime();
+    return Number.isFinite(parsed) ? parsed : 0;
+}
+
+export function buildOrderViolations(planIngredients, actualIngredients) {
+    const expectedSequence = sortPlanIngredients(planIngredients)
+        .filter((ingredient) => normalizeIngredientName(ingredient?.name))
+        .map((ingredient, index) => ({
+            key: normalizeIngredientName(ingredient.name),
+            name: toDisplayIngredientName(ingredient.name),
+            position: index + 1
+        }));
+
+    if (expectedSequence.length <= 1) {
+        return [];
+    }
+
+    const expectedByKey = new Map(expectedSequence.map((item) => [item.key, item]));
+    const actualSequence = [...(Array.isArray(actualIngredients) ? actualIngredients : [])]
+        .sort((left, right) => {
+            const timeDiff = getIngredientTimestampMs(left) - getIngredientTimestampMs(right);
+            if (timeDiff !== 0) return timeDiff;
+            return Number(left?.id || 0) - Number(right?.id || 0);
+        })
+        .map((ingredient) => ({
+            key: normalizeIngredientName(ingredient?.ingredientName),
+            name: toDisplayIngredientName(ingredient?.ingredientName),
+            weight: Number(ingredient?.actualWeight || 0)
+        }))
+        .filter((ingredient) => ingredient.weight > 0 && expectedByKey.has(ingredient.key));
+
+    const violations = [];
+    const loadedKeys = new Set();
+
+    actualSequence.forEach((actual, actualIndex) => {
+        const expected = expectedByKey.get(actual.key);
+        if (!expected) return;
+
+        if (!loadedKeys.has(actual.key)) {
+            const expectedPosition = loadedKeys.size + 1;
+            if (expected.position !== expectedPosition) {
+                violations.push({
+                    code: 'ORDER_MISMATCH',
+                    ingredient: actual.name,
+                    plan: expected.position,
+                    fact: actualIndex + 1,
+                    deviationPercent: 0,
+                    message: `Компонент "${actual.name}" загружен ${actualIndex + 1}-м, но в рационе должен идти ${expected.position}-м`
+                });
+            }
+            loadedKeys.add(actual.key);
+        }
+    });
+
+    return violations;
+}
+
 function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight) {
     if (!planItem?.isCompound) {
         return [];
@@ -118,11 +194,11 @@ function resolvePlanContext(batch) {
     }
 
     if (batchRationIngredients.length > 0) {
-        return { headcount: groupHeadcount, ingredients: batchRationIngredients };
+        return { headcount: groupHeadcount, ingredients: sortPlanIngredients(batchRationIngredients) };
     }
 
     if (groupRationIngredients.length > 0) {
-        return { headcount: groupHeadcount, ingredients: groupRationIngredients };
+        return { headcount: groupHeadcount, ingredients: sortPlanIngredients(groupRationIngredients) };
     }
 
     return { headcount: groupHeadcount, ingredients: [] };
@@ -163,7 +239,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             ? Math.round(((factWeight - planWeight) / planWeight) * 1000) / 10
             : (factWeight > 0 ? 100 : 0);
         const isViolation = planWeight > 0
-            ? Math.abs(deviationKg) > allowedDeviationKg
+            ? Math.abs(deviationKg) > allowedDeviationKg || Boolean(persistedViolationMap.get(key))
             : (hasPlanContext
                 ? factWeight > 0
                 : Boolean(factWeight > 0 || persistedViolationMap.get(key) || key === 'unknown'));
@@ -263,7 +339,9 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         percentThreshold: deviationSettings.percentThreshold,
         minDeviationKg: deviationSettings.minDeviationKg
     });
-    const violationNames = new Set(check.violations.map((item) => normalizeIngredientName(item.ingredient)));
+    const orderViolations = buildOrderViolations(plan.ingredients, batch.actualIngredients);
+    const allViolations = [...check.violations, ...orderViolations];
+    const violationNames = new Set(allViolations.map((item) => normalizeIngredientName(item.ingredient)));
     const planByName = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.targetWeight]));
 
     for (const ingredient of batch.actualIngredients) {
@@ -278,15 +356,15 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
 
     await prisma.batch.update({
         where: { id: batch.id },
-        data: { hasViolations: check.violations.length > 0 }
+        data: { hasViolations: allViolations.length > 0 }
     });
 
-    await syncBatchViolationLog(prisma, batch, check);
+    await syncBatchViolationLog(prisma, batch, { ...check, violations: allViolations });
 
     return {
         status: 'ok',
-        hasViolations: check.violations.length > 0,
+        hasViolations: allViolations.length > 0,
         matches: check.matches,
-        violations: check.violations
+        violations: allViolations
     };
 }

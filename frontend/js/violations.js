@@ -117,6 +117,35 @@
         return `<span class="${className}">${sign}${escapeHtml(formatWeight(value))}</span>`;
     }
 
+    function isOrderViolation(item) {
+        return item?.code === "ORDER_MISMATCH";
+    }
+
+    function formatOrderPosition(value) {
+        const numericValue = Number(value);
+        if (!Number.isFinite(numericValue) || numericValue <= 0) {
+            return "—";
+        }
+
+        return `#${Math.round(numericValue)}`;
+    }
+
+    function formatPlanCell(item) {
+        return isOrderViolation(item) ? formatOrderPosition(item.plan) : formatWeight(item.plan);
+    }
+
+    function formatFactCell(item) {
+        return isOrderViolation(item) ? formatOrderPosition(item.fact) : formatWeight(item.fact);
+    }
+
+    function formatDeviationCell(item) {
+        if (isOrderViolation(item)) {
+            return '<span class="violations-number">Порядок</span>';
+        }
+
+        return formatDeviation(item.deviation);
+    }
+
     function formatDate(value) {
         if (!value) {
             return "—";
@@ -210,6 +239,8 @@
             deviation,
             status: normalizeSeverityStatus(item.status ?? item.state),
             workflowStatus: normalizeWorkflowStatus(item.workflowStatus ?? item.state ?? item.status),
+            code: String(item.code || "").trim(),
+            message: item.message ?? "",
         };
     }
 
@@ -342,9 +373,9 @@
                     <td>${escapeHtml(item.group)}</td>
                     <td>${escapeHtml(item.component)}</td>
                     <td>${escapeHtml(item.violationType)}</td>
-                    <td><span class="violations-number">${escapeHtml(formatWeight(item.plan))}</span></td>
-                    <td><span class="violations-number">${escapeHtml(formatWeight(item.fact))}</span></td>
-                    <td>${formatDeviation(item.deviation)}</td>
+                    <td><span class="violations-number">${escapeHtml(formatPlanCell(item))}</span></td>
+                    <td><span class="violations-number">${escapeHtml(formatFactCell(item))}</span></td>
+                    <td>${formatDeviationCell(item)}</td>
                     <td><span class="${statusMeta.className}">${escapeHtml(statusMeta.label)}</span></td>
                     ${CAN_ADMIN_RESET ? `
                         <td data-requires-admin>

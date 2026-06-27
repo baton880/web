@@ -12,6 +12,16 @@ function toViolationDescriptor(violation) {
     ? Math.round(((deviation / plan) * 100) * 10) / 10
     : (fact > 0 ? 100 : 0)
 
+  if (violation?.code === 'ORDER_MISMATCH') {
+    return {
+      code: 'ORDER_MISMATCH',
+      title: 'Нарушен порядок загрузки',
+      message: violation.message || `Компонент ${violation.ingredient} загружен не по порядку`,
+      deviation,
+      deviationPercent: 0
+    }
+  }
+
   if (plan > 0 && fact === 0) {
     return {
       code: 'MISSING_COMPONENT',

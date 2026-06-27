@@ -6,6 +6,7 @@
   "scripts": {
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
+    "test:order-alerts": "node scripts/order-alerts-test.mjs",
     "migrate:db": "prisma migrate dev",
     "migrate:users": "node migrate-users.js",
     "create-admin": "node create-admin.js",

@@ -174,6 +174,31 @@
         return `${sign}${numberFormatter.format(numericValue)} кг`;
     }
 
+    function isOrderViolation(item) {
+        return item?.code === "ORDER_MISMATCH";
+    }
+
+    function formatOrderPosition(value) {
+        const numericValue = toNumber(value);
+        if (!Number.isFinite(numericValue) || numericValue <= 0) {
+            return "—";
+        }
+
+        return `#${Math.round(numericValue)}`;
+    }
+
+    function formatViolationPlan(item) {
+        return isOrderViolation(item) ? formatOrderPosition(item.plan) : formatWeight(item.plan);
+    }
+
+    function formatViolationFact(item) {
+        return isOrderViolation(item) ? formatOrderPosition(item.fact) : formatWeight(item.fact);
+    }
+
+    function formatViolationDeviation(item) {
+        return isOrderViolation(item) ? "Порядок" : formatSignedWeight(item.deviation);
+    }
+
     function formatPercent(value) {
         const numericValue = toNumber(value);
         if (!Number.isFinite(numericValue)) {
@@ -222,6 +247,8 @@
             plan,
             fact,
             deviation,
+            code: String(item.code || "").trim(),
+            message: item.message ?? "",
         };
     }
 
@@ -408,7 +435,9 @@
         }
 
         elements.violationsTableBody.innerHTML = state.violations.map((item) => {
-            const deviationClassName = item.deviation > 0
+            const deviationClassName = isOrderViolation(item)
+                ? "reports-number"
+                : item.deviation > 0
                 ? "reports-number reports-number--positive"
                 : item.deviation < 0
                     ? "reports-number reports-number--negative"
@@ -423,9 +452,9 @@
                     <td>${escapeHtml(item.groupName)}</td>
                     <td>${escapeHtml(item.component)}</td>
                     <td>${escapeHtml(item.type)}</td>
-                    <td><span class="reports-number">${escapeHtml(formatWeight(item.plan))}</span></td>
-                    <td><span class="reports-number">${escapeHtml(formatWeight(item.fact))}</span></td>
-                    <td><span class="${deviationClassName}">${escapeHtml(formatSignedWeight(item.deviation))}</span></td>
+                    <td><span class="reports-number">${escapeHtml(formatViolationPlan(item))}</span></td>
+                    <td><span class="reports-number">${escapeHtml(formatViolationFact(item))}</span></td>
+                    <td><span class="${deviationClassName}">${escapeHtml(formatViolationDeviation(item))}</span></td>
                 </tr>
             `;
         }).join("");
@@ -581,9 +610,9 @@
                 item.groupName,
                 item.component,
                 item.type,
-                formatWeight(item.plan),
-                formatWeight(item.fact),
-                formatSignedWeight(item.deviation),
+                formatViolationPlan(item),
+                formatViolationFact(item),
+                formatViolationDeviation(item),
             ]),
         ];
 

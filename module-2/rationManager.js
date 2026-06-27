@@ -21,12 +21,22 @@ export function calculatePlan(parsedRation, headcount) {
     return { totalBatchWeight: 0, totalDryMatterWeight: 0, ingredients: [] };
   }
 
+  const orderedRation = parsedRation
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+    const leftOrder = Number(left.item?.sortOrder || left.index + 1);
+    const rightOrder = Number(right.item?.sortOrder || right.index + 1);
+    if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+    return left.index - right.index;
+  })
+    .map((entry) => entry.item);
+
   let totalBatchWeight = 0;
   let totalDryMatterWeight = 0;
   const ingredients = [];
 
   // 2. Проходим по каждому ингредиенту и считаем замес
-  for (const item of parsedRation) {
+  for (const item of orderedRation) {
     const targetWeight = item.plannedWeight * headcount;
     const targetDryMatter = Number(item.dryMatterWeight || 0) * headcount;
 
@@ -37,6 +47,7 @@ export function calculatePlan(parsedRation, headcount) {
     // Формируем объект ингредиента для результата
     ingredients.push({
       name: item.name,
+      sortOrder: Number(item.sortOrder || ingredients.length + 1),
       targetWeight: targetWeight,
       targetDryMatter: targetDryMatter,
       isCompound: Boolean(item.isCompound),

@@ -42,6 +42,11 @@ function parseNumber(value) {
   return null;
 }
 
+function parsePositiveInteger(value) {
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+}
+
 function serializeCompoundComponents(components) {
   if (!Array.isArray(components) || components.length === 0) {
     return null;
@@ -78,6 +83,7 @@ function formatRationIngredient(ingredient) {
     id: ingredient.id,
     rationId: ingredient.rationId,
     name: ingredient.name,
+    sortOrder: Number(ingredient.sortOrder || 0),
     plannedWeight: ingredient.plannedWeight,
     dryMatterWeight: ingredient.dryMatterWeight,
     isCompound: Boolean(ingredient.isCompound),
@@ -87,12 +93,17 @@ function formatRationIngredient(ingredient) {
 
 function formatRation(ration) {
   if (!ration) return ration;
+  const ingredients = Array.isArray(ration.ingredients)
+    ? [...ration.ingredients].sort((left, right) => {
+      const orderDiff = Number(left?.sortOrder || 0) - Number(right?.sortOrder || 0);
+      if (orderDiff !== 0) return orderDiff;
+      return Number(left?.id || 0) - Number(right?.id || 0);
+    })
+    : [];
 
   return {
     ...ration,
-    ingredients: Array.isArray(ration.ingredients)
-      ? ration.ingredients.map(formatRationIngredient)
-      : []
+    ingredients: ingredients.map(formatRationIngredient)
   };
 }
 
@@ -203,6 +214,7 @@ function validateIngredients(ingredients) {
 
     result.push({
       name: ingredientName,
+      sortOrder: parsePositiveInteger(row.sortOrder) || i + 1,
       plannedWeight,
       dryMatterWeight,
       isCompound,
@@ -462,6 +474,7 @@ router.patch('/:id', requireWriteAccess, async (req, res) => {
             data: validatedIngredients.ingredients.map((item) => ({
               rationId: id,
               name: item.name,
+              sortOrder: item.sortOrder,
               plannedWeight: item.plannedWeight,
               dryMatterWeight: item.dryMatterWeight,
               isCompound: item.isCompound,

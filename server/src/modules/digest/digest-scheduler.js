@@ -43,7 +43,30 @@ function parseRecipients(value) {
   }
 }
 
-function buildDigestHtml(settings, reportData, now) {
+export function isOrderViolation(item) {
+  return item?.code === 'ORDER_MISMATCH'
+}
+
+export function formatOrderPosition(value) {
+  const numericValue = Number(value)
+  return Number.isFinite(numericValue) && numericValue > 0
+    ? `#${Math.round(numericValue)}`
+    : '—'
+}
+
+export function formatViolationPlan(item) {
+  return isOrderViolation(item) ? formatOrderPosition(item.plan) : (item.plan ?? '—')
+}
+
+export function formatViolationFact(item) {
+  return isOrderViolation(item) ? formatOrderPosition(item.fact) : (item.fact ?? '—')
+}
+
+export function formatViolationDeviation(item) {
+  return isOrderViolation(item) ? 'Порядок' : (item.deviation ?? '—')
+}
+
+export function buildDigestHtml(settings, reportData, now) {
   const batches = Array.isArray(reportData?.batches) ? reportData.batches : []
   const violations = Array.isArray(reportData?.violations) ? reportData.violations : []
   const problemBatches = batches.filter((item) => Number(item?.violationsCount || 0) > 0)
@@ -56,9 +79,9 @@ function buildDigestHtml(settings, reportData, now) {
           <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.groupName || item.group || 'Без группы'}</td>
           <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.component || '—'}</td>
           <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.type || item.violationType || 'Нарушение'}</td>
-          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.plan ?? '—'}</td>
-          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.fact ?? '—'}</td>
-          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${item.deviation ?? '—'}</td>
+          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${formatViolationPlan(item)}</td>
+          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${formatViolationFact(item)}</td>
+          <td style="padding:6px 8px;border:1px solid #dfe3ea;">${formatViolationDeviation(item)}</td>
         </tr>
       `).join('')
     : `

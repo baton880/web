@@ -132,6 +132,7 @@ $(document).ready(function () {
         return {
             localId: `ingredient-${state.ingredientSeq}`,
             name: item.name || "",
+            sortOrder: item.sortOrder ?? "",
             plannedWeight: item.plannedWeight ?? "",
             isCompound: Boolean(item.isCompound),
             components: Array.isArray(item.components)
@@ -158,6 +159,32 @@ $(document).ready(function () {
         }
 
         return parseFormNumber(ingredient?.plannedWeight) || 0;
+    }
+
+    function normalizeManualIngredientOrder() {
+        state.manualIngredients.forEach((ingredient, index) => {
+            ingredient.sortOrder = index + 1;
+        });
+    }
+
+    function moveManualIngredientToPosition(localId, targetPosition) {
+        const currentIndex = state.manualIngredients.findIndex((ingredient) => ingredient.localId === localId);
+        if (currentIndex < 0) {
+            normalizeManualIngredientOrder();
+            return;
+        }
+
+        const normalizedTargetIndex = Math.max(
+            0,
+            Math.min(
+                state.manualIngredients.length - 1,
+                Math.round(Number(targetPosition || 0)) - 1
+            )
+        );
+
+        const [ingredient] = state.manualIngredients.splice(currentIndex, 1);
+        state.manualIngredients.splice(normalizedTargetIndex, 0, ingredient);
+        normalizeManualIngredientOrder();
     }
 
     function getGroupsByRationId() {
@@ -254,7 +281,7 @@ $(document).ready(function () {
 
         return `
             <tr class="ration-manual-compound-row" data-compound-for="${parentId}">
-                <td colspan="3">
+                <td colspan="4">
                     <div class="ration-compound-editor">
                         <div class="ration-compound-editor__header">
                             <span>Состав</span>
@@ -327,8 +354,9 @@ $(document).ready(function () {
         if (!state.manualIngredients.length) {
             state.manualIngredients = [makeIngredientRow()];
         }
+        normalizeManualIngredientOrder();
 
-        manualIngredientsBody.innerHTML = state.manualIngredients.map((ingredient) => {
+        manualIngredientsBody.innerHTML = state.manualIngredients.map((ingredient, index) => {
             const rowId = escapeHtml(ingredient.localId);
             const rowClass = ingredient.localId === state.highlightedIngredientId ? "ration-manual-row is-highlighted" : "ration-manual-row";
             const plannedWeightValue = ingredient.isCompound ? getIngredientPlannedWeight(ingredient) || "" : ingredient.plannedWeight;
@@ -336,6 +364,41 @@ $(document).ready(function () {
             const compoundAttributes = ingredient.isCompound ? 'readonly tabindex="-1"' : "";
             return `
                 <tr class="${rowClass}" data-ingredient-id="${rowId}">
+                    <td>
+                        <div class="d-flex align-items-center">
+                            <input
+                                type="number"
+                                class="form-control form-control-sm ration-manual-number mr-2"
+                                data-ingredient-field="sortOrder"
+                                min="1"
+                                step="1"
+                                value="${escapeHtml(ingredient.sortOrder || index + 1)}"
+                                ${state.isManualSaving ? "disabled" : ""}
+                            >
+                            <div class="btn-group btn-group-sm" role="group">
+                                <button
+                                    type="button"
+                                    class="btn btn-outline-secondary"
+                                    data-action="move-ingredient-up"
+                                    ${index <= 0 || state.isManualSaving ? "disabled" : ""}
+                                    title="Выше"
+                                    aria-label="Выше"
+                                >
+                                    <i class="fas fa-arrow-up" aria-hidden="true"></i>
+                                </button>
+                                <button
+                                    type="button"
+                                    class="btn btn-outline-secondary"
+                                    data-action="move-ingredient-down"
+                                    ${index >= state.manualIngredients.length - 1 || state.isManualSaving ? "disabled" : ""}
+                                    title="Ниже"
+                                    aria-label="Ниже"
+                                >
+                                    <i class="fas fa-arrow-down" aria-hidden="true"></i>
+                                </button>
+                            </div>
+                        </div>
+                    </td>
                     <td>
                         ${compoundBadge}
                         <input
@@ -759,6 +822,8 @@ $(document).ready(function () {
             return { ok: false, message: `Рацион с названием "${rationName}" уже существует`, focus: manualNameInput };
         }
 
+        normalizeManualIngredientOrder();
+
         const ingredients = [];
         const seenIngredients = new Set();
 
@@ -821,6 +886,7 @@ $(document).ready(function () {
 
             ingredients.push({
                 name,
+                sortOrder: index + 1,
                 plannedWeight,
                 isCompound: Boolean(row.isCompound),
                 components: row.isCompound ? components.map((component) => ({
@@ -960,6 +1026,7 @@ $(document).ready(function () {
         state.manualIngredients = (Array.isArray(ration?.ingredients) ? ration.ingredients : [])
             .map((ingredient) => makeIngredientRow({
                 name: ingredient?.name || "",
+                sortOrder: ingredient?.sortOrder ?? "",
                 plannedWeight: ingredient?.plannedWeight ?? "",
                 isCompound: Boolean(ingredient?.isCompound),
                 components: Array.isArray(ingredient?.components) ? ingredient.components : [],
@@ -1119,6 +1186,20 @@ $(document).ready(function () {
         updateManualSummary();
     });
 
+    manualIngredientsBody?.addEventListener("change", function (event) {
+        const input = event.target.closest("[data-ingredient-field='sortOrder']");
+        if (!input || state.isManualSaving) {
+            return;
+        }
+
+        syncManualRowsFromInputs();
+        const row = input.closest("[data-ingredient-id]");
+        const localId = row?.getAttribute("data-ingredient-id");
+        const targetPosition = parseFormNumber(input.value) || 1;
+        moveManualIngredientToPosition(localId, targetPosition);
+        updateManualState();
+    });
+
     manualIngredientsBody?.addEventListener("click", function (event) {
         const addComponentButton = event.target.closest("[data-action='add-compound-component']");
         if (addComponentButton && !state.isManualSaving) {
@@ -1141,6 +1222,24 @@ $(document).ready(function () {
             const parent = state.manualIngredients.find((ingredient) => ingredient.localId === parentId);
             if (parent?.isCompound && Array.isArray(parent.components) && parent.components.length > 1) {
                 parent.components = parent.components.filter((component) => component.localId !== componentId);
+                updateManualState();
+            }
+            return;
+        }
+
+        const moveUpButton = event.target.closest("[data-action='move-ingredient-up']");
+        const moveDownButton = event.target.closest("[data-action='move-ingredient-down']");
+        if ((moveUpButton || moveDownButton) && !state.isManualSaving) {
+            syncManualRowsFromInputs();
+            const row = (moveUpButton || moveDownButton).closest("[data-ingredient-id]");
+            const localId = row?.getAttribute("data-ingredient-id");
+            const currentIndex = state.manualIngredients.findIndex((ingredient) => ingredient.localId === localId);
+            const nextIndex = moveUpButton ? currentIndex - 1 : currentIndex + 1;
+
+            if (currentIndex >= 0 && nextIndex >= 0 && nextIndex < state.manualIngredients.length) {
+                const [ingredient] = state.manualIngredients.splice(currentIndex, 1);
+                state.manualIngredients.splice(nextIndex, 0, ingredient);
+                normalizeManualIngredientOrder();
                 updateManualState();
             }
             return;
