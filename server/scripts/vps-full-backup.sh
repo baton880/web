@@ -92,6 +92,8 @@ echo "[Backup] Generating checksum..."
 sha256sum "${ARCHIVE_PATH}" > "${SHA_PATH}"
 
 echo "[Backup] Writing manifest..."
+ARCHIVE_LIST_PATH="${STAGING_DIR}/archive-contents.txt"
+tar -tzf "${ARCHIVE_PATH}" > "${ARCHIVE_LIST_PATH}"
 {
   echo "archive=${ARCHIVE_PATH}"
   echo "checksum_file=${SHA_PATH}"
@@ -99,7 +101,7 @@ echo "[Backup] Writing manifest..."
   echo "project_root=${PROJECT_ROOT}"
   echo
   echo "archive_contents_preview:"
-  tar -tzf "${ARCHIVE_PATH}" | head -n 120
+  head -n 120 "${ARCHIVE_LIST_PATH}"
 } > "${MANIFEST_PATH}"
 
 echo "[Backup] Cleanup staging files..."

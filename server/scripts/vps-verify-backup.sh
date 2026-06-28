@@ -30,6 +30,10 @@ else
 fi
 
 echo "[Verify] Checking required files in archive..."
+ARCHIVE_LIST_PATH="$(mktemp)"
+trap 'rm -f "${ARCHIVE_LIST_PATH}"' EXIT
+tar -tzf "${ARCHIVE_PATH}" > "${ARCHIVE_LIST_PATH}"
+
 required_patterns=(
   "opt/farm-server/server/src/index.js"
   "opt/farm-server/server/package.json"
@@ -40,7 +44,7 @@ required_patterns=(
 
 missing=0
 for pattern in "${required_patterns[@]}"; do
-  if tar -tzf "${ARCHIVE_PATH}" | grep -q "${pattern}"; then
+  if grep -q "${pattern}" "${ARCHIVE_LIST_PATH}"; then
     echo "  [OK] ${pattern}"
   else
     echo "  [MISS] ${pattern}"
@@ -48,7 +52,7 @@ for pattern in "${required_patterns[@]}"; do
   fi
 done
 
-if tar -tzf "${ARCHIVE_PATH}" | grep -q "etc-nginx"; then
+if grep -q "etc-nginx" "${ARCHIVE_LIST_PATH}"; then
   echo "  [OK] nginx config included"
 else
   echo "  [WARN] nginx config not found in archive"
