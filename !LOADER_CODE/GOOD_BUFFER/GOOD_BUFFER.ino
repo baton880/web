@@ -43,6 +43,7 @@ const int RAM_QUEUE_MAX = 64;
 const unsigned long TELEMETRY_INTERVAL_MS = 1000;
 const unsigned long RELPOS_FRESH_MS = 3000;
 const unsigned long SPEED_FRESH_MS = 3000;
+const unsigned long TIME_SKIP_LOG_INTERVAL_MS = 5000;
 const char* QUEUE_FILE = "/telemetry_queue.jsonl";
 const char* QUEUE_TMP_FILE = "/telemetry_queue.tmp";
 const uint32_t SD_SPEEDS[] = {400000, 1000000, 4000000, 8000000};
@@ -87,6 +88,7 @@ unsigned long liveSendBlockedUntilMs = 0;
 unsigned long liveSendBackoffMs = LIVE_SEND_BACKOFF_MIN_MS;
 bool sdReady = false;
 unsigned long lastTelemetryMs = 0;
+unsigned long lastTimeSkipLogMs = 0;
 String ramQueue[RAM_QUEUE_MAX];
 int ramQueueHead = 0;
 int ramQueueCount = 0;
@@ -247,13 +249,56 @@ double nmeaToDecimal(const String& val, const String& dir) {
   return decimal;
 }
 
-bool formatNmeaTime(const String& nmeaTime, String& out) {
-  // Expected format: hhmmss.sss
-  if (!lastRmcDateValid || lastRmcDateYmd.length() != 10) {
+bool readSystemUtc(struct tm& tmUtc) {
+  time_t now = time(nullptr);
+  if (now <= 1700000000) {
     return false;
   }
 
+  gmtime_r(&now, &tmUtc);
+  return tmUtc.tm_year + 1900 >= 2024;
+}
+
+String formatSystemIsoUtc(const struct tm& tmUtc) {
+  char buf[25];
+  snprintf(
+    buf,
+    sizeof(buf),
+    "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
+    tmUtc.tm_year + 1900,
+    tmUtc.tm_mon + 1,
+    tmUtc.tm_mday,
+    tmUtc.tm_hour,
+    tmUtc.tm_min,
+    tmUtc.tm_sec
+  );
+  return String(buf);
+}
+
+bool formatNmeaTime(const String& nmeaTime, String& out) {
+  struct tm tmUtc;
+  bool systemTimeValid = readSystemUtc(tmUtc);
+  String dateYmd = "";
+
+  if (lastRmcDateValid && lastRmcDateYmd.length() == 10) {
+    dateYmd = lastRmcDateYmd;
+  } else if (systemTimeValid) {
+    char dateBuf[11];
+    snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday);
+    dateYmd = String(dateBuf);
+  }
+
+  // Expected format: hhmmss.sss. If GGA time is absent but NTP is valid,
+  // send with current system time instead of inventing 00:00:00Z.
   if (nmeaTime.length() < 6 || !isDigitsOnly(nmeaTime.substring(0, 6))) {
+    if (!systemTimeValid) {
+      return false;
+    }
+    out = formatSystemIsoUtc(tmUtc);
+    return true;
+  }
+
+  if (dateYmd.length() != 10) {
     return false;
   }
 
@@ -486,6 +531,7 @@ String buildPayload(const GpsData& data) {
 
 bool sendPayload(const String& payload) {
   if (WiFi.status() != WL_CONNECTED) {
+    Serial.println("HTTP send skipped: WiFi disconnected");
     return false;
   }
 
@@ -494,6 +540,8 @@ bool sendPayload(const String& payload) {
   http.setTimeout(HTTP_TOTAL_TIMEOUT_MS);
 
   if (!http.begin(telemetryClient, TELEMETRY_URL)) {
+    Serial.print("HTTP begin failed: ");
+    Serial.println(TELEMETRY_URL);
     return false;
   }
 
@@ -1358,6 +1406,14 @@ bool parseGga(const String& sentence, GpsData& out) {
 
   String timestamp;
   if (!formatNmeaTime(utcRaw, timestamp)) {
+    unsigned long nowMs = millis();
+    if (nowMs - lastTimeSkipLogMs >= TIME_SKIP_LOG_INTERVAL_MS) {
+      lastTimeSkipLogMs = nowMs;
+      Serial.print("Telemetry skipped: waiting for valid GPS/NTP time, GGA utc=");
+      Serial.print(utcRaw.length() ? utcRaw : "<empty>");
+      Serial.print(" RMC date=");
+      Serial.println(lastRmcDateValid ? lastRmcDateYmd : "<none>");
+    }
     return false;
   }
 
