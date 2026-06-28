@@ -63,18 +63,15 @@ async function runRtkTrackCleanupTick(prisma) {
       return
     }
 
-    const [rtkDeleted] = await Promise.all([
-      prisma.rtkTelemetry.deleteMany({}),
-      setHostTrackClearSince(prisma, new Date())
-    ])
+    const clearSince = await setHostTrackClearSince(prisma, new Date())
     lastClearedDayKey = now.dayKey
 
     console.log(
-      `[TRACK] Ежедневная очистка треков (${resetTime}, ${DEFAULT_TIMEZONE}), ` +
-      `rtk=${rtkDeleted.count}`
+      `[TRACK] Daily visible track reset (${resetTime}, ${DEFAULT_TIMEZONE}), ` +
+      `clearSince=${clearSince.toISOString()}`
     )
   } catch (error) {
-    console.error('[TRACK] Ошибка фоновой очистки треков:', error)
+    console.error('[TRACK] Daily visible track reset failed:', error)
   } finally {
     isTickRunning = false
   }

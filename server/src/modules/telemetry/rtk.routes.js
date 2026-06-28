@@ -3,6 +3,8 @@ import prisma from '../../database.js'
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from '../../middleware/auth.js'
 import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
 import { getTelemetrySettings } from './telemetry-settings.js'
+import { getHostTrackClearSince } from './track-state-store.js'
+import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -576,6 +578,78 @@ async function loadActiveZones() {
   })
 }
 
+function normalizeZoneType(value) {
+  return String(value || '').trim().toUpperCase()
+}
+
+function isBarnZone(zone, linkedBarnZoneIds = new Set()) {
+  if (!zone) return false
+  const zoneType = normalizeZoneType(zone.zoneType)
+  if (linkedBarnZoneIds.has(Number(zone.id))) return true
+  return zoneType === 'BARN' || zoneType === 'LIVESTOCK' || zoneType === 'COWSHED' || zoneType === 'GROUP'
+}
+
+function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
+  if (!zone || isBarnZone(zone, linkedBarnZoneIds)) return false
+  const zoneType = normalizeZoneType(zone.zoneType)
+  if (!zoneType) return true
+  return zoneType === 'STORAGE' || zoneType === 'FEED' || zoneType === 'LOADING'
+}
+
+async function loadActiveLoadingZones() {
+  const [zones, groupsWithZones] = await Promise.all([
+    loadActiveZones(),
+    prisma.livestockGroup.findMany({
+      where: { storageZoneId: { not: null } },
+      select: { storageZoneId: true }
+    })
+  ])
+  const linkedBarnZoneIds = new Set(
+    groupsWithZones
+      .map((group) => Number(group.storageZoneId))
+      .filter((zoneId) => Number.isInteger(zoneId) && zoneId > 0)
+  )
+
+  return zones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
+}
+
+function resolveScoreboardDeviceId(raw) {
+  const value = readRawValue(raw, [
+    'hostDeviceId',
+    'host_device_id',
+    'targetDeviceId',
+    'target_device_id',
+    'esrkDeviceId',
+    'esrk_device_id'
+  ])
+
+  return typeof value === 'string' && value.trim() ? value.trim() : 'host_01'
+}
+
+async function updateLoaderZoneScoreboard(rawPayloads, packets, settings) {
+  const zones = await loadActiveLoadingZones()
+  if (!zones.length) return
+
+  packets.forEach((packet, index) => {
+    const raw = rawPayloads[index] || {}
+    const relPosFlags = parseRelPosFlags(raw)
+    const hostDeviceId = resolveScoreboardDeviceId(raw)
+
+    telemetryProcessor.processLoaderPacket({
+      deviceId: hostDeviceId,
+      hostDeviceId,
+      timestamp: packet.timestamp,
+      lat: packet.lat,
+      lon: packet.lon,
+      speedKmh: packet.speed,
+      headingDeg: packet.course,
+      headingAccDeg: parseHeadingAccuracyDegrees(raw),
+      relPosValid: parseRelPosValid(raw, relPosFlags),
+      relPosHeadingValid: parseRelPosHeadingValid(raw, relPosFlags)
+    }, zones, settings, { deviceId: hostDeviceId })
+  })
+}
+
 function serializeZone(zone, lat, lon) {
   if (!zone) return null
 
@@ -589,6 +663,8 @@ function serializeZone(zone, lat, lon) {
     ingredient: zone.ingredient,
     zoneType: zone.zoneType,
     radius: zone.radius,
+    loadingWallSide: zone.loadingWallSide ?? null,
+    loadingNormalDeg: zone.loadingNormalDeg ?? null,
     distanceMeters: distance
   }
 }
@@ -692,6 +768,15 @@ async function buildLatestResponse(deviceId) {
   return serializeRtkTelemetry(latest, zones, settings)
 }
 
+async function buildVisibleRtkTrackWhere(deviceId) {
+  const clearSince = await getHostTrackClearSince(prisma)
+
+  return {
+    ...(deviceId ? { deviceId } : {}),
+    ...(clearSince ? { timestamp: { gt: clearSince } } : {})
+  }
+}
+
 async function findLatestZonePoint(zoneId, seconds, deviceId) {
   const zone = await prisma.storageZone.findUnique({ where: { id: zoneId } })
   if (!zone) {
@@ -747,6 +832,12 @@ router.post('/', async (req, res) => {
       })
     }
 
+    try {
+      await updateLoaderZoneScoreboard(payloads, packets, settings)
+    } catch (scoreboardError) {
+      console.warn('[RTK zone scoreboard warning]:', scoreboardError)
+    }
+
     if (packets.length === 1) {
       const created = await prisma.rtkTelemetry.create({
         data: packets[0]
@@ -796,8 +887,9 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
       loadActiveZones(),
       getTelemetrySettings(prisma)
     ])
+    const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
-      where: deviceId ? { deviceId } : undefined,
+      where: Object.keys(where).length ? where : undefined,
       orderBy: [
         { timestamp: 'desc' },
         { id: 'desc' }
@@ -819,8 +911,9 @@ router.get('/history', authenticate, requireReadAccess, async (req, res) => {
       loadActiveZones(),
       getTelemetrySettings(prisma)
     ])
+    const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
-      where: deviceId ? { deviceId } : undefined,
+      where: Object.keys(where).length ? where : undefined,
       orderBy: [
         { timestamp: 'desc' },
         { id: 'desc' }
@@ -917,8 +1010,9 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
       loadActiveZones(),
       getTelemetrySettings(prisma)
     ])
+    const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
-      where: deviceId ? { deviceId } : undefined,
+      where: Object.keys(where).length ? where : undefined,
       orderBy: [
         { timestamp: 'desc' },
         { id: 'desc' }

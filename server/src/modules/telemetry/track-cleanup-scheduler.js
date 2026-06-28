@@ -25,14 +25,12 @@ function formatInFixedOffset(date, offsetMinutes) {
 }
 
 export async function clearTelemetryTrack(prisma) {
-  const [rtkDeleted] = await Promise.all([
-    prisma.rtkTelemetry.deleteMany({}),
-    setHostTrackClearSince(prisma, new Date())
-  ])
+  const clearSince = await setHostTrackClearSince(prisma, new Date())
 
   return {
-    rtkCount: rtkDeleted.count,
-    totalCount: rtkDeleted.count
+    rtkCount: 0,
+    totalCount: 0,
+    clearSince
   }
 }
 
@@ -51,7 +49,7 @@ export async function runTrackCleanupTick(prisma, now = new Date()) {
     lastCleanupDayKey = zonedNow.dayKey
     console.log(
       `[TRACK CLEANUP] Track cleared for ${zonedNow.dayKey} ${TRACK_CLEANUP_TIME} UTC+7: ` +
-      `rtk=${result.rtkCount}`
+      `clearSince=${result.clearSince.toISOString()}`
     )
     return result
   } catch (error) {

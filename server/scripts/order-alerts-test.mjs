@@ -17,6 +17,26 @@ function runCase(name, fn) {
   }
 }
 
+function todayAt(hours, minutes = 0) {
+  const date = new Date()
+  date.setHours(hours, minutes, 0, 0)
+  return date
+}
+
+function addMinutes(date, minutes) {
+  return new Date(date.getTime() + minutes * 60 * 1000)
+}
+
+function todayReportPeriod() {
+  const fromDate = new Date()
+  fromDate.setHours(0, 0, 0, 0)
+
+  const toDate = new Date()
+  toDate.setHours(23, 59, 59, 999)
+
+  return { fromDate, toDate }
+}
+
 runCase('correct sequence has no order violations', () => {
   const plan = [
     { id: 1, name: 'Комбикорм', sortOrder: 1 },
@@ -206,7 +226,7 @@ await (async function runReportIntegrationCase() {
   const stamp = Date.now()
   const rationName = `__order_report_ration_${stamp}`
   const groupName = `__order_report_group_${stamp}`
-  const batchStartTime = new Date('2026-06-27T11:00:00.000Z')
+  const batchStartTime = todayAt(11)
 
   let ration = null
   let group = null
@@ -243,9 +263,9 @@ await (async function runReportIntegrationCase() {
         startTime: batchStartTime,
         actualIngredients: {
           create: [
-            { ingredientName: 'alpha', actualWeight: 10, addedAt: new Date('2026-06-27T11:00:00.000Z') },
-            { ingredientName: 'gamma', actualWeight: 10, addedAt: new Date('2026-06-27T11:01:00.000Z') },
-            { ingredientName: 'beta', actualWeight: 10, addedAt: new Date('2026-06-27T11:02:00.000Z') }
+            { ingredientName: 'alpha', actualWeight: 10, addedAt: batchStartTime },
+            { ingredientName: 'gamma', actualWeight: 10, addedAt: addMinutes(batchStartTime, 1) },
+            { ingredientName: 'beta', actualWeight: 10, addedAt: addMinutes(batchStartTime, 2) }
           ]
         }
       }
@@ -254,8 +274,7 @@ await (async function runReportIntegrationCase() {
     await recalculateBatchViolations(prisma, batch.id, { percentThreshold: 10, minDeviationKg: 1 })
 
     const reportData = await collectReportData({
-      fromDate: new Date('2026-06-27T00:00:00.000Z'),
-      toDate: new Date('2026-06-27T23:59:59.999Z'),
+      ...todayReportPeriod(),
       limit: 50
     })
 
@@ -288,7 +307,7 @@ await (async function runFeedingsReportIntegrationCase() {
   const stamp = Date.now()
   const rationName = `__feedings_report_ration_${stamp}`
   const groupName = `__feedings_report_group_${stamp}`
-  const batchStartTime = new Date('2026-06-27T12:00:00.000Z')
+  const batchStartTime = todayAt(12)
 
   let ration = null
   let group = null
@@ -324,7 +343,7 @@ await (async function runFeedingsReportIntegrationCase() {
         startTime: batchStartTime,
         actualIngredients: {
           create: [
-            { ingredientName: 'daily-silage', actualWeight: 50, addedAt: new Date('2026-06-27T12:00:00.000Z') }
+            { ingredientName: 'daily-silage', actualWeight: 50, addedAt: batchStartTime }
           ]
         }
       }
@@ -333,8 +352,7 @@ await (async function runFeedingsReportIntegrationCase() {
     await recalculateBatchViolations(prisma, batch.id, { percentThreshold: 10, minDeviationKg: 1 })
 
     const reportData = await collectReportData({
-      fromDate: new Date('2026-06-27T00:00:00.000Z'),
-      toDate: new Date('2026-06-27T23:59:59.999Z'),
+      ...todayReportPeriod(),
       limit: 50
     })
     const componentRow = reportData.components.find((item) => (
