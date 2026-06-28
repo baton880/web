@@ -142,7 +142,7 @@ async function runSqliteMaintenance(prisma, totalDeleted) {
   }
 
   try {
-    await prisma.$executeRawUnsafe('PRAGMA optimize')
+    await prisma.$queryRawUnsafe('PRAGMA optimize')
     maintenance.optimize = true
   } catch (error) {
     console.warn('[RETENTION] SQLite optimize failed:', error)
@@ -150,7 +150,7 @@ async function runSqliteMaintenance(prisma, totalDeleted) {
 
   if (readBooleanEnv('DATA_RETENTION_SQLITE_CHECKPOINT', true)) {
     try {
-      await prisma.$executeRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE)')
+      await prisma.$queryRawUnsafe('PRAGMA wal_checkpoint(TRUNCATE)')
       maintenance.checkpoint = true
     } catch (error) {
       console.warn('[RETENTION] SQLite checkpoint failed:', error)
