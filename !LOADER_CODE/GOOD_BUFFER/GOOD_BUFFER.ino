@@ -92,6 +92,7 @@ int ramQueueHead = 0;
 int ramQueueCount = 0;
 int sdQueueCount = 0;
 String lastRmcDateYmd = "";
+bool lastRmcDateValid = false;
 double latestHaccM = NAN;
 double latestSpeedKmh = NAN;
 unsigned long latestSpeedReceivedMs = 0;
@@ -246,52 +247,26 @@ double nmeaToDecimal(const String& val, const String& dir) {
   return decimal;
 }
 
-String formatNmeaTime(const String& nmeaTime) {
-  auto nowIsoUtc = []() -> String {
-    time_t now = time(nullptr);
-    if (now <= 1700000000) {
-      return compileDateYmd() + "T00:00:00.000Z";
-    }
-    struct tm tmUtc;
-    gmtime_r(&now, &tmUtc);
-    char buf[25];
-    snprintf(
-      buf,
-      sizeof(buf),
-      "%04d-%02d-%02dT%02d:%02d:%02d.000Z",
-      tmUtc.tm_year + 1900,
-      tmUtc.tm_mon + 1,
-      tmUtc.tm_mday,
-      tmUtc.tm_hour,
-      tmUtc.tm_min,
-      tmUtc.tm_sec
-    );
-    return String(buf);
-  };
-
+bool formatNmeaTime(const String& nmeaTime, String& out) {
   // Expected format: hhmmss.sss
-  String dateYmd = lastRmcDateYmd;
-  if (dateYmd.length() != 10) {
-    time_t now = time(nullptr);
-    if (now > 1700000000) {
-      struct tm tmUtc;
-      gmtime_r(&now, &tmUtc);
-      char buf[11];
-      snprintf(buf, sizeof(buf), "%04d-%02d-%02d", tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday);
-      dateYmd = String(buf);
-    } else {
-      dateYmd = compileDateYmd();
-    }
+  if (!lastRmcDateValid || lastRmcDateYmd.length() != 10) {
+    return false;
   }
 
   if (nmeaTime.length() < 6 || !isDigitsOnly(nmeaTime.substring(0, 6))) {
-    return nowIsoUtc();
+    return false;
   }
 
   String hh = nmeaTime.substring(0, 2);
   String mm = nmeaTime.substring(2, 4);
   String ss = nmeaTime.substring(4, 6);
   String ms = "000";
+  int hhI = hh.toInt();
+  int mmI = mm.toInt();
+  int ssI = ss.toInt();
+  if (hhI < 0 || hhI > 23 || mmI < 0 || mmI > 59 || ssI < 0 || ssI > 60) {
+    return false;
+  }
 
   if (nmeaTime.length() > 7 && nmeaTime[6] == '.') {
     String frac = nmeaTime.substring(7);
@@ -306,7 +281,8 @@ String formatNmeaTime(const String& nmeaTime) {
     if (msOnly.length() == 3) ms = msOnly;
   }
 
-  return dateYmd + "T" + hh + ":" + mm + ":" + ss + "." + ms + "Z";
+  out = lastRmcDateYmd + "T" + hh + ":" + mm + ":" + ss + "." + ms + "Z";
+  return true;
 }
 
 String escapeJson(const String& s) {
@@ -1011,9 +987,12 @@ void updateDateFromRmc(const String& sentence) {
   if (ddI < 1 || ddI > 31 || mmI < 1 || mmI > 12) return;
 
   int year = (yyI >= 80) ? (1900 + yyI) : (2000 + yyI);
+  if (year < 2024 || year > 2099) return;
+
   char buf[11];
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, mmI, ddI);
   lastRmcDateYmd = String(buf);
+  lastRmcDateValid = true;
 }
 
 void updateSpeedFromSentence(const String& sentence) {
@@ -1377,7 +1356,12 @@ bool parseGga(const String& sentence, GpsData& out) {
   String alt = getField(sentence, 9);
   String corrAge = getField(sentence, 13);
 
-  out.timestamp = formatNmeaTime(utcRaw);
+  String timestamp;
+  if (!formatNmeaTime(utcRaw, timestamp)) {
+    return false;
+  }
+
+  out.timestamp = timestamp;
   out.lat = nmeaToDecimal(latRaw, latDir);
   out.lon = nmeaToDecimal(lonRaw, lonDir);
   out.haccM = latestHaccM;
