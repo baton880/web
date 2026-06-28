@@ -1,5 +1,6 @@
 #include <WiFi.h>
 #include <HTTPClient.h>
+#include <WiFiClientSecure.h>
 #include <SPI.h>
 #include <SD.h>
 #include <time.h>
@@ -13,7 +14,7 @@ const char* WIFI_PRIMARY_SSID = "ISRK_Hozyain";
 const char* WIFI_PRIMARY_PASS = "SrostkiKorovki";
 const char* WIFI_FALLBACK_SSID = "Sasung";
 const char* WIFI_FALLBACK_PASS = "223334444";
-const char* TELEMETRY_URL = "http://62.113.97.20/api/telemetry/rtk";
+const char* TELEMETRY_URL = "https://vi-korm.ru/api/telemetry/rtk";
 const char* DEVICE_ID = "rtk_loader_01";
 
 // --- UART pins for Ardusimple ---
@@ -33,8 +34,8 @@ const unsigned long FLUSH_BACKOFF_MIN_MS = 1000;
 const unsigned long FLUSH_BACKOFF_MAX_MS = 60000;
 const unsigned long LIVE_SEND_BACKOFF_MIN_MS = 1000;
 const unsigned long LIVE_SEND_BACKOFF_MAX_MS = 30000;
-const unsigned long HTTP_CONNECT_TIMEOUT_MS = 800;
-const unsigned long HTTP_TOTAL_TIMEOUT_MS = 1500;
+const unsigned long HTTP_CONNECT_TIMEOUT_MS = 3000;
+const unsigned long HTTP_TOTAL_TIMEOUT_MS = 8000;
 const int FLUSH_BATCH_MAX = 8;
 const uint64_t SD_FREE_GUARD_BYTES = 64ULL * 1024ULL;
 const int SD_INIT_RETRIES = 5;
@@ -94,6 +95,7 @@ String lastRmcDateYmd = "";
 double latestHaccM = NAN;
 double latestSpeedKmh = NAN;
 unsigned long latestSpeedReceivedMs = 0;
+WiFiClientSecure telemetryClient;
 
 uint8_t ubxState = UBX_WAIT_SYNC1;
 uint8_t ubxClass = 0;
@@ -515,7 +517,7 @@ bool sendPayload(const String& payload) {
   http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
   http.setTimeout(HTTP_TOTAL_TIMEOUT_MS);
 
-  if (!http.begin(TELEMETRY_URL)) {
+  if (!http.begin(telemetryClient, TELEMETRY_URL)) {
     return false;
   }
 
@@ -1457,6 +1459,7 @@ void setup() {
   WiFi.mode(WIFI_STA);
   WiFi.persistent(false);
   WiFi.setAutoReconnect(false);
+  telemetryClient.setInsecure();
   startWifiAttempt(0);
   configTime(0, 0, "pool.ntp.org", "time.google.com", "time.windows.com");
 
