@@ -80,6 +80,120 @@ async function getBatchWeightContext(batch, prismaClient = prisma) {
     };
 }
 
+function parsePositiveInteger(value, fallback) {
+    const parsed = Number.parseInt(value, 10);
+    return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parseRtkRawPayload(value) {
+    if (!value) return {};
+
+    try {
+        const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
+function readFirstString(source, keys = []) {
+    for (const key of keys) {
+        const value = source?.[key];
+        if (typeof value === 'string' && value.trim()) {
+            return value.trim();
+        }
+    }
+
+    return null;
+}
+
+function readFirstBoolean(source, keys = []) {
+    for (const key of keys) {
+        const value = source?.[key];
+        if (typeof value === 'boolean') return value;
+        if (typeof value === 'number' && (value === 0 || value === 1)) return value === 1;
+        if (typeof value === 'string') {
+            const normalized = value.trim().toLowerCase();
+            if (normalized === 'true' || normalized === '1') return true;
+            if (normalized === 'false' || normalized === '0') return false;
+        }
+    }
+
+    return null;
+}
+
+function getRtkLinkedHostDeviceId(row) {
+    const raw = parseRtkRawPayload(row?.rawPayload);
+    return readFirstString(raw, [
+        'hostDeviceId',
+        'host_device_id',
+        'targetDeviceId',
+        'target_device_id',
+        'esrkDeviceId',
+        'esrk_device_id'
+    ]);
+}
+
+function serializeRtkTrackPoint(row) {
+    const raw = parseRtkRawPayload(row?.rawPayload);
+
+    return {
+        timestamp: row.timestamp,
+        lat: row.lat,
+        lon: row.lon,
+        speed: row.speed,
+        course: row.course,
+        heading: row.course,
+        relPosValid: readFirstBoolean(raw, ['relPosValid', 'rel_pos_valid']),
+        relPosHeadingValid: readFirstBoolean(raw, ['relPosHeadingValid', 'rel_pos_heading_valid', 'headingValid', 'heading_valid']),
+        deviceId: row.deviceId,
+        rtkQuality: row.rtkQuality,
+        fixType: row.fixType
+    };
+}
+
+async function getBatchLoaderTrack(batch, prismaClient = prisma, options = {}) {
+    const lookbackSeconds = parsePositiveInteger(options.lookbackSeconds, 60);
+    const windowStart = new Date(new Date(batch.startTime).getTime() - lookbackSeconds * 1000);
+    const windowEnd = batch.endTime || new Date();
+
+    const rows = await prismaClient.rtkTelemetry.findMany({
+        where: {
+            timestamp: {
+                gte: windowStart,
+                lte: windowEnd
+            }
+        },
+        select: {
+            timestamp: true,
+            lat: true,
+            lon: true,
+            speed: true,
+            course: true,
+            deviceId: true,
+            rtkQuality: true,
+            fixType: true,
+            rawPayload: true
+        },
+        orderBy: [
+            { timestamp: 'asc' },
+            { id: 'asc' }
+        ]
+    });
+
+    const byLinkedHost = rows.filter((row) => getRtkLinkedHostDeviceId(row) === batch.deviceId);
+    const selectedRows = byLinkedHost.length
+        ? byLinkedHost
+        : rows.filter((row) => row.deviceId === batch.deviceId);
+
+    if (selectedRows.length) {
+        return selectedRows.map(serializeRtkTrackPoint);
+    }
+
+    const deviceIds = new Set(rows.map((row) => row.deviceId).filter(Boolean));
+    return deviceIds.size === 1 ? rows.map(serializeRtkTrackPoint) : [];
+}
+
 async function getDetailedBatchById(batchId, prismaClient = prisma) {
     const batch = await prismaClient.batch.findUnique({
         where: { id: batchId },
@@ -293,8 +407,11 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
 
         if (!batch) return res.status(404).json({ error: 'Замес не найден' });
 
+        const includeRtk = req.query.includeRtk === 'true' || req.query.includeRtk === '1';
+        const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 60);
+
         // Ищем все точки телеметрии за время этого замеса
-        const telemetryData = await prisma.telemetry.findMany({
+        const hostTrack = await prisma.telemetry.findMany({
             where: {
                 deviceId: batch.deviceId,
                 timestamp: {
@@ -311,7 +428,25 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             orderBy: { timestamp: 'asc' }
         });
 
-        res.json(telemetryData);
+        if (!includeRtk) {
+            return res.json(hostTrack);
+        }
+
+        const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
+            lookbackSeconds: loaderLookbackSeconds
+        });
+
+        res.json({
+            hostTrack,
+            loaderTrack,
+            meta: {
+                batchId: batch.id,
+                deviceId: batch.deviceId,
+                loaderLookbackSeconds,
+                hostPoints: hostTrack.length,
+                loaderPoints: loaderTrack.length
+            }
+        });
     } catch (error) {
         console.error('[Ошибка графика замеса]:', error);
         res.status(500).json({ error: 'Не удалось получить график замеса' });

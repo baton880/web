@@ -44,6 +44,55 @@ function normalizeZoneName(value) {
   return String(value || '').trim().replace(/\s+/g, ' ')
 }
 
+function normalizeDegrees(value) {
+  const normalized = Number(value) % 360
+  return normalized < 0 ? normalized + 360 : normalized
+}
+
+function calculateBearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => deg * Math.PI / 180
+  const toDeg = (rad) => rad * 180 / Math.PI
+  const phi1 = toRad(lat1)
+  const phi2 = toRad(lat2)
+  const lambdaDelta = toRad(lon2 - lon1)
+  const y = Math.sin(lambdaDelta) * Math.cos(phi2)
+  const x = Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambdaDelta)
+
+  return normalizeDegrees(toDeg(Math.atan2(y, x)))
+}
+
+function parseLoadingWallSide(value) {
+  if (value === undefined || value === null || value === '') return null
+  const parsed = Number.parseInt(value, 10)
+  return Number.isInteger(parsed) && parsed >= 0 && parsed <= 3 ? parsed : NaN
+}
+
+function calculateLoadingNormalDeg(polygonCoords, wallSide) {
+  if (!Array.isArray(polygonCoords) || polygonCoords.length < 4) return null
+  if (!Number.isInteger(wallSide) || wallSide < 0 || wallSide > 3) return null
+
+  const first = polygonCoords[wallSide]
+  const second = polygonCoords[(wallSide + 1) % 4]
+  if (!first || !second) return null
+
+  const centerLat = polygonCoords.slice(0, 4).reduce((sum, point) => sum + Number(point[0]), 0) / 4
+  const centerLon = polygonCoords.slice(0, 4).reduce((sum, point) => sum + Number(point[1]), 0) / 4
+  const midpointLat = (Number(first[0]) + Number(second[0])) / 2
+  const midpointLon = (Number(first[1]) + Number(second[1])) / 2
+
+  if (
+    !Number.isFinite(centerLat) ||
+    !Number.isFinite(centerLon) ||
+    !Number.isFinite(midpointLat) ||
+    !Number.isFinite(midpointLon)
+  ) {
+    return null
+  }
+
+  return calculateBearingDeg(centerLat, centerLon, midpointLat, midpointLon)
+}
+
 function parsePolygonCoords(value) {
   if (!value) return null
 
@@ -89,7 +138,13 @@ function buildSquareMetaFromBounds(minLat, minLon, maxLat, maxLon) {
     squareMinLat: normalizedMinLat,
     squareMinLon: normalizedMinLon,
     squareMaxLat: normalizedMaxLat,
-    squareMaxLon: normalizedMaxLon
+    squareMaxLon: normalizedMaxLon,
+    polygonCoords: JSON.stringify([
+      [normalizedMaxLat, normalizedMinLon],
+      [normalizedMaxLat, normalizedMaxLon],
+      [normalizedMinLat, normalizedMaxLon],
+      [normalizedMinLat, normalizedMinLon]
+    ])
   }
 }
 
@@ -172,8 +227,15 @@ function normalizeZonePayload(body, options = {}) {
     const polygonCoords = body.polygonCoords !== undefined
       ? parsePolygonCoords(body.polygonCoords)
       : parsePolygonCoords(currentZone?.polygonCoords)
+    const loadingWallSide = body.loadingWallSide !== undefined
+      ? parseLoadingWallSide(body.loadingWallSide)
+      : parseLoadingWallSide(currentZone?.loadingWallSide)
 
     let meta = null
+
+    if (Number.isNaN(loadingWallSide)) {
+      return { ok: false, error: 'Некорректная сторона загрузки квадратной зоны' }
+    }
 
     if (polygonCoords) {
       meta = buildSquareMetaFromPolygon(polygonCoords)
@@ -235,6 +297,10 @@ function normalizeZonePayload(body, options = {}) {
     data.squareMinLon = meta.squareMinLon
     data.squareMaxLat = meta.squareMaxLat
     data.squareMaxLon = meta.squareMaxLon
+    data.loadingWallSide = loadingWallSide
+    data.loadingNormalDeg = loadingWallSide === null
+      ? null
+      : calculateLoadingNormalDeg(parsePolygonCoords(meta.polygonCoords), loadingWallSide)
     data.radius = DEFAULT_RADIUS
   } else {
     if (!partial || body.radius !== undefined) {
@@ -251,6 +317,8 @@ function normalizeZonePayload(body, options = {}) {
     data.squareMinLon = null
     data.squareMaxLat = null
     data.squareMaxLon = null
+    data.loadingWallSide = null
+    data.loadingNormalDeg = null
   }
 
   if (!partial || body.active !== undefined) {

@@ -22,9 +22,28 @@ const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "zoneChangeDebounceMs",
     "nullZoneConfirmSeconds",
     "zoneChangeConfirmPackets",
+    "zoneDwellScoreCapSeconds",
+    "zoneEntryFrontBonus",
+    "zoneEntryRearPenalty",
+    "zoneEntryFrontAngleDeg",
+    "zoneEntryRearAngleDeg",
+    "squareHeadingScorePerSecond",
+    "squareHeadingScoreCap",
+    "squareHeadingMaxAngleDeg",
     "deviationPercentThreshold",
     "deviationMinKgThreshold",
 ];
+const TELEMETRY_SETTINGS_NON_NEGATIVE_FIELDS = new Set([
+    "zoneEntryFrontBonus",
+    "zoneEntryRearPenalty",
+    "squareHeadingScorePerSecond",
+    "squareHeadingScoreCap",
+]);
+const TELEMETRY_SETTINGS_MAX_VALUES = {
+    zoneEntryFrontAngleDeg: 180,
+    zoneEntryRearAngleDeg: 180,
+    squareHeadingMaxAngleDeg: 180,
+};
 
 const endpoints = {
     host: {
@@ -408,9 +427,16 @@ async function saveTelemetrySettings(event) {
     for (const field of TELEMETRY_SETTINGS_NUMERIC_FIELDS) {
         const rawValue = String(formData.get(field) || "").trim();
         const number = Number(rawValue);
+        const minValue = TELEMETRY_SETTINGS_NON_NEGATIVE_FIELDS.has(field) ? 0 : 1;
+        const maxValue = TELEMETRY_SETTINGS_MAX_VALUES[field];
 
-        if (!rawValue || !Number.isInteger(number) || number <= 0) {
-            window.AppAuth?.showAlert?.("Все пороги должны быть положительными целыми числами", "warning");
+        if (
+            !rawValue ||
+            !Number.isInteger(number) ||
+            number < minValue ||
+            (maxValue != null && number > maxValue)
+        ) {
+            window.AppAuth?.showAlert?.("Все числовые настройки должны быть целыми и попадать в допустимые диапазоны", "warning");
             return;
         }
 

@@ -1,4 +1,4 @@
-import { detectZoneObject } from '../module-1/geo.js';
+import { calculateHaversine, detectZoneObject } from '../module-1/geo.js';
 import { isValidLocation } from '../module-1/validator.js';
 import {
   BATCH_START_THRESHOLD_KG,
@@ -15,8 +15,115 @@ import {
   MOVEMENT_CONFIRM_PACKETS,
   DEFAULT_ZONE_DEBOUNCE_MS,
   NULL_ZONE_CONFIRM_SECONDS,
-  ZONE_CHANGE_CONFIRM_PACKETS
+  ZONE_CHANGE_CONFIRM_PACKETS,
+  ZONE_DWELL_SCORE_CAP_SECONDS,
+  ZONE_ENTRY_FRONT_BONUS,
+  ZONE_ENTRY_REAR_PENALTY,
+  ZONE_ENTRY_FRONT_ANGLE_DEG,
+  ZONE_ENTRY_REAR_ANGLE_DEG,
+  SQUARE_HEADING_SCORE_PER_SECOND,
+  SQUARE_HEADING_SCORE_CAP,
+  SQUARE_HEADING_MAX_ANGLE_DEG
 } from './config.js';
+
+function normalizeDegrees(value) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed)) return null;
+  const normalized = parsed % 360;
+  return normalized < 0 ? normalized + 360 : normalized;
+}
+
+function angleDiffDeg(first, second) {
+  const normalizedFirst = normalizeDegrees(first);
+  const normalizedSecond = normalizeDegrees(second);
+  if (normalizedFirst === null || normalizedSecond === null) return null;
+
+  const diff = Math.abs(normalizedFirst - normalizedSecond) % 360;
+  return diff > 180 ? 360 - diff : diff;
+}
+
+function calculateBearingDeg(lat1, lon1, lat2, lon2) {
+  const toRad = (deg) => deg * Math.PI / 180;
+  const toDeg = (rad) => rad * 180 / Math.PI;
+  const phi1 = toRad(lat1);
+  const phi2 = toRad(lat2);
+  const lambdaDelta = toRad(lon2 - lon1);
+  const y = Math.sin(lambdaDelta) * Math.cos(phi2);
+  const x = Math.cos(phi1) * Math.sin(phi2) -
+    Math.sin(phi1) * Math.cos(phi2) * Math.cos(lambdaDelta);
+
+  return normalizeDegrees(toDeg(Math.atan2(y, x)));
+}
+
+function parsePolygonCoords(value) {
+  if (!value) return null;
+
+  let parsed = value;
+  if (typeof value === 'string') {
+    try {
+      parsed = JSON.parse(value);
+    } catch {
+      return null;
+    }
+  }
+
+  if (!Array.isArray(parsed) || parsed.length < 4) return null;
+
+  const coords = parsed.slice(0, 4).map((point) => {
+    if (!Array.isArray(point) || point.length < 2) return null;
+    const lat = Number(point[0]);
+    const lon = Number(point[1]);
+    return Number.isFinite(lat) && Number.isFinite(lon) ? [lat, lon] : null;
+  });
+
+  return coords.every(Boolean) ? coords : null;
+}
+
+function calculateLoadingNormalDeg(zoneObject) {
+  const storedNormal = normalizeDegrees(zoneObject?.loadingNormalDeg);
+  if (storedNormal !== null) return storedNormal;
+
+  const wallSide = Number.parseInt(zoneObject?.loadingWallSide, 10);
+  const polygonCoords = parsePolygonCoords(zoneObject?.polygonCoords);
+  if (!Number.isInteger(wallSide) || wallSide < 0 || wallSide > 3 || !polygonCoords) {
+    return null;
+  }
+
+  const first = polygonCoords[wallSide];
+  const second = polygonCoords[(wallSide + 1) % 4];
+  const centerLat = polygonCoords.reduce((sum, point) => sum + Number(point[0]), 0) / polygonCoords.length;
+  const centerLon = polygonCoords.reduce((sum, point) => sum + Number(point[1]), 0) / polygonCoords.length;
+  const midpointLat = (Number(first[0]) + Number(second[0])) / 2;
+  const midpointLon = (Number(first[1]) + Number(second[1])) / 2;
+
+  return calculateBearingDeg(centerLat, centerLon, midpointLat, midpointLon);
+}
+
+function parseHeadingDeg(packet) {
+  return normalizeDegrees(
+    packet?.headingDeg ??
+    packet?.heading_deg ??
+    packet?.heading ??
+    packet?.courseDeg ??
+    packet?.course
+  );
+}
+
+function isHeadingUsable(packet) {
+  if (packet?.relPosValid === false || packet?.rel_pos_valid === false) return false;
+  if (packet?.relPosHeadingValid === false || packet?.rel_pos_heading_valid === false || packet?.headingValid === false) return false;
+  return parseHeadingDeg(packet) !== null;
+}
+
+function resolveNonNegativeNumber(value, fallback) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+}
+
+function resolveBoundedNumber(value, fallback, min, max) {
+  const parsed = Number(value);
+  return Number.isFinite(parsed) && parsed >= min && parsed <= max ? parsed : fallback;
+}
 
 export class TelemetryProcessor {
   constructor() {
@@ -35,6 +142,7 @@ export class TelemetryProcessor {
       lastUnloadWeight: null,
       lastIngredientName: null,
       isBatchStarted: false,
+      hasWeightBaseline: true,
       lastAcceptedWeight: null,
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
@@ -46,6 +154,7 @@ export class TelemetryProcessor {
       lastActiveZoneKey: null,
       lastZoneDwellAtMs: null,
       currentZoneDwellMs: 0,
+      lastZoneTrackPoint: null,
       lastRealZoneSeenAtMs: null,
       // Дебаунс смены зоны
       pendingZoneName: null,
@@ -82,7 +191,15 @@ export class TelemetryProcessor {
       nullZoneConfirmMs: Number(settings.nullZoneConfirmSeconds) > 0
         ? Number(settings.nullZoneConfirmSeconds) * 1000
         : (Number(settings.nullZoneConfirmMs) > 0 ? Number(settings.nullZoneConfirmMs) : NULL_ZONE_CONFIRM_SECONDS * 1000),
-      zoneChangeConfirmPackets: Number(settings.zoneChangeConfirmPackets) > 0 ? Number(settings.zoneChangeConfirmPackets) : ZONE_CHANGE_CONFIRM_PACKETS
+      zoneChangeConfirmPackets: Number(settings.zoneChangeConfirmPackets) > 0 ? Number(settings.zoneChangeConfirmPackets) : ZONE_CHANGE_CONFIRM_PACKETS,
+      zoneDwellScoreCapSeconds: Number(settings.zoneDwellScoreCapSeconds) > 0 ? Number(settings.zoneDwellScoreCapSeconds) : ZONE_DWELL_SCORE_CAP_SECONDS,
+      zoneEntryFrontBonus: resolveNonNegativeNumber(settings.zoneEntryFrontBonus, ZONE_ENTRY_FRONT_BONUS),
+      zoneEntryRearPenalty: resolveNonNegativeNumber(settings.zoneEntryRearPenalty, ZONE_ENTRY_REAR_PENALTY),
+      zoneEntryFrontAngleDeg: resolveBoundedNumber(settings.zoneEntryFrontAngleDeg, ZONE_ENTRY_FRONT_ANGLE_DEG, 1, 180),
+      zoneEntryRearAngleDeg: resolveBoundedNumber(settings.zoneEntryRearAngleDeg, ZONE_ENTRY_REAR_ANGLE_DEG, 1, 180),
+      squareHeadingScorePerSecond: resolveNonNegativeNumber(settings.squareHeadingScorePerSecond, SQUARE_HEADING_SCORE_PER_SECOND),
+      squareHeadingScoreCap: resolveNonNegativeNumber(settings.squareHeadingScoreCap, SQUARE_HEADING_SCORE_CAP),
+      squareHeadingMaxAngleDeg: resolveBoundedNumber(settings.squareHeadingMaxAngleDeg, SQUARE_HEADING_MAX_ANGLE_DEG, 1, 180)
     };
   }
 
@@ -147,11 +264,24 @@ export class TelemetryProcessor {
         zoneId: zoneObject?.id ?? null,
         name: zoneObject?.name || ingredientName || null,
         ingredient: ingredientName || zoneObject?.ingredient || zoneObject?.name || null,
+        shapeType: String(zoneObject?.shapeType || 'CIRCLE').trim().toUpperCase(),
+        loadingWallSide: zoneObject?.loadingWallSide ?? null,
+        loadingNormalDeg: calculateLoadingNormalDeg(zoneObject),
         firstSeenAtMs: packetTimeMs,
         lastSeenAtMs: packetTimeMs,
         dwellMs: 0,
         maxContinuousDwellMs: 0,
-        samples: 0
+        samples: 0,
+        score: 0,
+        dwellScore: 0,
+        entryScore: 0,
+        squareHeadingScore: 0,
+        entryAngleDeg: null,
+        entryKind: 'unknown',
+        goodHeadingMs: 0,
+        headingDwellMs: 0,
+        headingSamples: 0,
+        headingWeightedAngleSum: 0
       };
       state.visitedZones.push(visit);
     }
@@ -159,16 +289,112 @@ export class TelemetryProcessor {
     visit.lastSeenAtMs = packetTimeMs;
     visit.name = visit.name || zoneObject?.name || ingredientName || null;
     visit.ingredient = visit.ingredient || ingredientName || zoneObject?.ingredient || zoneObject?.name || null;
+    visit.shapeType = visit.shapeType || String(zoneObject?.shapeType || 'CIRCLE').trim().toUpperCase();
+    visit.loadingWallSide = visit.loadingWallSide ?? zoneObject?.loadingWallSide ?? null;
+    visit.loadingNormalDeg = visit.loadingNormalDeg ?? calculateLoadingNormalDeg(zoneObject);
     return visit;
   }
 
-  _recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs) {
+  _updateVisitScore(visit, thresholds) {
+    if (!visit) return;
+
+    const dwellSeconds = Number(visit.dwellMs || 0) / 1000;
+    const dwellScore = Math.min(dwellSeconds, thresholds.zoneDwellScoreCapSeconds);
+    const squareHeadingScore = Math.min(
+      Number(visit.squareHeadingScore || 0),
+      thresholds.squareHeadingScoreCap
+    );
+
+    visit.dwellScore = dwellScore;
+    visit.score = dwellScore + Number(visit.entryScore || 0) + squareHeadingScore;
+  }
+
+  _applyEntryScore(visit, previousPoint, currentPoint, thresholds) {
+    if (!visit || visit.entryKind !== 'unknown') return;
+    if (!previousPoint || !currentPoint?.headingUsable) return;
+
+    const prevLat = Number(previousPoint.lat);
+    const prevLon = Number(previousPoint.lon);
+    const lat = Number(currentPoint.lat);
+    const lon = Number(currentPoint.lon);
+
+    if (
+      !Number.isFinite(prevLat) ||
+      !Number.isFinite(prevLon) ||
+      !Number.isFinite(lat) ||
+      !Number.isFinite(lon)
+    ) {
+      return;
+    }
+
+    if (calculateHaversine(prevLat, prevLon, lat, lon) < 0.5) {
+      return;
+    }
+
+    const movementBearing = calculateBearingDeg(prevLat, prevLon, lat, lon);
+    const entryAngleDeg = angleDiffDeg(currentPoint.headingDeg, movementBearing);
+    if (entryAngleDeg === null) return;
+
+    visit.entryAngleDeg = entryAngleDeg;
+    if (entryAngleDeg <= thresholds.zoneEntryFrontAngleDeg) {
+      visit.entryKind = 'front';
+      visit.entryScore = Number(thresholds.zoneEntryFrontBonus || 0);
+      visit.frontEntry = true;
+      visit.reverseEntry = false;
+    } else if (entryAngleDeg >= thresholds.zoneEntryRearAngleDeg) {
+      visit.entryKind = 'rear';
+      visit.entryScore = -Number(thresholds.zoneEntryRearPenalty || 0);
+      visit.frontEntry = false;
+      visit.reverseEntry = true;
+    } else {
+      visit.entryKind = 'side';
+      visit.entryScore = 0;
+      visit.frontEntry = false;
+      visit.reverseEntry = false;
+    }
+  }
+
+  _applySquareHeadingScore(visit, point, elapsedMs, thresholds) {
+    if (!visit || elapsedMs <= 0) return;
+    if (String(visit.shapeType || '').trim().toUpperCase() !== 'SQUARE') return;
+    if (!point?.headingUsable) return;
+
+    const loadingNormalDeg = normalizeDegrees(visit.loadingNormalDeg);
+    if (loadingNormalDeg === null) return;
+
+    const headingDiffDeg = angleDiffDeg(point.headingDeg, loadingNormalDeg);
+    if (headingDiffDeg === null) return;
+
+    const elapsedSeconds = elapsedMs / 1000;
+    visit.headingSamples = Number(visit.headingSamples || 0) + 1;
+    visit.headingDwellMs = Number(visit.headingDwellMs || 0) + elapsedMs;
+    visit.headingWeightedAngleSum = Number(visit.headingWeightedAngleSum || 0) + headingDiffDeg * elapsedMs;
+
+    if (headingDiffDeg <= thresholds.squareHeadingMaxAngleDeg) {
+      const factor = Math.cos(headingDiffDeg * Math.PI / 180) ** 2;
+      visit.squareHeadingScore = Number(visit.squareHeadingScore || 0) +
+        elapsedSeconds * Number(thresholds.squareHeadingScorePerSecond || 0) * factor;
+
+      if (headingDiffDeg <= 45) {
+        visit.goodHeadingMs = Number(visit.goodHeadingMs || 0) + elapsedMs;
+      }
+    }
+  }
+
+  _recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs, thresholds, packet = {}) {
     if (!Array.isArray(state.visitedZones)) {
       state.visitedZones = [];
     }
 
     const activeZoneKey = this._zoneVisitKey(activeZone, activeZoneName);
     const previousZoneKey = state.lastActiveZoneKey || null;
+    const previousPoint = state.lastZoneTrackPoint || null;
+    const currentPoint = {
+      lat: Number(packet?.lat),
+      lon: Number(packet?.lon),
+      headingDeg: parseHeadingDeg(packet),
+      headingUsable: isHeadingUsable(packet)
+    };
     const previousTimeMs = Number(state.lastZoneDwellAtMs);
     const elapsedMs = Number.isFinite(previousTimeMs)
       ? Math.max(0, Math.min(30000, packetTimeMs - previousTimeMs))
@@ -178,6 +404,7 @@ export class TelemetryProcessor {
       const previousVisit = state.visitedZones.find((item) => item.key === previousZoneKey);
       if (previousVisit) {
         previousVisit.dwellMs = Number(previousVisit.dwellMs || 0) + elapsedMs;
+        this._applySquareHeadingScore(previousVisit, previousPoint, elapsedMs, thresholds);
         const continuousDwellMs = previousZoneKey === activeZoneKey
           ? Number(state.currentZoneDwellMs || 0) + elapsedMs
           : elapsedMs;
@@ -185,6 +412,7 @@ export class TelemetryProcessor {
           Number(previousVisit.maxContinuousDwellMs || 0),
           continuousDwellMs
         );
+        this._updateVisitScore(previousVisit, thresholds);
       }
     }
 
@@ -202,11 +430,18 @@ export class TelemetryProcessor {
         activeIngredientName,
         packetTimeMs
       );
+      if (previousZoneKey !== activeZoneKey) {
+        this._applyEntryScore(activeVisit, previousPoint, currentPoint, thresholds);
+      }
       activeVisit.samples = Number(activeVisit.samples || 0) + 1;
+      this._updateVisitScore(activeVisit, thresholds);
     }
 
     state.lastActiveZoneKey = activeZoneKey;
     state.lastZoneDwellAtMs = packetTimeMs;
+    state.lastZoneTrackPoint = Number.isFinite(currentPoint.lat) && Number.isFinite(currentPoint.lon)
+      ? currentPoint
+      : null;
   }
 
   _pickVisitedZoneIngredient(state) {
@@ -215,6 +450,10 @@ export class TelemetryProcessor {
     const candidates = state.visitedZones
       .filter((visit) => Number(visit.dwellMs || 0) > 0 && (visit.ingredient || visit.name))
       .sort((a, b) => {
+        const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
+        if (scoreDiff !== 0) return scoreDiff;
+        const headingScoreDiff = Number(b.squareHeadingScore || 0) - Number(a.squareHeadingScore || 0);
+        if (headingScoreDiff !== 0) return headingScoreDiff;
         const dwellDiff = Number(b.dwellMs || 0) - Number(a.dwellMs || 0);
         if (dwellDiff !== 0) return dwellDiff;
         return Number(b.lastSeenAtMs || 0) - Number(a.lastSeenAtMs || 0);
@@ -228,6 +467,7 @@ export class TelemetryProcessor {
     state.lastActiveZoneKey = null;
     state.lastZoneDwellAtMs = packetTimeMs;
     state.currentZoneDwellMs = 0;
+    state.lastZoneTrackPoint = null;
   }
 
   _serializeZoneCandidates(state) {
@@ -236,6 +476,21 @@ export class TelemetryProcessor {
     return state.visitedZones.map((visit) => ({
       name: visit.name,
       ingredient: visit.ingredient,
+      score: Math.round(Number(visit.score || 0) * 10) / 10,
+      dwellScore: Math.round(Number(visit.dwellScore || 0) * 10) / 10,
+      entryScore: Math.round(Number(visit.entryScore || 0) * 10) / 10,
+      squareHeadingScore: Math.round(Number(visit.squareHeadingScore || 0) * 10) / 10,
+      entryAngleDeg: visit.entryAngleDeg !== null &&
+        visit.entryAngleDeg !== undefined &&
+        Number.isFinite(Number(visit.entryAngleDeg))
+        ? Math.round(Number(visit.entryAngleDeg) * 10) / 10
+        : null,
+      entryKind: visit.entryKind || 'unknown',
+      avgPileAngleDeg: Number(visit.headingDwellMs || 0) > 0
+        ? Math.round((Number(visit.headingWeightedAngleSum || 0) / Number(visit.headingDwellMs || 1)) * 10) / 10
+        : null,
+      goodHeadingSeconds: Math.round(Number(visit.goodHeadingMs || 0) / 100) / 10,
+      headingSamples: Number(visit.headingSamples || 0),
       dwellSeconds: Math.round(Number(visit.dwellMs || 0) / 100) / 10,
       maxContinuousSeconds: Math.round(Number(visit.maxContinuousDwellMs || 0) / 100) / 10,
       samples: Number(visit.samples || 0)
@@ -249,6 +504,53 @@ export class TelemetryProcessor {
       error: null,
       banner: null,
       dbActions: [],
+      state: this.getState(deviceId)
+    };
+  }
+
+  processLoaderPacket(packet, zonesConfig, settings = {}, options = {}) {
+    const deviceId = options.deviceId || packet.deviceId || packet.hostDeviceId || packet.host_device_id || 'host_01';
+    const lat = Number(packet.lat);
+    const lon = Number(packet.lon);
+    const packetTimeMs = this._parsePacketTimestampMs(packet);
+    const thresholds = this._resolveThresholds(settings);
+
+    if (!isValidLocation(lat, lon)) {
+      return {
+        isValid: false,
+        error: 'Invalid GPS coordinates',
+        state: this.getState(deviceId)
+      };
+    }
+
+    let state = this.deviceStates.get(deviceId);
+    if (!state) {
+      state = this.getInitialState(Number(packet.weight || 0));
+      state.hasWeightBaseline = false;
+      this.deviceStates.set(deviceId, state);
+    }
+
+    const activeZone = detectZoneObject(lat, lon, zonesConfig);
+    const activeZoneName = activeZone?.name || null;
+    const activeIngredientName = activeZone?.ingredient || activeZoneName;
+
+    this._recordZoneVisit(
+      state,
+      activeZone,
+      activeZoneName,
+      activeIngredientName,
+      packetTimeMs,
+      thresholds,
+      packet
+    );
+
+    if (activeZoneName) {
+      state.lastRealZoneSeenAtMs = packetTimeMs;
+    }
+
+    return {
+      isValid: true,
+      error: null,
       state: this.getState(deviceId)
     };
   }
@@ -334,6 +636,12 @@ export class TelemetryProcessor {
     if (!state) {
       state = this.getInitialState(currentWeight);
       this.deviceStates.set(deviceId, state);
+    } else if (state.hasWeightBaseline === false) {
+      state.zoneStartWeight = currentWeight;
+      state.peakWeight = currentWeight;
+      state.lastStationaryWeight = currentWeight;
+      state.lastAcceptedWeight = null;
+      state.hasWeightBaseline = true;
     }
 
     const movement = this._updateMovementState(state, packet.speedKmh, thresholds);
@@ -394,7 +702,17 @@ export class TelemetryProcessor {
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
     if (!isMotionSuppressed) {
-      this._recordZoneVisit(state, activeZone, activeZoneName, activeIngredientName, packetTimeMs);
+      if (!options.skipZoneVisit) {
+        this._recordZoneVisit(
+          state,
+          activeZone,
+          activeZoneName,
+          activeIngredientName,
+          packetTimeMs,
+          thresholds,
+          packet
+        );
+      }
       if (activeZoneName) {
         state.lastRealZoneSeenAtMs = packetTimeMs;
       }

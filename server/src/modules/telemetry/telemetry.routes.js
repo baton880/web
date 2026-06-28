@@ -259,7 +259,9 @@ router.post('/', async (req, res) => {
     const processorPacket = {
       ...packet,
       lat: effectivePosition.lat,
-      lon: effectivePosition.lon
+      lon: effectivePosition.lon,
+      headingDeg: effectivePosition.rtkPoint?.course ?? packet.headingDeg ?? packet.heading ?? packet.course,
+      course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
     };
     const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
     const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones)
@@ -267,7 +269,8 @@ router.post('/', async (req, res) => {
 
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
-      suppressLoading
+      suppressLoading,
+      skipZoneVisit: effectivePosition.source === 'rtk'
     });
 
     if (!result.isValid) {

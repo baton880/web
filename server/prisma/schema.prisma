@@ -62,6 +62,8 @@ model StorageZone {
   squareMinLon Float?
   squareMaxLat Float?
   squareMaxLon Float?
+  loadingWallSide Int?
+  loadingNormalDeg Float?
   zoneType   String   @default("STORAGE")
   ingredient String
   active     Boolean  @default(true)
@@ -115,6 +117,14 @@ model TelemetrySettings {
   zoneChangeDebounceMs   Int      @default(3000)
   nullZoneConfirmSeconds Int      @default(120)
   zoneChangeConfirmPackets Int    @default(2)
+  zoneDwellScoreCapSeconds Int    @default(45)
+  zoneEntryFrontBonus      Int    @default(8)
+  zoneEntryRearPenalty     Int    @default(10)
+  zoneEntryFrontAngleDeg   Int    @default(75)
+  zoneEntryRearAngleDeg    Int    @default(120)
+  squareHeadingScorePerSecond Int @default(2)
+  squareHeadingScoreCap    Int    @default(30)
+  squareHeadingMaxAngleDeg Int    @default(90)
   deviationPercentThreshold Int   @default(10)
   deviationMinKgThreshold   Int   @default(10)
   rtkTrackResetTime         String @default("03:00")

@@ -10,6 +10,8 @@
     "migrate:db": "prisma migrate dev",
     "migrate:users": "node migrate-users.js",
     "create-admin": "node create-admin.js",
+    "seed:rtk-jumps": "node scripts/seed-rtk-jumps.mjs",
+    "scenario:loading-zones": "node scripts/loading-zone-routes-scenario.mjs",
     "capacity:test": "node scripts/capacity-test.mjs"
   },
   "dependencies": {

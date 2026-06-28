@@ -9,6 +9,7 @@ server/*.db
 server/data/*.db
 server/prisma/dev.db
 *.db
+*.db-journal*
 *.db.backup*
 
 # Environment

@@ -585,6 +585,46 @@
                                         <input type="number" min="1" step="1" class="form-control" id="telemetryNullZoneConfirmSeconds" name="nullZoneConfirmSeconds" required>
                                         <small class="form-text text-muted">Сколько секунд должно пройти с последнего попадания в зону хранения, чтобы подтвердить выезд вне зон.</small>
                                     </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneDwellScoreCapSeconds">Потолок score по времени, сек</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryZoneDwellScoreCapSeconds" name="zoneDwellScoreCapSeconds" required>
+                                        <small class="form-text text-muted">Максимальный вклад времени пребывания в зоне-кандидате.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneEntryFrontBonus">Бонус въезда ковшом</label>
+                                        <input type="number" min="0" step="1" class="form-control" id="telemetryZoneEntryFrontBonus" name="zoneEntryFrontBonus" required>
+                                        <small class="form-text text-muted">Сколько очков добавить, если погрузчик вошёл в зону ковшом вперёд.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneEntryRearPenalty">Штраф въезда задом</label>
+                                        <input type="number" min="0" step="1" class="form-control" id="telemetryZoneEntryRearPenalty" name="zoneEntryRearPenalty" required>
+                                        <small class="form-text text-muted">Сколько очков вычесть, если погрузчик вошёл в зону задом.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneEntryFrontAngleDeg">Угол въезда ковшом, °</label>
+                                        <input type="number" min="1" max="180" step="1" class="form-control" id="telemetryZoneEntryFrontAngleDeg" name="zoneEntryFrontAngleDeg" required>
+                                        <small class="form-text text-muted">До этого угла между heading и движением въезд считается передним.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryZoneEntryRearAngleDeg">Угол въезда задом, °</label>
+                                        <input type="number" min="1" max="180" step="1" class="form-control" id="telemetryZoneEntryRearAngleDeg" name="zoneEntryRearAngleDeg" required>
+                                        <small class="form-text text-muted">С этого угла между heading и движением въезд считается задним.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetrySquareHeadingScorePerSecond">Heading score квадрата / сек</label>
+                                        <input type="number" min="0" step="1" class="form-control" id="telemetrySquareHeadingScorePerSecond" name="squareHeadingScorePerSecond" required>
+                                        <small class="form-text text-muted">Максимальный вклад за секунду, когда ковш смотрит в нормаль выбранной стены.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetrySquareHeadingScoreCap">Потолок heading score</label>
+                                        <input type="number" min="0" step="1" class="form-control" id="telemetrySquareHeadingScoreCap" name="squareHeadingScoreCap" required>
+                                        <small class="form-text text-muted">Максимальный общий бонус за правильный heading внутри квадратной зоны.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetrySquareHeadingMaxAngleDeg">Допуск heading квадрата, °</label>
+                                        <input type="number" min="1" max="180" step="1" class="form-control" id="telemetrySquareHeadingMaxAngleDeg" name="squareHeadingMaxAngleDeg" required>
+                                        <small class="form-text text-muted">После этого угла к нормали стены heading-бонус не начисляется.</small>
+                                    </div>
                                 </div>
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
                                     <div class="small text-muted" id="telemetrySettingsState">Настройки влияют на замес, движения, нарушения, антишум и ежедневную очистку треков.</div>
@@ -726,7 +766,7 @@
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
-    <script src="js/telemetry.js?v=20260627c"></script>
+    <script src="js/telemetry.js?v=20260628a"></script>
     <script src="js/admin-users.js?v=20260501a"></script>
 
 </body>

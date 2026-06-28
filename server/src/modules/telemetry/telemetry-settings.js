@@ -23,6 +23,14 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   zoneChangeDebounceMs: 3000,
   nullZoneConfirmSeconds: 120,
   zoneChangeConfirmPackets: 2,
+  zoneDwellScoreCapSeconds: 45,
+  zoneEntryFrontBonus: 8,
+  zoneEntryRearPenalty: 10,
+  zoneEntryFrontAngleDeg: 75,
+  zoneEntryRearAngleDeg: 120,
+  squareHeadingScorePerSecond: 2,
+  squareHeadingScoreCap: 30,
+  squareHeadingMaxAngleDeg: 90,
   deviationPercentThreshold: 10,
   deviationMinKgThreshold: 10,
   rtkTrackResetTime: '03:00',
@@ -32,6 +40,24 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
 function toPositiveInteger(value, fallback) {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback
+  }
+
+  return parsed
+}
+
+function toNonNegativeInteger(value, fallback) {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < 0) {
+    return fallback
+  }
+
+  return parsed
+}
+
+function toBoundedInteger(value, fallback, min, max) {
+  const parsed = Number(value)
+  if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
     return fallback
   }
 
@@ -82,6 +108,14 @@ export function coerceTelemetrySettings(row = {}) {
     zoneChangeDebounceMs: toPositiveInteger(row.zoneChangeDebounceMs, DEFAULT_TELEMETRY_SETTINGS.zoneChangeDebounceMs),
     nullZoneConfirmSeconds: toPositiveInteger(row.nullZoneConfirmSeconds, DEFAULT_TELEMETRY_SETTINGS.nullZoneConfirmSeconds),
     zoneChangeConfirmPackets: toPositiveInteger(row.zoneChangeConfirmPackets, DEFAULT_TELEMETRY_SETTINGS.zoneChangeConfirmPackets),
+    zoneDwellScoreCapSeconds: toPositiveInteger(row.zoneDwellScoreCapSeconds, DEFAULT_TELEMETRY_SETTINGS.zoneDwellScoreCapSeconds),
+    zoneEntryFrontBonus: toNonNegativeInteger(row.zoneEntryFrontBonus, DEFAULT_TELEMETRY_SETTINGS.zoneEntryFrontBonus),
+    zoneEntryRearPenalty: toNonNegativeInteger(row.zoneEntryRearPenalty, DEFAULT_TELEMETRY_SETTINGS.zoneEntryRearPenalty),
+    zoneEntryFrontAngleDeg: toBoundedInteger(row.zoneEntryFrontAngleDeg, DEFAULT_TELEMETRY_SETTINGS.zoneEntryFrontAngleDeg, 1, 180),
+    zoneEntryRearAngleDeg: toBoundedInteger(row.zoneEntryRearAngleDeg, DEFAULT_TELEMETRY_SETTINGS.zoneEntryRearAngleDeg, 1, 180),
+    squareHeadingScorePerSecond: toNonNegativeInteger(row.squareHeadingScorePerSecond, DEFAULT_TELEMETRY_SETTINGS.squareHeadingScorePerSecond),
+    squareHeadingScoreCap: toNonNegativeInteger(row.squareHeadingScoreCap, DEFAULT_TELEMETRY_SETTINGS.squareHeadingScoreCap),
+    squareHeadingMaxAngleDeg: toBoundedInteger(row.squareHeadingMaxAngleDeg, DEFAULT_TELEMETRY_SETTINGS.squareHeadingMaxAngleDeg, 1, 180),
     deviationPercentThreshold: toPositiveInteger(row.deviationPercentThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationPercentThreshold),
     deviationMinKgThreshold: toPositiveInteger(row.deviationMinKgThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationMinKgThreshold),
     rtkTrackResetTime: normalizeTime(row.rtkTrackResetTime, DEFAULT_TELEMETRY_SETTINGS.rtkTrackResetTime),
@@ -125,8 +159,20 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     'zoneChangeDebounceMs',
     'nullZoneConfirmSeconds',
     'zoneChangeConfirmPackets',
+    'zoneDwellScoreCapSeconds',
     'deviationPercentThreshold',
     'deviationMinKgThreshold'
+  ]
+  const nonNegativeIntegerFields = [
+    'zoneEntryFrontBonus',
+    'zoneEntryRearPenalty',
+    'squareHeadingScorePerSecond',
+    'squareHeadingScoreCap'
+  ]
+  const boundedIntegerFields = [
+    ['zoneEntryFrontAngleDeg', 1, 180],
+    ['zoneEntryRearAngleDeg', 1, 180],
+    ['squareHeadingMaxAngleDeg', 1, 180]
   ]
 
   const data = {}
@@ -143,6 +189,42 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     if (!Number.isInteger(parsed) || parsed <= 0) {
       return {
         error: `${field} должен быть положительным целым числом`
+      }
+    }
+
+    data[field] = parsed
+  }
+
+  for (const field of nonNegativeIntegerFields) {
+    if (payload[field] === undefined) {
+      if (!partial) {
+        data[field] = DEFAULT_TELEMETRY_SETTINGS[field]
+      }
+      continue
+    }
+
+    const parsed = Number(payload[field])
+    if (!Number.isInteger(parsed) || parsed < 0) {
+      return {
+        error: `${field} должен быть целым числом не меньше 0`
+      }
+    }
+
+    data[field] = parsed
+  }
+
+  for (const [field, min, max] of boundedIntegerFields) {
+    if (payload[field] === undefined) {
+      if (!partial) {
+        data[field] = DEFAULT_TELEMETRY_SETTINGS[field]
+      }
+      continue
+    }
+
+    const parsed = Number(payload[field])
+    if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
+      return {
+        error: `${field} должен быть целым числом от ${min} до ${max}`
       }
     }
 

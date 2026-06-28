@@ -36,7 +36,7 @@ $(document).ready(function () {
     const deleteButton = document.getElementById("batchDeleteButton");
 
     const batchUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
-    const telemetryUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/telemetry`) || `/api/batches/${batchId}/telemetry`;
+    const telemetryUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=60`) || `/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=60`;
     const batchDeleteUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
     const stopBatchUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/host/manual-stop") || "/api/telemetry/host/manual-stop";
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
@@ -99,6 +99,12 @@ $(document).ready(function () {
     const DEFAULT_ZONE_RADIUS = 20;
     const DEFAULT_SQUARE_SIDE = 40;
     const ZONE_TYPE_BARN = "BARN";
+    const TRACK_MAX_GAP_MS = 45000;
+    const TRACK_MAX_SPEED_MPS = 12;
+    const TRACK_MIN_JUMP_DISTANCE_M = 30;
+    const HOST_TRACK_COLOR = "#3F6FAE";
+    const RTK_GPS_FIX_COLOR = "#B65F55";
+    const RTK_FIX_COLOR = "#5F8A6B";
 
     function parsePositiveInteger(value) {
         const parsed = Number.parseInt(value, 10);
@@ -727,11 +733,35 @@ $(document).ready(function () {
                 lat: Number(point?.lat),
                 lon: Number(point?.lon),
                 timestamp: point?.timestamp || null,
-                weight: Number(point?.weight),
+                weight: point?.weight == null ? null : Number(point.weight),
+                speed: point?.speed == null ? null : Number(point.speed),
+                course: point?.course == null ? null : Number(point.course),
+                heading: point?.heading == null ? null : Number(point.heading),
+                relPosValid: point?.relPosValid,
+                relPosHeadingValid: point?.relPosHeadingValid,
+                deviceId: point?.deviceId || null,
+                rtkQuality: point?.rtkQuality || point?.fixType || null,
                 timestampMs: parseTimestampMs(point?.timestamp),
+                source: point,
             }))
             .filter((point) => hasValidCoordinates(point.lat, point.lon) && point.timestampMs !== null)
             .sort((left, right) => left.timestampMs - right.timestampMs);
+    }
+
+    function normalizeTelemetryPayload(payload) {
+        if (Array.isArray(payload)) {
+            return {
+                hostTrack: payload,
+                loaderTrack: [],
+                meta: null,
+            };
+        }
+
+        return {
+            hostTrack: Array.isArray(payload?.hostTrack) ? payload.hostTrack : [],
+            loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
+            meta: payload?.meta || null,
+        };
     }
 
     function findClosestTrackPointByTime(targetTimestampMs, trackPoints) {
@@ -858,12 +888,222 @@ $(document).ready(function () {
             });
     }
 
-    async function renderBatchTrack(points, ingredientRows) {
+    function getBoundsFromCoordinates(coordinates) {
+        if (!Array.isArray(coordinates) || !coordinates.length) {
+            return null;
+        }
+
+        const lats = coordinates.map((point) => Number(point[0])).filter(Number.isFinite);
+        const lons = coordinates.map((point) => Number(point[1])).filter(Number.isFinite);
+        if (!lats.length || !lons.length) {
+            return null;
+        }
+
+        return [
+            [Math.min(...lats), Math.min(...lons)],
+            [Math.max(...lats), Math.max(...lons)],
+        ];
+    }
+
+    function calculateDistanceMeters(pointA, pointB) {
+        const toRadians = (degrees) => degrees * Math.PI / 180;
+        const earthRadiusMeters = 6371000;
+        const lat1 = toRadians(pointA.lat);
+        const lat2 = toRadians(pointB.lat);
+        const deltaLat = toRadians(pointB.lat - pointA.lat);
+        const deltaLon = toRadians(pointB.lon - pointA.lon);
+        const sinLat = Math.sin(deltaLat / 2);
+        const sinLon = Math.sin(deltaLon / 2);
+        const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+
+        return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    }
+
+    function shouldRenderDashedTrackGap(previousPoint, currentPoint) {
+        if (!previousPoint || !currentPoint) {
+            return false;
+        }
+
+        const distanceMeters = calculateDistanceMeters(previousPoint, currentPoint);
+        const hasTimestamps = previousPoint.timestampMs !== null && currentPoint.timestampMs !== null;
+
+        if (!hasTimestamps) {
+            return distanceMeters > TRACK_MIN_JUMP_DISTANCE_M * 4;
+        }
+
+        const gapMs = Math.max(0, currentPoint.timestampMs - previousPoint.timestampMs);
+        const gapSeconds = gapMs / 1000;
+        const speedMps = gapSeconds > 0 ? distanceMeters / gapSeconds : 0;
+
+        return (
+            speedMps > TRACK_MAX_SPEED_MPS ||
+            (gapMs > TRACK_MAX_GAP_MS && distanceMeters > TRACK_MIN_JUMP_DISTANCE_M)
+        );
+    }
+
+    function hasRtkHeadingData(point) {
+        if (!point || point.relPosValid === false || point.relPosHeadingValid === false) {
+            return false;
+        }
+
+        const heading = point.heading ?? point.course;
+        return Number.isFinite(Number(heading));
+    }
+
+    function buildHostTrackSegments(trackPoints) {
+        const segments = [];
+        let currentSegment = [];
+
+        trackPoints.forEach((point) => {
+            const previousPoint = currentSegment[currentSegment.length - 1];
+
+            if (shouldRenderDashedTrackGap(previousPoint, point)) {
+                if (currentSegment.length >= 2) {
+                    segments.push({
+                        coords: currentSegment.map((item) => [item.lat, item.lon]),
+                        dashed: false,
+                    });
+                }
+
+                segments.push({
+                    coords: [
+                        [previousPoint.lat, previousPoint.lon],
+                        [point.lat, point.lon],
+                    ],
+                    dashed: true,
+                });
+
+                currentSegment = [point];
+                return;
+            }
+
+            currentSegment.push(point);
+        });
+
+        if (currentSegment.length >= 2) {
+            segments.push({
+                coords: currentSegment.map((item) => [item.lat, item.lon]),
+                dashed: false,
+            });
+        }
+
+        return segments;
+    }
+
+    function buildRtkTrackSegments(trackPoints) {
+        const segments = [];
+
+        for (let index = 1; index < trackPoints.length; index += 1) {
+            const previousPoint = trackPoints[index - 1];
+            const currentPoint = trackPoints[index];
+
+            segments.push({
+                coords: [
+                    [previousPoint.lat, previousPoint.lon],
+                    [currentPoint.lat, currentPoint.lon],
+                ],
+                dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
+                strokeColor: hasRtkHeadingData(currentPoint) ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
+            });
+        }
+
+        return segments;
+    }
+
+    function createTrackPolylines(map, segments, options = {}) {
+        return segments.map((segment) => {
+            const polyline = new window.ymaps.Polyline(
+                segment.coords,
+                {
+                    balloonContent: options.balloonContent,
+                },
+                {
+                    strokeColor: segment.strokeColor || options.strokeColor,
+                    strokeWidth: options.strokeWidth,
+                    strokeOpacity: options.strokeOpacity,
+                    ...(segment.dashed ? { strokeStyle: "dash" } : {}),
+                }
+            );
+
+            map.geoObjects.add(polyline);
+            return polyline;
+        });
+    }
+
+    function drawTrackLayer(map, trackPoints, options = {}) {
+        if (!map || !Array.isArray(trackPoints) || !trackPoints.length) {
+            return [];
+        }
+
+        const color = options.color || HOST_TRACK_COLOR;
+        const title = options.title || "Трек";
+        const objects = [];
+        const segments = options.kind === "rtk"
+            ? buildRtkTrackSegments(trackPoints)
+            : buildHostTrackSegments(trackPoints);
+
+        objects.push(...createTrackPolylines(map, segments, {
+            balloonContent: title,
+            strokeColor: color,
+            strokeWidth: options.strokeWidth || 4,
+            strokeOpacity: options.strokeOpacity || 0.9,
+        }));
+
+        const firstPoint = trackPoints[0];
+        const lastPoint = trackPoints[trackPoints.length - 1];
+        const formatPointDetails = (point) => {
+            const rows = [
+                `${escapeHtml(title)}<br>Время: ${escapeHtml(formatDateTime(point.timestamp))}`,
+                point.weight == null || Number.isNaN(point.weight) ? null : `Вес: ${escapeHtml(formatWeight(point.weight))}`,
+                point.speed == null || Number.isNaN(point.speed) ? null : `Скорость: ${escapeHtml(point.speed.toFixed(1))} км/ч`,
+                point.course == null || Number.isNaN(point.course) ? null : `Heading: ${escapeHtml(point.course.toFixed(0))}°`,
+                options.kind === "rtk" ? `Heading valid: ${hasRtkHeadingData(point) ? "да" : "нет"}` : null,
+                point.deviceId ? `Устройство: ${escapeHtml(point.deviceId)}` : null,
+                point.rtkQuality ? `RTK: ${escapeHtml(point.rtkQuality)}` : null,
+            ].filter(Boolean);
+
+            return rows.join("<br>");
+        };
+
+        const startPlacemark = new window.ymaps.Placemark(
+            [firstPoint.lat, firstPoint.lon],
+            {
+                hintContent: `Старт: ${title} (${formatTime(firstPoint.timestamp)})`,
+                balloonContent: `<strong>Старт</strong><br>${formatPointDetails(firstPoint)}`,
+            },
+            {
+                preset: options.startPreset || "islands#greenCircleDotIcon",
+            }
+        );
+        map.geoObjects.add(startPlacemark);
+        objects.push(startPlacemark);
+
+        const endPlacemark = new window.ymaps.Placemark(
+            [lastPoint.lat, lastPoint.lon],
+            {
+                hintContent: `Финиш: ${title} (${formatTime(lastPoint.timestamp)})`,
+                balloonContent: `<strong>Финиш</strong><br>${formatPointDetails(lastPoint)}`,
+            },
+            {
+                preset: options.endPreset || "islands#redCircleDotIcon",
+            }
+        );
+        map.geoObjects.add(endPlacemark);
+        objects.push(endPlacemark);
+
+        return objects;
+    }
+
+    async function renderBatchTrack(trackPayload, ingredientRows) {
         if (!trackMapElement) {
             return;
         }
 
-        const trackPoints = normalizeTrackPoints(points);
+        const normalizedPayload = normalizeTelemetryPayload(trackPayload);
+        const hostTrackPoints = normalizeTrackPoints(normalizedPayload.hostTrack);
+        const loaderTrackPoints = normalizeTrackPoints(normalizedPayload.loaderTrack);
+        const allTrackPoints = [...hostTrackPoints, ...loaderTrackPoints]
+            .sort((left, right) => left.timestampMs - right.timestampMs);
         let map;
 
         try {
@@ -882,7 +1122,7 @@ $(document).ready(function () {
             return;
         }
 
-        if (!trackPoints.length) {
+        if (!allTrackPoints.length) {
             map.geoObjects.removeAll();
             renderBatchTrackZones(map, state.storageZones);
             if (map.container && typeof map.container.fitToViewport === "function") {
@@ -930,54 +1170,29 @@ $(document).ready(function () {
             map.container.fitToViewport();
         }
 
-        const coordinates = trackPoints.map((point) => [point.lat, point.lon]);
-        const polyline = new window.ymaps.Polyline(
-            coordinates,
-            {
-                balloonContent: "Трек движения за время замеса",
-            },
-            {
-                strokeColor: "#1cc88a",
-                strokeWidth: 4,
-                strokeOpacity: 0.92,
-            }
-        );
-        map.geoObjects.add(polyline);
-
-        const firstPoint = trackPoints[0];
-        const lastPoint = trackPoints[trackPoints.length - 1];
-
-        const startPlacemark = new window.ymaps.Placemark(
-            [firstPoint.lat, firstPoint.lon],
-            {
-                hintContent: `Старт трека (${formatTime(firstPoint.timestamp)})`,
-                balloonContent: `Старт: ${formatDateTime(firstPoint.timestamp)}<br>Вес: ${formatWeight(firstPoint.weight)}`,
-            },
-            {
-                preset: "islands#greenCircleDotIcon",
-            }
-        );
-
-        const endPlacemark = new window.ymaps.Placemark(
-            [lastPoint.lat, lastPoint.lon],
-            {
-                hintContent: `Финиш трека (${formatTime(lastPoint.timestamp)})`,
-                balloonContent: `Финиш: ${formatDateTime(lastPoint.timestamp)}<br>Вес: ${formatWeight(lastPoint.weight)}`,
-            },
-            {
-                preset: "islands#redCircleDotIcon",
-            }
-        );
-
-        map.geoObjects.add(startPlacemark);
-        map.geoObjects.add(endPlacemark);
+        drawTrackLayer(map, hostTrackPoints, {
+            title: "Хозяин / кормораздатчик",
+            color: HOST_TRACK_COLOR,
+            strokeWidth: 4,
+            startPreset: "islands#blueCircleDotIcon",
+            endPreset: "islands#darkBlueCircleDotIcon",
+        });
+        drawTrackLayer(map, loaderTrackPoints, {
+            title: "Погрузчик",
+            kind: "rtk",
+            color: RTK_GPS_FIX_COLOR,
+            strokeWidth: 5,
+            startPreset: "islands#greenCircleDotIcon",
+            endPreset: "islands#redCircleDotIcon",
+        });
 
         const rows = Array.isArray(ingredientRows) ? ingredientRows : [];
         let linkedIngredients = 0;
+        const ingredientTrackPoints = loaderTrackPoints.length ? loaderTrackPoints : hostTrackPoints;
 
         rows.forEach((row) => {
             const ingredientTimestampMs = parseTimestampMs(row?.time);
-            const closest = findClosestTrackPointByTime(ingredientTimestampMs, trackPoints);
+            const closest = findClosestTrackPointByTime(ingredientTimestampMs, ingredientTrackPoints);
             if (!closest?.point || closest.deltaMs > (2 * 60 * 1000)) {
                 return;
             }
@@ -1002,22 +1217,37 @@ $(document).ready(function () {
             map.geoObjects.add(marker);
         });
 
+        const coordinates = allTrackPoints.map((point) => [point.lat, point.lon]);
+        const trackBounds = getBoundsFromCoordinates(coordinates);
         if (coordinates.length === 1) {
             map.setCenter(coordinates[0], 17, { duration: 120 });
-        } else {
-            map.setBounds(polyline.geometry.getBounds(), {
+        } else if (trackBounds) {
+            map.setBounds(trackBounds, {
                 checkZoomRange: true,
-                zoomMargin: 24,
+                zoomMargin: 32,
                 duration: 120,
             });
+        } else {
+            const mapBounds = typeof map.geoObjects.getBounds === "function"
+                ? map.geoObjects.getBounds()
+                : null;
+            if (mapBounds) {
+                map.setBounds(mapBounds, {
+                    checkZoomRange: true,
+                    zoomMargin: 24,
+                    duration: 120,
+                });
+            }
         }
 
         if (trackMeta) {
+            const firstPoint = allTrackPoints[0];
+            const lastPoint = allTrackPoints[allTrackPoints.length - 1];
             const startLabel = formatDateTime(firstPoint.timestamp);
             const endLabel = formatDateTime(lastPoint.timestamp);
             setText(
                 trackMeta,
-                `${trackPoints.length} точек • ${linkedIngredients} меток компонентов • ${startLabel} — ${endLabel}`
+                `Хозяин: ${hostTrackPoints.length} точек • Погрузчик: ${loaderTrackPoints.length} точек • ${linkedIngredients} меток компонентов • ${startLabel} — ${endLabel}`
             );
         }
     }
@@ -1758,7 +1988,7 @@ $(document).ready(function () {
             }
 
             const batch = batchResult.value;
-            const telemetry = telemetryResult.value;
+            const telemetryPayload = normalizeTelemetryPayload(telemetryResult.value);
             state.storageZones = zonesResult.status === "fulfilled"
                 ? (Array.isArray(zonesResult.value) ? zonesResult.value : []).map(normalizeZone)
                 : [];
@@ -1775,8 +2005,8 @@ $(document).ready(function () {
             renderBatchSummary(batch);
             renderIngredientList(actualRows);
             renderPlanFact(summaryRows);
-            renderTelemetry(telemetry);
-            await renderBatchTrack(telemetry, actualRows);
+            renderTelemetry(telemetryPayload.hostTrack);
+            await renderBatchTrack(telemetryPayload, actualRows);
             renderBatchEditor(batch);
             return true;
         } catch (error) {

@@ -15,3 +15,11 @@ export const DEFAULT_ZONE_DEBOUNCE_MS = 3000;
 // Null zone is confirmed only after this many seconds since the last real loading zone hit.
 export const NULL_ZONE_CONFIRM_SECONDS = 120;
 export const ZONE_CHANGE_CONFIRM_PACKETS = 2;
+export const ZONE_DWELL_SCORE_CAP_SECONDS = 45;
+export const ZONE_ENTRY_FRONT_BONUS = 8;
+export const ZONE_ENTRY_REAR_PENALTY = 10;
+export const ZONE_ENTRY_FRONT_ANGLE_DEG = 75;
+export const ZONE_ENTRY_REAR_ANGLE_DEG = 120;
+export const SQUARE_HEADING_SCORE_PER_SECOND = 2;
+export const SQUARE_HEADING_SCORE_CAP = 30;
+export const SQUARE_HEADING_MAX_ANGLE_DEG = 90;
