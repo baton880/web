@@ -1,5 +1,3 @@
-import { buildDailyDeviationRows as buildDailyDeviationExportRows } from "./report-export-utils.mjs";
-
 (function () {
     const API_URL = window.AppAuth?.getApiUrl?.("/api/reports") || "/api/reports";
     const BATCHES_RESET_API_URL = window.AppAuth?.getApiUrl?.("/api/batches/admin/truncate") || "/api/batches/admin/truncate";
@@ -654,7 +652,64 @@ import { buildDailyDeviationRows as buildDailyDeviationExportRows } from "./repo
     }
 
     function buildDailyDeviationRows() {
-        return buildDailyDeviationExportRows(state.components);
+        const totals = new Map();
+
+        for (const item of state.components) {
+            const dateKey = getDateKey(item.date);
+            const componentName = String(item.component || "").trim();
+            if (!dateKey || !componentName || componentName === "\u2014") {
+                continue;
+            }
+
+            const rationName = item.rationName || REPORT_NO_RATION;
+            const groupName = item.groupName || REPORT_NO_GROUP;
+            const key = [dateKey, rationName, groupName, componentName].join("\u0000");
+            const current = totals.get(key) || {
+                date: dateKey,
+                rationName,
+                groupName,
+                component: componentName,
+                plan: 0,
+                fact: 0,
+            };
+
+            current.plan += toNumber(item.plan) ?? 0;
+            current.fact += toNumber(item.fact) ?? 0;
+            totals.set(key, current);
+        }
+
+        const rows = [
+            [
+                "\u0414\u0430\u0442\u0430",
+                "\u0420\u0430\u0446\u0438\u043e\u043d",
+                "\u0413\u0440\u0443\u043f\u043f\u0430",
+                "\u041a\u043e\u043c\u043f\u043e\u043d\u0435\u043d\u0442",
+                "\u041f\u043b\u0430\u043d \u0437\u0430 \u0441\u0443\u0442\u043a\u0438",
+                "\u0424\u0430\u043a\u0442 \u0437\u0430 \u0441\u0443\u0442\u043a\u0438",
+                "\u041e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u0438\u0435 \u0437\u0430 \u0441\u0443\u0442\u043a\u0438",
+            ],
+        ];
+
+        Array.from(totals.values())
+            .sort((left, right) => (
+                left.date.localeCompare(right.date)
+                || left.rationName.localeCompare(right.rationName, "ru")
+                || left.groupName.localeCompare(right.groupName, "ru")
+                || left.component.localeCompare(right.component, "ru")
+            ))
+            .forEach((item) => {
+                rows.push([
+                    item.date,
+                    item.rationName,
+                    item.groupName,
+                    item.component,
+                    Math.round(item.plan * 10) / 10,
+                    Math.round(item.fact * 10) / 10,
+                    Math.round((item.fact - item.plan) * 10) / 10,
+                ]);
+            });
+
+        return rows;
     }
 
     function buildIssuedFactRows(dateKey = null) {

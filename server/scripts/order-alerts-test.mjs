@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict'
 
 import prisma from '../src/database.js'
-import { buildOrderViolations, recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
+import { buildIngredientSummary, buildOrderViolations, recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
 import { calculatePlan } from '../../module-2/rationManager.js'
 import { buildDigestHtml } from '../src/modules/digest/digest-scheduler.js'
 import { buildDailyDeviationRows } from '../../frontend/js/report-export-utils.mjs'
@@ -186,6 +186,35 @@ runCase('ORDER_MISMATCH is critical for alert status', () => {
   })
 
   assert.equal(status, 'critical')
+})
+
+runCase('order mismatch flag does not make in-threshold weight a component violation', () => {
+  const summary = buildIngredientSummary(
+    {
+      group: { headcount: 1 },
+      ration: {
+        feedingsPerDay: 1,
+        ingredients: [
+          { id: 1, name: 'alpha', sortOrder: 1, plannedWeight: 100, dryMatterWeight: 0 }
+        ]
+      },
+      actualIngredients: [
+        {
+          id: 1,
+          ingredientName: 'alpha',
+          actualWeight: 105,
+          isViolation: true,
+          addedAt: '2026-06-27T10:00:00.000Z'
+        }
+      ]
+    },
+    { percentThreshold: 10, minDeviationKg: 1 }
+  )
+
+  assert.equal(summary.length, 1)
+  assert.equal(summary[0].plan, 100)
+  assert.equal(summary[0].fact, 105)
+  assert.equal(summary[0].is_violation, false)
 })
 
 runCase('digest shows positions instead of kilograms for order mismatch', () => {

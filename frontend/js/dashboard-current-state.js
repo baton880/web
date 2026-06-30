@@ -2,7 +2,7 @@
     const WARNING_API_URL = window.AppAuth?.getApiUrl?.("/api/telemetry/warnings/current") || "/api/telemetry/warnings/current";
     const STOP_BATCH_API_URL = window.AppAuth?.getApiUrl?.("/api/telemetry/host/manual-stop") || "/api/telemetry/host/manual-stop";
     const CAN_VIEW_WARNING_SECTION = window.AppAuth?.isAdmin?.() === true;
-    const CAN_STOP_BATCH = window.AppAuth?.hasWriteAccess?.() === true;
+    const CAN_STOP_BATCH = window.AppAuth?.isAdmin?.() === true;
     const WARNING_SECTION_TITLE = "Технические предупреждения";
     const WARNING_EMPTY_TEXT = "Активных предупреждений нет.";
     const WARNING_LOADING_TEXT = "Ожидание телеметрии...";

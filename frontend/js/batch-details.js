@@ -3,6 +3,7 @@ $(document).ready(function () {
     const batchId = parsePositiveInteger(query.get("id"));
     const returnDate = normalizeDateValue(query.get("date"));
     const canWrite = Boolean(window.AppAuth?.hasWriteAccess?.());
+    const canAdmin = Boolean(window.AppAuth?.isAdmin?.());
 
     const detailsTitle = document.getElementById("batchDetailsTitle");
     const detailsPageTitle = document.getElementById("batchDetailsPageTitle");
@@ -1723,7 +1724,7 @@ $(document).ready(function () {
             return;
         }
 
-        const canShow = canWrite && !batch?.endTime && normalizeNullableId(batch?.id) !== null;
+        const canShow = canAdmin && !batch?.endTime && normalizeNullableId(batch?.id) !== null;
         if (!canShow) {
             stopButton.classList.add("d-none");
             stopButton.disabled = true;
@@ -1756,7 +1757,7 @@ $(document).ready(function () {
 
     async function handleStopBatchClick() {
         const currentBatchId = normalizeNullableId(state.batch?.id);
-        if (!canWrite || !currentBatchId || state.stopBatchInFlight || state.deleteBatchInFlight) {
+        if (!canAdmin || !currentBatchId || state.stopBatchInFlight || state.deleteBatchInFlight) {
             return;
         }
 

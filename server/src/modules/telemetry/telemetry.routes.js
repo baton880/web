@@ -578,7 +578,7 @@ router.post('/', async (req, res) => {
 // ============================================================================
 // POST /manual-stop - РУЧНАЯ ОСТАНОВКА АКТИВНОГО ЗАМЕСА
 // ============================================================================
-router.post('/manual-stop', authenticate, requireWriteAccess, async (req, res) => {
+router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
   try {
     const rawBatchId = req.body?.batchId;
     const rawDeviceId = req.body?.deviceId;

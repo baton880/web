@@ -46,6 +46,24 @@ function toPositiveInteger(value, fallback) {
   return parsed
 }
 
+function isMissingColumnError(error) {
+  return error?.code === 'P2022' || /no such column|does not exist/i.test(String(error?.message || ''))
+}
+
+async function getTelemetrySettingsFallback(db) {
+  try {
+    const rows = await db.$queryRawUnsafe(
+      `SELECT * FROM "TelemetrySettings" WHERE "id" = ${TELEMETRY_SETTINGS_SINGLETON_ID} LIMIT 1`
+    )
+    const row = Array.isArray(rows) ? rows[0] : null
+
+    return row ? coerceTelemetrySettings(row) : { ...DEFAULT_TELEMETRY_SETTINGS }
+  } catch (fallbackError) {
+    console.warn('[TelemetrySettings] fallback read failed:', fallbackError?.message || fallbackError)
+    return { ...DEFAULT_TELEMETRY_SETTINGS }
+  }
+}
+
 function toNonNegativeInteger(value, fallback) {
   const parsed = Number(value)
   if (!Number.isInteger(parsed) || parsed < 0) {
@@ -126,9 +144,20 @@ export function coerceTelemetrySettings(row = {}) {
 }
 
 export async function getTelemetrySettings(db = prisma) {
-  const row = await db.telemetrySettings.findUnique({
-    where: { id: TELEMETRY_SETTINGS_SINGLETON_ID }
-  })
+  let row = null
+
+  try {
+    row = await db.telemetrySettings.findUnique({
+      where: { id: TELEMETRY_SETTINGS_SINGLETON_ID }
+    })
+  } catch (error) {
+    if (isMissingColumnError(error)) {
+      console.warn('[TelemetrySettings] schema is missing a column, using available settings with defaults')
+      return getTelemetrySettingsFallback(db)
+    }
+
+    throw error
+  }
 
   if (!row) {
     return { ...DEFAULT_TELEMETRY_SETTINGS }

@@ -249,7 +249,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             ? Math.round(((factWeight - planWeight) / planWeight) * 1000) / 10
             : (factWeight > 0 ? 100 : 0);
         const isViolation = planWeight > 0
-            ? Math.abs(deviationKg) > allowedDeviationKg || Boolean(persistedViolationMap.get(key))
+            ? Math.abs(deviationKg) > allowedDeviationKg
             : (hasPlanContext
                 ? factWeight > 0
                 : Boolean(factWeight > 0 || persistedViolationMap.get(key) || key === 'unknown'));
@@ -351,7 +351,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
     });
     const orderViolations = buildOrderViolations(plan.ingredients, batch.actualIngredients);
     const allViolations = [...check.violations, ...orderViolations];
-    const violationNames = new Set(allViolations.map((item) => normalizeIngredientName(item.ingredient)));
+    const weightViolationNames = new Set(check.violations.map((item) => normalizeIngredientName(item.ingredient)));
     const planByName = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.targetWeight]));
 
     for (const ingredient of batch.actualIngredients) {
@@ -359,7 +359,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
             where: { id: ingredient.id },
             data: {
                 plannedWeight: planByName.get(normalizeIngredientName(ingredient.ingredientName)) ?? 0,
-                isViolation: violationNames.has(normalizeIngredientName(ingredient.ingredientName))
+                isViolation: weightViolationNames.has(normalizeIngredientName(ingredient.ingredientName))
             }
         });
     }
