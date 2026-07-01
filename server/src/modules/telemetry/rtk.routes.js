@@ -15,10 +15,10 @@ const MAX_ZONE_SECONDS = 3600
 const MAX_ZONE_SCAN_ROWS = 5000
 const MAX_BULK_RTK_PACKETS = 1000
 
-function parseTimestamp(value) {
-  if (!value) return new Date()
+function parseTimestamp(value, fallback = new Date()) {
+  if (!value) return fallback
   const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? null : parsed
+  return Number.isNaN(parsed.getTime()) ? fallback : parsed
 }
 
 function parseNumber(value) {
@@ -454,8 +454,8 @@ function sanitizeRawGga(value) {
   return trimmed ? trimmed : null
 }
 
-function normalizeRtkPacket(raw, settings = {}) {
-  const timestamp = parseTimestamp(readRawValue(raw, ['timestamp', 'time', 'datetime'], PVT_SECTION_KEYS))
+function normalizeRtkPacket(raw, settings = {}, receivedAt = new Date()) {
+  const timestamp = parseTimestamp(readRawValue(raw, ['timestamp', 'time', 'datetime'], PVT_SECTION_KEYS), receivedAt)
   const lat = parseRawNumber(raw, ['lat', 'latitude'], PVT_SECTION_KEYS)
   const lon = parseRawNumber(raw, ['lon', 'lng', 'longitude'], PVT_SECTION_KEYS)
   const qualityNumberRaw = readRawValue(raw, ['quality', 'fixQuality', 'fix_quality', 'solution'], PVT_SECTION_KEYS)
@@ -808,49 +808,93 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
 router.post('/', async (req, res) => {
   try {
     const payloads = extractRtkPayloads(req.body)
+    const receivedAt = new Date()
 
     if (!payloads.length) {
-      return res.status(400).json({ error: 'Empty RTK buffer' })
+      return res.status(201).json({
+        status: 'ok',
+        count: 0,
+        received: 0,
+        accepted: 0,
+        dropped: 0,
+        warning: 'Empty RTK buffer acknowledged'
+      })
     }
 
-    if (payloads.length > MAX_BULK_RTK_PACKETS) {
-      return res.status(413).json({
-        error: `RTK buffer is too large: max ${MAX_BULK_RTK_PACKETS} packets`
+    const processPayloads = payloads.slice(0, MAX_BULK_RTK_PACKETS)
+    const overLimitDropped = Math.max(0, payloads.length - processPayloads.length)
+    if (overLimitDropped > 0) {
+      console.warn('[RTK ingest warning]: oversized buffer acknowledged, dropping tail', {
+        received: payloads.length,
+        processed: processPayloads.length,
+        dropped: overLimitDropped
       })
     }
 
     const settings = await getTelemetrySettings(prisma)
-    const packets = payloads.map((payload) => normalizeRtkPacket(payload || {}, settings))
-    const invalidPacket = packets
-      .map((packet, index) => ({ index, error: validateRtkPacket(packet) }))
-      .find((item) => item.error)
+    const entries = processPayloads.map((payload, index) => {
+      const packet = normalizeRtkPacket(payload || {}, settings, receivedAt)
+      return {
+        index,
+        payload: payload || {},
+        packet,
+        error: validateRtkPacket(packet)
+      }
+    })
+    const validEntries = entries.filter((entry) => !entry.error)
+    const invalidEntries = entries.filter((entry) => entry.error)
 
-    if (invalidPacket) {
-      return res.status(400).json({
-        error: invalidPacket.error,
-        index: invalidPacket.index
+    if (invalidEntries.length > 0) {
+      console.warn('[RTK ingest warning]: invalid packets acknowledged and dropped', {
+        dropped: invalidEntries.length,
+        examples: invalidEntries.slice(0, 5).map((entry) => ({
+          index: entry.index,
+          error: entry.error
+        }))
       })
     }
 
-    try {
-      await updateLoaderZoneScoreboard(payloads, packets, settings)
-    } catch (scoreboardError) {
-      console.warn('[RTK zone scoreboard warning]:', scoreboardError)
+    if (validEntries.length > 0) {
+      try {
+        await updateLoaderZoneScoreboard(
+          validEntries.map((entry) => entry.payload),
+          validEntries.map((entry) => entry.packet),
+          settings
+        )
+      } catch (scoreboardError) {
+        console.warn('[RTK zone scoreboard warning]:', scoreboardError)
+      }
     }
+
+    let createdCount = 0
+    let createdId = null
+    const packets = validEntries.map((entry) => entry.packet)
 
     if (packets.length === 1) {
       const created = await prisma.rtkTelemetry.create({
         data: packets[0]
       })
-
-      return res.status(201).json({ status: 'ok', id: created.id, count: 1 })
+      createdCount = 1
+      createdId = created.id
+    } else if (packets.length > 1) {
+      const created = await prisma.rtkTelemetry.createMany({
+        data: packets
+      })
+      createdCount = created.count
     }
 
-    const created = await prisma.rtkTelemetry.createMany({
-      data: packets
+    res.status(201).json({
+      status: 'ok',
+      id: createdId,
+      count: createdCount,
+      received: payloads.length,
+      accepted: createdCount,
+      dropped: invalidEntries.length + overLimitDropped,
+      validationErrors: invalidEntries.slice(0, 5).map((entry) => ({
+        index: entry.index,
+        error: entry.error
+      }))
     })
-
-    res.status(201).json({ status: 'ok', count: created.count })
   } catch (error) {
     console.error('[Ошибка POST /api/telemetry/rtk]:', error)
     res.status(500).json({ error: 'Internal server error' })
