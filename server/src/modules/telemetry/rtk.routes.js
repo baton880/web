@@ -681,11 +681,14 @@ function parseRawPayload(rawPayload) {
   }
 }
 
-function serializeRtkTelemetry(row, zones = [], settings = {}) {
+function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
   if (!row) return null
 
   const raw = parseRawPayload(row.rawPayload) || {}
   const zone = detectZoneObject(row.lat, row.lon, zones)
+  const responseTimestamp = options.useReceivedAtAsTimestamp && row.createdAt
+    ? row.createdAt
+    : row.timestamp
   const quality = parseRawInteger(raw, ['quality', 'fixQuality', 'fix_quality', 'solution'], PVT_SECTION_KEYS)
   const qualityLabel = resolveQualityLabel(
     readRawValue(raw, ['quality_label', 'rtkQuality', 'rtk_quality'], PVT_SECTION_KEYS) ?? row.rtkQuality,
@@ -705,6 +708,9 @@ function serializeRtkTelemetry(row, zones = [], settings = {}) {
 
   return {
     ...row,
+    timestamp: responseTimestamp,
+    sourceTimestamp: row.timestamp,
+    receivedAt: row.createdAt ?? null,
     packetType: resolvePacketType(raw),
     valid,
     quality,
@@ -749,7 +755,7 @@ async function getLatestRtkPoint(deviceId) {
   return prisma.rtkTelemetry.findFirst({
     where: deviceId ? { deviceId } : undefined,
     orderBy: [
-      { timestamp: 'desc' },
+      { createdAt: 'desc' },
       { id: 'desc' }
     ]
   })
@@ -765,7 +771,7 @@ async function buildLatestResponse(deviceId) {
     loadActiveZones(),
     getTelemetrySettings(prisma)
   ])
-  return serializeRtkTelemetry(latest, zones, settings)
+  return serializeRtkTelemetry(latest, zones, settings, { useReceivedAtAsTimestamp: true })
 }
 
 async function buildVisibleRtkTrackWhere(deviceId) {
@@ -897,7 +903,14 @@ router.post('/', async (req, res) => {
     })
   } catch (error) {
     console.error('[Ошибка POST /api/telemetry/rtk]:', error)
-    res.status(500).json({ error: 'Internal server error' })
+    res.status(201).json({
+      status: 'accepted_with_server_error',
+      count: 0,
+      received: 1,
+      accepted: 0,
+      dropped: 1,
+      error: error?.message || 'Internal server error'
+    })
   }
 })
 

@@ -30,12 +30,42 @@
   const app = express()
   const PORT = process.env.PORT || 3000
 
+  function captureRawRequestBody(req, res, buf, encoding) {
+    if (req.originalUrl?.startsWith('/api/telemetry/rtk')) {
+      req.rawBody = buf.toString(encoding || 'utf8')
+    }
+  }
+
   app.use(cors({
     origin: true, // Разрешает запросы с любых адресов (для разработки самое то)
     credentials: true // Обязательно, чтобы пропускать токены и куки (у тебя там res.cookie)
   }));
 
-  app.use(express.json())
+  app.use(express.json({
+    limit: '10mb',
+    verify: captureRawRequestBody
+  }))
+  app.use((error, req, res, next) => {
+    if (req.originalUrl?.startsWith('/api/telemetry/rtk')) {
+      console.warn('[RTK ingest warning]: malformed body acknowledged before route', {
+        type: error?.type,
+        status: error?.status,
+        message: error?.message,
+        rawLength: req.rawBody?.length ?? null,
+        rawPreview: req.rawBody ? req.rawBody.slice(0, 200) : null
+      })
+      return res.status(201).json({
+        status: 'accepted_with_parse_error',
+        count: 0,
+        received: 1,
+        accepted: 0,
+        dropped: 1,
+        error: error?.message || 'Malformed RTK request body'
+      })
+    }
+
+    next(error)
+  })
   app.use(cookieParser())
 
   // Healthcheck - быстрая проверка статуса
