@@ -27,7 +27,7 @@ function asBoolean(value) {
 }
 
 function buildUpdatedAt(hostRow, rtkRow) {
-    const timestamps = [hostRow?.timestamp, rtkRow?.timestamp]
+    const timestamps = [hostRow?.timestamp, rtkRow?.createdAt ?? rtkRow?.timestamp]
         .map((value) => value ? new Date(value).getTime() : NaN)
         .filter((value) => !Number.isNaN(value));
 
@@ -62,11 +62,15 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
                 }
             }),
             prisma.rtkTelemetry.findFirst({
-                orderBy: { timestamp: 'desc' },
+                orderBy: [
+                    { createdAt: 'desc' },
+                    { id: 'desc' }
+                ],
                 select: {
                     id: true,
                     deviceId: true,
                     timestamp: true,
+                    createdAt: true,
                     lat: true,
                     lon: true
                 }
@@ -117,12 +121,14 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             trackedWarnings.push(toTrackedWarning(warning, latestHost.deviceId, latestHost.deviceId));
         }
 
-        if (!latestRtk || !isFreshTimestamp(latestRtk.timestamp)) {
+        const latestRtkReceivedAt = latestRtk?.createdAt ?? latestRtk?.timestamp;
+
+        if (!latestRtk || !isFreshTimestamp(latestRtkReceivedAt)) {
             const warning = {
                 code: 'no_rtk',
                 title: 'Нет RTK',
-                message: latestRtk?.timestamp
-                    ? `Последний RTK пакет устарел: ${new Date(latestRtk.timestamp).toLocaleString('ru-RU')}.`
+                message: latestRtkReceivedAt
+                    ? `Последний RTK пакет устарел: ${new Date(latestRtkReceivedAt).toLocaleString('ru-RU')}.`
                     : 'RTK телеметрия ещё не поступала.',
                 severity: 'warning'
             };

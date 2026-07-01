@@ -811,108 +811,128 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
   }
 }
 
-router.post('/', async (req, res) => {
-  try {
-    const payloads = extractRtkPayloads(req.body)
-    const receivedAt = new Date()
+export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
+  const payloads = extractRtkPayloads(body)
 
-    if (!payloads.length) {
-      return res.status(201).json({
-        status: 'ok',
-        count: 0,
-        received: 0,
-        accepted: 0,
-        dropped: 0,
-        warning: 'Empty RTK buffer acknowledged'
-      })
-    }
-
-    const processPayloads = payloads.slice(0, MAX_BULK_RTK_PACKETS)
-    const overLimitDropped = Math.max(0, payloads.length - processPayloads.length)
-    if (overLimitDropped > 0) {
-      console.warn('[RTK ingest warning]: oversized buffer acknowledged, dropping tail', {
-        received: payloads.length,
-        processed: processPayloads.length,
-        dropped: overLimitDropped
-      })
-    }
-
-    const settings = await getTelemetrySettings(prisma)
-    const entries = processPayloads.map((payload, index) => {
-      const packet = normalizeRtkPacket(payload || {}, settings, receivedAt)
-      return {
-        index,
-        payload: payload || {},
-        packet,
-        error: validateRtkPacket(packet)
-      }
-    })
-    const validEntries = entries.filter((entry) => !entry.error)
-    const invalidEntries = entries.filter((entry) => entry.error)
-
-    if (invalidEntries.length > 0) {
-      console.warn('[RTK ingest warning]: invalid packets acknowledged and dropped', {
-        dropped: invalidEntries.length,
-        examples: invalidEntries.slice(0, 5).map((entry) => ({
-          index: entry.index,
-          error: entry.error
-        }))
-      })
-    }
-
-    if (validEntries.length > 0) {
-      try {
-        await updateLoaderZoneScoreboard(
-          validEntries.map((entry) => entry.payload),
-          validEntries.map((entry) => entry.packet),
-          settings
-        )
-      } catch (scoreboardError) {
-        console.warn('[RTK zone scoreboard warning]:', scoreboardError)
-      }
-    }
-
-    let createdCount = 0
-    let createdId = null
-    const packets = validEntries.map((entry) => entry.packet)
-
-    if (packets.length === 1) {
-      const created = await prisma.rtkTelemetry.create({
-        data: packets[0]
-      })
-      createdCount = 1
-      createdId = created.id
-    } else if (packets.length > 1) {
-      const created = await prisma.rtkTelemetry.createMany({
-        data: packets
-      })
-      createdCount = created.count
-    }
-
-    res.status(201).json({
+  if (!payloads.length) {
+    return {
       status: 'ok',
-      id: createdId,
-      count: createdCount,
+      id: null,
+      count: 0,
+      received: 0,
+      accepted: 0,
+      dropped: 0,
+      validationErrors: [],
+      warning: 'Empty RTK buffer acknowledged'
+    }
+  }
+
+  const processPayloads = payloads.slice(0, MAX_BULK_RTK_PACKETS)
+  const overLimitDropped = Math.max(0, payloads.length - processPayloads.length)
+  if (overLimitDropped > 0) {
+    console.warn('[RTK ingest warning]: oversized buffer acknowledged, dropping tail', {
       received: payloads.length,
-      accepted: createdCount,
-      dropped: invalidEntries.length + overLimitDropped,
-      validationErrors: invalidEntries.slice(0, 5).map((entry) => ({
+      processed: processPayloads.length,
+      dropped: overLimitDropped
+    })
+  }
+
+  const settings = await getTelemetrySettings(prisma)
+  const entries = processPayloads.map((payload, index) => {
+    const packet = normalizeRtkPacket(payload || {}, settings, receivedAt)
+    return {
+      index,
+      payload: payload || {},
+      packet,
+      error: validateRtkPacket(packet)
+    }
+  })
+  const validEntries = entries.filter((entry) => !entry.error)
+  const invalidEntries = entries.filter((entry) => entry.error)
+
+  if (invalidEntries.length > 0) {
+    console.warn('[RTK ingest warning]: invalid packets acknowledged and dropped', {
+      dropped: invalidEntries.length,
+      examples: invalidEntries.slice(0, 5).map((entry) => ({
         index: entry.index,
         error: entry.error
       }))
     })
-  } catch (error) {
-    console.error('[Ошибка POST /api/telemetry/rtk]:', error)
-    res.status(201).json({
-      status: 'accepted_with_server_error',
-      count: 0,
-      received: 1,
-      accepted: 0,
-      dropped: 1,
-      error: error?.message || 'Internal server error'
-    })
   }
-})
+
+  if (validEntries.length > 0) {
+    try {
+      await updateLoaderZoneScoreboard(
+        validEntries.map((entry) => entry.payload),
+        validEntries.map((entry) => entry.packet),
+        settings
+      )
+    } catch (scoreboardError) {
+      console.warn('[RTK zone scoreboard warning]:', scoreboardError)
+    }
+  }
+
+  let createdCount = 0
+  let createdId = null
+  const packets = validEntries.map((entry) => entry.packet)
+
+  if (packets.length === 1) {
+    const created = await prisma.rtkTelemetry.create({
+      data: packets[0]
+    })
+    createdCount = 1
+    createdId = created.id
+  } else if (packets.length > 1) {
+    const created = await prisma.rtkTelemetry.createMany({
+      data: packets
+    })
+    createdCount = created.count
+  }
+
+  return {
+    status: 'ok',
+    id: createdId,
+    count: createdCount,
+    received: payloads.length,
+    accepted: createdCount,
+    dropped: invalidEntries.length + overLimitDropped,
+    validationErrors: invalidEntries.slice(0, 5).map((entry) => ({
+      index: entry.index,
+      error: entry.error
+    }))
+  }
+}
+
+export function handleRtkTelemetryPost(req, res) {
+  const receivedAt = new Date()
+  const received = extractRtkPayloads(req.body).length
+
+  res.status(201).json({
+    status: 'accepted_for_background_processing',
+    count: 0,
+    received,
+    accepted: 0,
+    dropped: 0
+  })
+
+  setImmediate(() => {
+    processRtkTelemetryBody(req.body, receivedAt)
+      .then((result) => {
+        if (result.accepted > 0 || result.dropped > 0) {
+          console.log('[RTK ingest background]:', {
+            received: result.received,
+            accepted: result.accepted,
+            dropped: result.dropped
+          })
+        }
+      })
+      .catch((error) => {
+        console.error('[Ошибка POST /api/telemetry/rtk background]:', error)
+      })
+  })
+}
+
+router.post('/', handleRtkTelemetryPost)
 
 router.get('/current', authenticate, requireReadAccess, async (req, res) => {
   try {

@@ -5,7 +5,7 @@
   import path from 'path'
   import { fileURLToPath } from 'url'
   import telemetryRouter from './modules/telemetry/telemetry.routes.js'
-  import rtkTelemetryRouter from './modules/telemetry/rtk.routes.js'
+  import rtkTelemetryRouter, { handleRtkTelemetryPost } from './modules/telemetry/rtk.routes.js'
   import telemetryWarningsRouter from './modules/telemetry/warnings.routes.js'
   import telemetrySettingsRouter from './modules/telemetry/telemetry-settings.routes.js'
   import storageZonesRouter from './modules/storage-zones/storage-zones.routes.js'
@@ -36,10 +36,50 @@
     }
   }
 
+  const rtkRawBodyParser = express.raw({
+    type: () => true,
+    limit: '50mb'
+  })
+
+  function parseRtkRawBody(req, res, next) {
+    const rawBody = Buffer.isBuffer(req.body)
+      ? req.body.toString('utf8')
+      : (typeof req.body === 'string' ? req.body : '')
+    req.rawBody = rawBody
+
+    if (!rawBody.trim()) {
+      req.body = {}
+      return next()
+    }
+
+    try {
+      req.body = JSON.parse(rawBody)
+      return next()
+    } catch (error) {
+      console.warn('[RTK ingest warning]: malformed raw body acknowledged before JSON parser', {
+        type: error?.type,
+        status: error?.status,
+        message: error?.message,
+        rawLength: rawBody.length,
+        rawPreview: rawBody.slice(0, 200)
+      })
+      return res.status(201).json({
+        status: 'accepted_with_parse_error',
+        count: 0,
+        received: 1,
+        accepted: 0,
+        dropped: 1,
+        error: error?.message || 'Malformed RTK request body'
+      })
+    }
+  }
+
   app.use(cors({
     origin: true, // Разрешает запросы с любых адресов (для разработки самое то)
     credentials: true // Обязательно, чтобы пропускать токены и куки (у тебя там res.cookie)
   }));
+
+  app.post('/api/telemetry/rtk', rtkRawBodyParser, parseRtkRawBody, handleRtkTelemetryPost)
 
   app.use(express.json({
     limit: '10mb',
