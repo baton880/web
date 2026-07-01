@@ -815,8 +815,15 @@ async function buildVisibleRtkTrackWhere(deviceId) {
 
   return {
     ...(deviceId ? { deviceId } : {}),
-    ...(clearSince ? { timestamp: { gt: clearSince } } : {})
+    ...(clearSince ? { createdAt: { gt: clearSince } } : {})
   }
+}
+
+function orderByReceivedDesc() {
+  return [
+    { createdAt: 'desc' },
+    { id: 'desc' }
+  ]
 }
 
 async function findLatestZonePoint(zoneId, seconds, deviceId) {
@@ -996,10 +1003,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: [
-        { timestamp: 'desc' },
-        { id: 'desc' }
-      ],
+      orderBy: orderByReceivedDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))
@@ -1020,10 +1024,7 @@ router.get('/history', authenticate, requireReadAccess, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: [
-        { timestamp: 'desc' },
-        { id: 'desc' }
-      ],
+      orderBy: orderByReceivedDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))
@@ -1119,10 +1120,7 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: [
-        { timestamp: 'desc' },
-        { id: 'desc' }
-      ],
+      orderBy: orderByReceivedDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))
