@@ -38,6 +38,45 @@ function buildUpdatedAt(hostRow, rtkRow) {
     return new Date(Math.max(...timestamps)).toISOString();
 }
 
+function parseRawPayload(rawPayload) {
+    if (typeof rawPayload !== 'string' || !rawPayload.trim()) return null;
+    try {
+        return JSON.parse(rawPayload);
+    } catch (error) {
+        return null;
+    }
+}
+
+function parseTimestampMs(value) {
+    if (!value) return NaN;
+    const parsed = new Date(value).getTime();
+    return Number.isFinite(parsed) ? parsed : NaN;
+}
+
+function parseInteger(value) {
+    if (value === undefined || value === null || value === '') return null;
+    const parsed = parseInt(value, 10);
+    return Number.isInteger(parsed) ? parsed : null;
+}
+
+function isStaleBufferedRtkRow(row) {
+    if (!row) return false;
+
+    const sourceMs = parseTimestampMs(row.timestamp);
+    const receivedMs = parseTimestampMs(row.createdAt);
+    if (!Number.isFinite(sourceMs) || !Number.isFinite(receivedMs)) return false;
+    if (receivedMs - sourceMs <= 10 * 60 * 1000) return false;
+
+    const raw = parseRawPayload(row.rawPayload) || {};
+    const wifiProfile = String(raw.wifi_profile ?? raw.wifiProfile ?? '').trim().toLowerCase();
+    const sdQueueLen = parseInteger(raw.sd_queue_len ?? raw.sdQueueLen);
+    const queueLen = parseInteger(raw.queue_len ?? raw.queueLen);
+
+    return wifiProfile === 'disconnected'
+        || (sdQueueLen !== null && sdQueueLen > 0)
+        || (queueLen !== null && queueLen > 0);
+}
+
 function toTrackedWarning(baseWarning, scopeKey, deviceId = null) {
     return {
         ...baseWarning,
@@ -48,7 +87,7 @@ function toTrackedWarning(baseWarning, scopeKey, deviceId = null) {
 
 router.get('/current', authenticate, requireAdmin, async (req, res) => {
     try {
-        const [latestHost, latestRtk, activeZones] = await Promise.all([
+        const [latestHost, latestRtkRows, activeZones] = await Promise.all([
             prisma.telemetry.findFirst({
                 orderBy: { timestamp: 'desc' },
                 select: {
@@ -61,7 +100,7 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
                     gpsQuality: true
                 }
             }),
-            prisma.rtkTelemetry.findFirst({
+            prisma.rtkTelemetry.findMany({
                 orderBy: [
                     { createdAt: 'desc' },
                     { id: 'desc' }
@@ -71,14 +110,17 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
                     deviceId: true,
                     timestamp: true,
                     createdAt: true,
+                    rawPayload: true,
                     lat: true,
                     lon: true
-                }
+                },
+                take: 100
             }),
             prisma.storageZone.findMany({
                 where: { active: true }
             })
         ]);
+        const latestRtk = latestRtkRows.find((row) => !isStaleBufferedRtkRow(row)) || null;
 
         const items = [];
         const trackedWarnings = [];

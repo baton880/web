@@ -63,14 +63,7 @@
         rawLength: rawBody.length,
         rawPreview: rawBody.slice(0, 200)
       })
-      return res.status(201).json({
-        status: 'accepted_with_parse_error',
-        count: 0,
-        received: 1,
-        accepted: 0,
-        dropped: 1,
-        error: error?.message || 'Malformed RTK request body'
-      })
+      return res.status(201).end()
     }
   }
 
@@ -94,14 +87,7 @@
         rawLength: req.rawBody?.length ?? null,
         rawPreview: req.rawBody ? req.rawBody.slice(0, 200) : null
       })
-      return res.status(201).json({
-        status: 'accepted_with_parse_error',
-        count: 0,
-        received: 1,
-        accepted: 0,
-        dropped: 1,
-        error: error?.message || 'Malformed RTK request body'
-      })
+      return res.status(201).end()
     }
 
     next(error)

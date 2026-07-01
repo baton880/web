@@ -14,6 +14,8 @@ const DEFAULT_ZONE_SECONDS = 30
 const MAX_ZONE_SECONDS = 3600
 const MAX_ZONE_SCAN_ROWS = 5000
 const MAX_BULK_RTK_PACKETS = 1000
+const CURRENT_RTK_SCAN_LIMIT = 200
+const STALE_BUFFERED_RTK_MAX_LAG_MS = 10 * 60 * 1000
 
 function parseTimestamp(value, fallback = new Date()) {
   if (!value) return fallback
@@ -681,6 +683,36 @@ function parseRawPayload(rawPayload) {
   }
 }
 
+function parseTimestampMs(value) {
+  if (!value) return NaN
+  const parsed = new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : NaN
+}
+
+function isStaleBufferedRtkRow(row) {
+  if (!row) return false
+
+  const sourceMs = parseTimestampMs(row.timestamp)
+  const receivedMs = parseTimestampMs(row.createdAt)
+  if (!Number.isFinite(sourceMs) || !Number.isFinite(receivedMs)) {
+    return false
+  }
+
+  const lagMs = receivedMs - sourceMs
+  if (lagMs <= STALE_BUFFERED_RTK_MAX_LAG_MS) {
+    return false
+  }
+
+  const raw = parseRawPayload(row.rawPayload) || {}
+  const wifiProfile = String(readRawValue(raw, ['wifi_profile', 'wifiProfile']) ?? '').trim().toLowerCase()
+  const sdQueueLen = parseRawInteger(raw, ['sd_queue_len', 'sdQueueLen'])
+  const queueLen = parseRawInteger(raw, ['queue_len', 'queueLen'])
+
+  return wifiProfile === 'disconnected'
+    || (sdQueueLen !== null && sdQueueLen > 0)
+    || (queueLen !== null && queueLen > 0)
+}
+
 function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
   if (!row) return null
 
@@ -711,6 +743,7 @@ function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
     timestamp: responseTimestamp,
     sourceTimestamp: row.timestamp,
     receivedAt: row.createdAt ?? null,
+    bufferedStale: isStaleBufferedRtkRow(row),
     packetType: resolvePacketType(raw),
     valid,
     quality,
@@ -752,13 +785,16 @@ function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
 }
 
 async function getLatestRtkPoint(deviceId) {
-  return prisma.rtkTelemetry.findFirst({
+  const rows = await prisma.rtkTelemetry.findMany({
     where: deviceId ? { deviceId } : undefined,
     orderBy: [
       { createdAt: 'desc' },
       { id: 'desc' }
-    ]
+    ],
+    take: CURRENT_RTK_SCAN_LIMIT
   })
+
+  return rows.find((row) => !isStaleBufferedRtkRow(row)) || null
 }
 
 async function buildLatestResponse(deviceId) {
@@ -905,15 +941,8 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
 
 export function handleRtkTelemetryPost(req, res) {
   const receivedAt = new Date()
-  const received = extractRtkPayloads(req.body).length
 
-  res.status(201).json({
-    status: 'accepted_for_background_processing',
-    count: 0,
-    received,
-    accepted: 0,
-    dropped: 0
-  })
+  res.status(201).end()
 
   setImmediate(() => {
     processRtkTelemetryBody(req.body, receivedAt)
