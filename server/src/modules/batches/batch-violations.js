@@ -103,7 +103,7 @@ export function buildOrderViolations(planIngredients, actualIngredients) {
     return violations;
 }
 
-function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight) {
+function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight, parentIsViolation = false) {
     if (!planItem?.isCompound) {
         return [];
     }
@@ -131,7 +131,8 @@ function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactW
             plan: round1(componentPlanWeight),
             fact: round1(componentFactWeight),
             deviation_percent: deviationPercent,
-            is_violation: false
+            is_violation: Boolean(parentIsViolation),
+            isViolation: Boolean(parentIsViolation)
         };
     });
 }
@@ -262,7 +263,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             deviation_percent: deviationPercent,
             is_violation: isViolation,
             isCompound: Boolean(planItem?.isCompound),
-            components: buildCompoundComponentSummaries(planItem, planWeight, factWeight)
+            components: buildCompoundComponentSummaries(planItem, planWeight, factWeight, isViolation)
         };
     });
 }

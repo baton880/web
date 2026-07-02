@@ -242,7 +242,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         plan: round1(child.plan || 0),
                         fact: round1(child.fact || 0),
                         deviation: round1((child.fact || 0) - (child.plan || 0)),
-                        deviationPercent: child.deviation_percent ?? 0
+                        deviationPercent: child.deviation_percent ?? 0,
+                        isViolation: Boolean(child.isViolation ?? child.is_violation)
                     });
                 }
                 continue;
@@ -260,7 +261,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 plan: round1(componentRow.plan || 0),
                 fact: round1(componentRow.fact || 0),
                 deviation: round1((componentRow.fact || 0) - (componentRow.plan || 0)),
-                deviationPercent: componentRow.deviation_percent ?? 0
+                deviationPercent: componentRow.deviation_percent ?? 0,
+                isViolation: Boolean(componentRow.isViolation ?? componentRow.is_violation)
             });
         }
     }

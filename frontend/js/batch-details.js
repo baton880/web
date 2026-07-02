@@ -700,8 +700,8 @@ $(document).ready(function () {
                     plan: component?.plan,
                     fact: component?.fact,
                     deviation_percent: component?.deviation_percent ?? component?.deviationPercent,
-                    isViolation: false,
-                    is_violation: false
+                    isViolation: component?.isViolation ?? component?.is_violation ?? row?.isViolation ?? row?.is_violation,
+                    is_violation: component?.is_violation ?? component?.isViolation ?? row?.is_violation ?? row?.isViolation
                 }))
                 : [];
 

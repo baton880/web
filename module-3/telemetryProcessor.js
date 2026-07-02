@@ -170,6 +170,10 @@ export class TelemetryProcessor {
       zoneStartTimeMs: null,
       zoneStartLat: null,
       zoneStartLon: null,
+      segmentPeakWeight: weight,
+      segmentPeakTimeMs: null,
+      segmentPeakLat: null,
+      segmentPeakLon: null,
       loadingStartTimeMs: null,
       loadingStartLat: null,
       loadingStartLon: null,
@@ -184,6 +188,15 @@ export class TelemetryProcessor {
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
       lastStationaryWeight: weight,
+      lastKnownNormalWeight: Math.max(0, Number(weight || 0)),
+      lastKnownNormalTimeMs: null,
+      lastKnownNormalLat: null,
+      lastKnownNormalLon: null,
+      recoveryBaselineWeight: null,
+      recoveryBaselineTimeMs: null,
+      recoveryBaselineLat: null,
+      recoveryBaselineLon: null,
+      recoveryMassRecorded: false,
       recoveringFromInvalidWeight: false,
       recoveredOutsideLoadingContext: false,
       isMoving: false,
@@ -211,9 +224,30 @@ export class TelemetryProcessor {
       state.zoneStartLat = Number(lat);
       state.zoneStartLon = Number(lon);
     }
+    state.segmentPeakWeight = weight;
+    state.segmentPeakTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
+    state.segmentPeakLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+    state.segmentPeakLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
     state.loadingStartTimeMs = null;
     state.loadingStartLat = null;
     state.loadingStartLon = null;
+  }
+
+  _rememberSegmentPeak(state, weight, packetTimeMs = null, lat = null, lon = null) {
+    const parsedWeight = Number(weight);
+    if (!Number.isFinite(parsedWeight)) {
+      return;
+    }
+
+    if (
+      !Number.isFinite(Number(state.segmentPeakWeight)) ||
+      parsedWeight > Number(state.segmentPeakWeight)
+    ) {
+      state.segmentPeakWeight = parsedWeight;
+      state.segmentPeakTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
+      state.segmentPeakLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+      state.segmentPeakLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
+    }
   }
 
   _rememberLoadingStart(state, packetTimeMs = null, lat = null, lon = null) {
@@ -233,9 +267,56 @@ export class TelemetryProcessor {
 
   _getBatchStartWeight(state) {
     if (state.recoveredOutsideLoadingContext) {
-      return 0;
+      return Math.round(Number(state.recoveryBaselineWeight ?? state.lastKnownNormalWeight ?? 0));
     }
     return Math.round(Number(state.zoneStartWeight || 0));
+  }
+
+  _rememberNormalWeight(state, weight) {
+    const normalWeight = Number(weight);
+    if (
+      !Number.isFinite(normalWeight) ||
+      normalWeight < 0 ||
+      state.recoveringFromInvalidWeight ||
+      state.recoveredOutsideLoadingContext
+    ) {
+      return;
+    }
+    state.lastKnownNormalWeight = normalWeight;
+  }
+
+  _emitRecoveryMassIfNeeded(state, result, thresholds) {
+    if (!state.recoveredOutsideLoadingContext || state.recoveryMassRecorded) {
+      return false;
+    }
+
+    const recoveryBaselineWeight = Number(state.recoveryBaselineWeight ?? state.lastKnownNormalWeight ?? 0);
+    const recoveredWeight = Number(state.zoneStartWeight || 0);
+    const recoveryDelta = recoveredWeight - recoveryBaselineWeight;
+
+    if (!(recoveryDelta > thresholds.batchStartThresholdKg)) {
+      state.recoveryMassRecorded = true;
+      return false;
+    }
+
+    result.dbActions.push({
+      type: 'ADD_INGREDIENT',
+      ingredientName: 'Восстановление терминала',
+      actualWeight: Math.round(recoveryDelta),
+      startTime: Number.isFinite(Number(state.zoneStartTimeMs))
+        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+        : null,
+      startLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
+      startLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null,
+      endTime: Number.isFinite(Number(state.zoneStartTimeMs))
+        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+        : null,
+      endLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
+      endLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null
+    });
+    state.recoveryMassRecorded = true;
+    state.lastIngredientName = null;
+    return true;
   }
 
   _getCurrentMode(state) {
@@ -648,7 +729,12 @@ export class TelemetryProcessor {
       return false;
     }
 
-    const segmentEndWeight = Number(options.segmentEndWeight ?? currentWeight);
+    const hasExplicitSegmentEnd = options.segmentEndWeight !== undefined && options.segmentEndWeight !== null;
+    const segmentEndWeight = Number(
+      hasExplicitSegmentEnd
+        ? options.segmentEndWeight
+        : (Number.isFinite(Number(state.segmentPeakWeight)) ? state.segmentPeakWeight : currentWeight)
+    );
     const delta = segmentEndWeight - Number(state.zoneStartWeight || 0);
 
     if (!(delta > thresholds.batchStartThresholdKg)) {
@@ -664,6 +750,7 @@ export class TelemetryProcessor {
           ? new Date(Number(state.zoneStartTimeMs)).toISOString()
           : null
       });
+      this._emitRecoveryMassIfNeeded(state, result, thresholds);
       state.recoveredOutsideLoadingContext = false;
     }
 
@@ -690,11 +777,27 @@ export class TelemetryProcessor {
         : state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon))
           ? Number(state.zoneStartLon)
           : null,
-      endTime: Number.isFinite(Number(options.packetTimeMs))
-        ? new Date(Number(options.packetTimeMs)).toISOString()
-        : null,
-      endLat: Number.isFinite(Number(options.lat)) ? Number(options.lat) : null,
-      endLon: Number.isFinite(Number(options.lon)) ? Number(options.lon) : null
+      endTime: Number.isFinite(Number(options.segmentEndTimeMs))
+        ? new Date(Number(options.segmentEndTimeMs)).toISOString()
+        : !hasExplicitSegmentEnd && Number.isFinite(Number(state.segmentPeakTimeMs))
+          ? new Date(Number(state.segmentPeakTimeMs)).toISOString()
+          : Number.isFinite(Number(options.packetTimeMs))
+            ? new Date(Number(options.packetTimeMs)).toISOString()
+            : null,
+      endLat: Number.isFinite(Number(options.segmentEndLat))
+        ? Number(options.segmentEndLat)
+        : !hasExplicitSegmentEnd && state.segmentPeakLat !== null && Number.isFinite(Number(state.segmentPeakLat))
+          ? Number(state.segmentPeakLat)
+          : Number.isFinite(Number(options.lat))
+            ? Number(options.lat)
+            : null,
+      endLon: Number.isFinite(Number(options.segmentEndLon))
+        ? Number(options.segmentEndLon)
+        : !hasExplicitSegmentEnd && state.segmentPeakLon !== null && Number.isFinite(Number(state.segmentPeakLon))
+          ? Number(state.segmentPeakLon)
+          : Number.isFinite(Number(options.lon))
+            ? Number(options.lon)
+            : null
     });
 
     this._resetVisitedZones(state, Number(options.packetTimeMs || Date.now()));
@@ -761,6 +864,14 @@ export class TelemetryProcessor {
     );
 
     if (!Number.isFinite(currentWeightRaw) || currentWeightRaw < 0) {
+      if (!state.recoveringFromInvalidWeight) {
+        state.recoveryBaselineWeight = Number.isFinite(Number(state.lastKnownNormalWeight))
+          ? Number(state.lastKnownNormalWeight)
+          : Math.max(0, Number(state.lastAcceptedWeight ?? state.lastStationaryWeight ?? 0));
+        state.recoveryBaselineTimeMs = state.lastKnownNormalTimeMs;
+        state.recoveryBaselineLat = state.lastKnownNormalLat;
+        state.recoveryBaselineLon = state.lastKnownNormalLon;
+      }
       state.hasWeightBaseline = false;
       state.recoveringFromInvalidWeight = true;
       state.recoveredOutsideLoadingContext = false;
@@ -823,7 +934,9 @@ export class TelemetryProcessor {
       }
     }
 
-    const activeZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+    const activeZone = (suppressLoading || state.isUnloading)
+      ? null
+      : detectZoneWithRadiusFallback(lat, lon, zonesConfig);
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
 
@@ -841,6 +954,22 @@ export class TelemetryProcessor {
       state.lastAcceptedWeight = currentWeight;
       state.recoveringFromInvalidWeight = false;
       state.recoveredOutsideLoadingContext = true;
+      state.recoveryMassRecorded = false;
+      state.lastKnownNormalWeight = Number.isFinite(Number(state.recoveryBaselineWeight))
+        ? Number(state.recoveryBaselineWeight)
+        : state.lastKnownNormalWeight;
+      if (state.recoveryBaselineTimeMs === null && Number.isFinite(Number(packetTimeMs))) {
+        state.recoveryBaselineTimeMs = Number(packetTimeMs);
+      }
+      if (
+        state.recoveryBaselineLat === null &&
+        state.recoveryBaselineLon === null &&
+        Number.isFinite(Number(lat)) &&
+        Number.isFinite(Number(lon))
+      ) {
+        state.recoveryBaselineLat = Number(lat);
+        state.recoveryBaselineLon = Number(lon);
+      }
       return this._buildSkippedResult(deviceId);
     }
 
@@ -946,10 +1075,28 @@ export class TelemetryProcessor {
     }
 
     // Базовый вес обновляется только в спокойном режиме
-    if (!isMotionSuppressed && !state.isMixing && !state.isUnloading) {
+    if (
+      !isMotionSuppressed &&
+      !state.isUnloading &&
+      (!state.isMixing || state.loadingStartTimeMs === null)
+    ) {
       if (currentWeight < state.zoneStartWeight) {
         this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       }
+    }
+
+    const recentCurrentZoneSeen = state.currentZone &&
+      !activeZoneName &&
+      Number.isFinite(lastRealZoneSeenAtMs) &&
+      packetTimeMs - lastRealZoneSeenAtMs <= Math.max(10000, thresholds.zoneChangeDebounceMs * 2);
+    const isInCurrentLoadingZone = Boolean(
+      state.currentZone
+        ? (activeZoneName === confirmedZoneName || recentCurrentZoneSeen)
+        : activeZoneName
+    );
+
+    if (!isMotionSuppressed && !suppressLoading && !state.isUnloading && isInCurrentLoadingZone) {
+      this._rememberSegmentPeak(state, currentWeight, packetTimeMs, lat, lon);
     }
 
     if (!isMotionSuppressed && currentWeight > state.peakWeight) {
@@ -969,7 +1116,6 @@ export class TelemetryProcessor {
       state.isBatchStarted = true;
       state.isMixing = true;
       state.lastIngredientName = this._resolveSegmentIngredient(state);
-      state.recoveredOutsideLoadingContext = false;
 
       result.dbActions.push({
         type: 'START_BATCH',
@@ -978,6 +1124,7 @@ export class TelemetryProcessor {
           ? new Date(Number(state.zoneStartTimeMs)).toISOString()
           : null
       });
+      this._emitRecoveryMassIfNeeded(state, result, thresholds);
       state.recoveredOutsideLoadingContext = false;
     }
 
@@ -1023,7 +1170,6 @@ export class TelemetryProcessor {
       currentWeight < state.peakWeight - thresholds.unloadDropThresholdKg
     ) {
       this._flushCurrentSegment(state, currentWeight, thresholds, result, {
-        segmentEndWeight: state.peakWeight,
         packetTimeMs
       });
       state.isUnloading = true;
@@ -1082,6 +1228,16 @@ export class TelemetryProcessor {
 
     if (!isMotionSuppressed) {
       state.lastAcceptedWeight = currentWeight;
+      if (!state.isMixing && !state.isUnloading) {
+        this._rememberNormalWeight(state, currentWeight);
+        if (Number.isFinite(Number(packetTimeMs))) {
+          state.lastKnownNormalTimeMs = Number(packetTimeMs);
+        }
+        if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+          state.lastKnownNormalLat = Number(lat);
+          state.lastKnownNormalLon = Number(lon);
+        }
+      }
     }
     return result;
   }

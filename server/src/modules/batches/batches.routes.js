@@ -297,6 +297,36 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
     };
 }
 
+function normalizeBatchTrackWeights(batch, hostTrack = []) {
+    if (!Array.isArray(hostTrack) || hostTrack.length === 0) {
+        return [];
+    }
+
+    const batchStartWeight = Number(batch?.startWeight || 0);
+    const firstRawWeight = Number(hostTrack[0]?.weight);
+    if (!Number.isFinite(firstRawWeight)) {
+        return hostTrack;
+    }
+
+    const weightOffset = firstRawWeight - batchStartWeight;
+    if (!Number.isFinite(weightOffset) || Math.abs(weightOffset) < 1) {
+        return hostTrack;
+    }
+
+    return hostTrack.map((point) => {
+        const rawWeight = Number(point?.weight);
+        if (!Number.isFinite(rawWeight)) {
+            return point;
+        }
+
+        return {
+            ...point,
+            weight: Math.max(0, rawWeight - weightOffset),
+            rawWeight
+        };
+    });
+}
+
 // ============================================================================
 // 1. GET / - Получить список замесов (с фильтром по дате, нарушениями и планом)
 // ============================================================================
@@ -434,8 +464,10 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             orderBy: { timestamp: 'asc' }
         });
 
+        const normalizedHostTrack = normalizeBatchTrackWeights(batch, hostTrack);
+
         if (!includeRtk) {
-            return res.json(hostTrack);
+            return res.json(normalizedHostTrack);
         }
 
         const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
@@ -443,13 +475,13 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
         });
 
         res.json({
-            hostTrack,
+            hostTrack: normalizedHostTrack,
             loaderTrack,
             meta: {
                 batchId: batch.id,
                 deviceId: batch.deviceId,
                 loaderLookbackSeconds,
-                hostPoints: hostTrack.length,
+                hostPoints: normalizedHostTrack.length,
                 loaderPoints: loaderTrack.length
             }
         });
