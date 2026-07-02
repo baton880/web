@@ -230,6 +230,11 @@ model BatchIngredient {
   
   plannedWeight   Float?   // Пока опционально
   actualWeight    Float    
+  startedAt       DateTime?
+  startLat        Float?
+  startLon        Float?
+  endLat          Float?
+  endLon          Float?
   
   isViolation     Boolean  @default(false)
 

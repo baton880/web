@@ -785,6 +785,43 @@ $(document).ready(function () {
         return { point: bestPoint, deltaMs: bestDelta };
     }
 
+    function resolveIngredientMapSegment(row, fallbackTrackPoints) {
+        const startLat = Number(row?.startLat);
+        const startLon = Number(row?.startLon);
+        const endLat = Number(row?.endLat);
+        const endLon = Number(row?.endLon);
+        const hasStoredStart = hasValidCoordinates(startLat, startLon);
+        const hasStoredEnd = hasValidCoordinates(endLat, endLon);
+
+        if (hasStoredStart || hasStoredEnd) {
+            return {
+                startPoint: hasStoredStart ? {
+                    lat: startLat,
+                    lon: startLon,
+                    timestamp: row?.startTime || row?.time || null,
+                } : null,
+                endPoint: hasStoredEnd ? {
+                    lat: endLat,
+                    lon: endLon,
+                    timestamp: row?.endTime || row?.time || null,
+                } : null,
+                source: "stored",
+            };
+        }
+
+        const ingredientTimestampMs = parseTimestampMs(row?.time);
+        const closest = findClosestTrackPointByTime(ingredientTimestampMs, fallbackTrackPoints);
+        if (!closest?.point || closest.deltaMs > (2 * 60 * 1000)) {
+            return null;
+        }
+
+        return {
+            startPoint: closest.point,
+            endPoint: null,
+            source: "fallback",
+        };
+    }
+
     function ensureYmapsReady() {
         if (!window.ymaps || typeof window.ymaps.ready !== "function") {
             return Promise.reject(new Error("Yandex Maps API недоступен"));
@@ -1192,22 +1229,36 @@ $(document).ready(function () {
         const ingredientTrackPoints = loaderTrackPoints.length ? loaderTrackPoints : hostTrackPoints;
 
         rows.forEach((row) => {
-            const ingredientTimestampMs = parseTimestampMs(row?.time);
-            const closest = findClosestTrackPointByTime(ingredientTimestampMs, ingredientTrackPoints);
-            if (!closest?.point || closest.deltaMs > (2 * 60 * 1000)) {
+            const segment = resolveIngredientMapSegment(row, ingredientTrackPoints);
+            const startPoint = segment?.startPoint || null;
+            const endPoint = segment?.endPoint || null;
+            const anchorPoint = startPoint || endPoint;
+            if (!anchorPoint) {
                 return;
             }
 
             linkedIngredients += 1;
+
+            const startTimeLabel = formatDateTime(row?.startTime || row?.time);
+            const endTimeLabel = formatDateTime(row?.endTime || row?.time);
+            const startCoordsLabel = startPoint
+                ? `${startPoint.lat.toFixed(5)}, ${startPoint.lon.toFixed(5)}`
+                : "-";
+            const endCoordsLabel = endPoint
+                ? `${endPoint.lat.toFixed(5)}, ${endPoint.lon.toFixed(5)}`
+                : startCoordsLabel;
+
             const marker = new window.ymaps.Placemark(
-                [closest.point.lat, closest.point.lon],
+                [anchorPoint.lat, anchorPoint.lon],
                 {
                     hintContent: `${getIngredientDisplayName(row?.name)} (${formatTime(row?.time)})`,
                     balloonContent: `
                         <strong>${escapeHtml(getIngredientDisplayName(row?.name))}</strong><br>
-                        Время добавления: ${escapeHtml(formatDateTime(row?.time))}<br>
+                        Начало загрузки: ${escapeHtml(startTimeLabel)}<br>
+                        Конец загрузки: ${escapeHtml(endTimeLabel)}<br>
                         Факт: ${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}<br>
-                        Координаты: ${closest.point.lat.toFixed(5)}, ${closest.point.lon.toFixed(5)}
+                        Старт: ${escapeHtml(startCoordsLabel)}<br>
+                        Финиш: ${escapeHtml(endCoordsLabel)}
                     `,
                 },
                 {
@@ -1216,6 +1267,30 @@ $(document).ready(function () {
             );
 
             map.geoObjects.add(marker);
+
+            if (startPoint && endPoint) {
+                const isSamePoint = Math.abs(startPoint.lat - endPoint.lat) < 1e-6
+                    && Math.abs(startPoint.lon - endPoint.lon) < 1e-6;
+
+                if (!isSamePoint) {
+                    const segmentLine = new window.ymaps.Polyline(
+                        [
+                            [startPoint.lat, startPoint.lon],
+                            [endPoint.lat, endPoint.lon],
+                        ],
+                        {
+                            hintContent: `${getIngredientDisplayName(row?.name)}: участок загрузки`,
+                        },
+                        {
+                            strokeColor: "#3c6df0",
+                            strokeWidth: 3,
+                            strokeOpacity: 0.65,
+                            strokeStyle: "dash",
+                        }
+                    );
+                    map.geoObjects.add(segmentLine);
+                }
+            }
         });
 
         const coordinates = allTrackPoints.map((point) => [point.lat, point.lon]);

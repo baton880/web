@@ -399,18 +399,34 @@ router.post('/', async (req, res) => {
                 latestIngredient &&
                 normalizeIngredientName(latestIngredient.ingredientName) === normalizeIngredientName(ingredientName)
               ) {
+                const actionStartedAt = action.startTime ? new Date(action.startTime) : null
+                const actionEndedAt = action.endTime ? new Date(action.endTime) : telemetry.timestamp
                 await tx.batchIngredient.update({
                   where: { id: latestIngredient.id },
                   data: {
-                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight
+                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
+                    startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
+                    startLat: latestIngredient.startLat ?? (Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null),
+                    startLon: latestIngredient.startLon ?? (Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null),
+                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
+                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : telemetry.timestamp
                   }
                 })
               } else {
+                const actionStartedAt = action.startTime ? new Date(action.startTime) : null
+                const actionEndedAt = action.endTime ? new Date(action.endTime) : telemetry.timestamp
                 await tx.batchIngredient.create({
                   data: {
                     batchId: activeBatch.id,
                     ingredientName,
-                    actualWeight
+                    actualWeight,
+                    startedAt: actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null,
+                    startLat: Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null,
+                    startLon: Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null,
+                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
+                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : telemetry.timestamp
                   }
                 })
               }

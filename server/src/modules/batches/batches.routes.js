@@ -281,11 +281,17 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
         actualIngredients: batch.actualIngredients.map((ing) => ({
             id: ing.id,
             name: toDisplayIngredientName(ing.ingredientName),
+            startTime: ing.startedAt || null,
             time: ing.addedAt,
+            endTime: ing.addedAt,
             plan: ing.plannedWeight || 0,
             fact: ing.actualWeight,
             deviation: ing.plannedWeight ? (ing.actualWeight - ing.plannedWeight) : 0,
-            isViolation: ing.isViolation
+            isViolation: ing.isViolation,
+            startLat: ing.startLat,
+            startLon: ing.startLon,
+            endLat: ing.endLat,
+            endLon: ing.endLon
         })),
         ingredients: buildIngredientSummary(batch, telemetrySettings)
     };

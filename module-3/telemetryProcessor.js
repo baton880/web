@@ -168,6 +168,11 @@ export class TelemetryProcessor {
       confirmedZoneName: null,      // имя подтверждённой зоны для сравнения
       zoneStartWeight: weight,
       zoneStartTimeMs: null,
+      zoneStartLat: null,
+      zoneStartLon: null,
+      loadingStartTimeMs: null,
+      loadingStartLat: null,
+      loadingStartLon: null,
       peakWeight: weight,
       isMixing: false,
       isUnloading: false,
@@ -197,10 +202,32 @@ export class TelemetryProcessor {
     };
   }
 
-  _setZoneBaseline(state, weight, packetTimeMs = null) {
+  _setZoneBaseline(state, weight, packetTimeMs = null, lat = null, lon = null) {
     state.zoneStartWeight = weight;
     if (Number.isFinite(Number(packetTimeMs))) {
       state.zoneStartTimeMs = Number(packetTimeMs);
+    }
+    if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+      state.zoneStartLat = Number(lat);
+      state.zoneStartLon = Number(lon);
+    }
+    state.loadingStartTimeMs = null;
+    state.loadingStartLat = null;
+    state.loadingStartLon = null;
+  }
+
+  _rememberLoadingStart(state, packetTimeMs = null, lat = null, lon = null) {
+    if (state.loadingStartTimeMs === null && Number.isFinite(Number(packetTimeMs))) {
+      state.loadingStartTimeMs = Number(packetTimeMs);
+    }
+    if (
+      state.loadingStartLat === null &&
+      state.loadingStartLon === null &&
+      Number.isFinite(Number(lat)) &&
+      Number.isFinite(Number(lon))
+    ) {
+      state.loadingStartLat = Number(lat);
+      state.loadingStartLon = Number(lon);
     }
   }
 
@@ -639,7 +666,27 @@ export class TelemetryProcessor {
     result.dbActions.push({
       type: 'ADD_INGREDIENT',
       ingredientName,
-      actualWeight: Math.round(delta)
+      actualWeight: Math.round(delta),
+      startTime: state.loadingStartTimeMs !== null && Number.isFinite(Number(state.loadingStartTimeMs))
+        ? new Date(Number(state.loadingStartTimeMs)).toISOString()
+        : state.zoneStartTimeMs !== null && Number.isFinite(Number(state.zoneStartTimeMs))
+          ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+          : null,
+      startLat: state.loadingStartLat !== null && Number.isFinite(Number(state.loadingStartLat))
+        ? Number(state.loadingStartLat)
+        : state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat))
+          ? Number(state.zoneStartLat)
+          : null,
+      startLon: state.loadingStartLon !== null && Number.isFinite(Number(state.loadingStartLon))
+        ? Number(state.loadingStartLon)
+        : state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon))
+          ? Number(state.zoneStartLon)
+          : null,
+      endTime: Number.isFinite(Number(options.packetTimeMs))
+        ? new Date(Number(options.packetTimeMs)).toISOString()
+        : null,
+      endLat: Number.isFinite(Number(options.lat)) ? Number(options.lat) : null,
+      endLon: Number.isFinite(Number(options.lon)) ? Number(options.lon) : null
     });
 
     this._resetVisitedZones(state, Number(options.packetTimeMs || Date.now()));
@@ -657,7 +704,7 @@ export class TelemetryProcessor {
     // Обновляем состояние на НОВУЮ подтверждённую зону
     state.currentZone = zoneObject ? { ...zoneObject, ingredient: ingredientName } : null;
     state.confirmedZoneName = zoneName;
-    this._setZoneBaseline(state, currentWeight, options.packetTimeMs);
+    this._setZoneBaseline(state, currentWeight, options.packetTimeMs, options.lat, options.lon);
     state.recoveringFromInvalidWeight = false;
   }
 
@@ -689,10 +736,10 @@ export class TelemetryProcessor {
     let state = this.deviceStates.get(deviceId);
     if (!state) {
       state = this.getInitialState(currentWeight);
-      this._setZoneBaseline(state, currentWeight, packetTimeMs);
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       this.deviceStates.set(deviceId, state);
     } else if (state.hasWeightBaseline === false) {
-      this._setZoneBaseline(state, currentWeight, packetTimeMs);
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       state.peakWeight = currentWeight;
       state.lastStationaryWeight = currentWeight;
       state.lastAcceptedWeight = null;
@@ -730,9 +777,9 @@ export class TelemetryProcessor {
         departureWeight,
         thresholds,
         result,
-        { suppressLoading, packetTimeMs, requireLoadingContext: true }
+        { suppressLoading, packetTimeMs, requireLoadingContext: true, lat, lon }
       );
-      this._setZoneBaseline(state, departureWeight, packetTimeMs);
+      this._setZoneBaseline(state, departureWeight, packetTimeMs, lat, lon);
       this._resetVisitedZones(state, packetTimeMs);
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
@@ -780,7 +827,7 @@ export class TelemetryProcessor {
       !state.isMixing &&
       !state.isUnloading
     ) {
-      this._setZoneBaseline(state, currentWeight, packetTimeMs);
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       state.peakWeight = currentWeight;
       state.lastStationaryWeight = currentWeight;
       state.lastAcceptedWeight = currentWeight;
@@ -835,7 +882,7 @@ export class TelemetryProcessor {
         currentWeight,
         thresholds,
         result,
-        { suppressLoading, packetTimeMs }
+        { suppressLoading, packetTimeMs, lat, lon }
       );
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
@@ -864,7 +911,7 @@ export class TelemetryProcessor {
             currentWeight,
             thresholds,
             result,
-            { suppressLoading, packetTimeMs }
+            { suppressLoading, packetTimeMs, lat, lon }
           );
           state.pendingZoneName = null;
           state.pendingZoneEnteredAtMs = null;
@@ -881,10 +928,19 @@ export class TelemetryProcessor {
       state.pendingZoneCount = 0;
     }
 
+    if (
+      !isMotionSuppressed &&
+      !state.isUnloading &&
+      state.loadingStartTimeMs === null &&
+      (currentWeight - Number(state.zoneStartWeight || 0)) > thresholds.batchStartThresholdKg
+    ) {
+      this._rememberLoadingStart(state, packetTimeMs, lat, lon);
+    }
+
     // Базовый вес обновляется только в спокойном режиме
     if (!isMotionSuppressed && !state.isMixing && !state.isUnloading) {
       if (currentWeight < state.zoneStartWeight) {
-        this._setZoneBaseline(state, currentWeight, packetTimeMs);
+        this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       }
     }
 
@@ -938,7 +994,7 @@ export class TelemetryProcessor {
         nextStartWeight: Math.round(currentWeight)
       });
 
-      this._setZoneBaseline(state, state.lastUnloadWeight, packetTimeMs);
+      this._setZoneBaseline(state, state.lastUnloadWeight, packetTimeMs, lat, lon);
       state.isMixing = false;
       state.isUnloading = false;
       state.isBatchStarted = false;

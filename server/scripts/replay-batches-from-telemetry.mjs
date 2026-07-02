@@ -435,20 +435,34 @@ async function main() {
                 latestIngredient &&
                 normalizeIngredientName(latestIngredient.ingredientName) === normalizeIngredientName(ingredientName)
               ) {
+                const actionStartedAt = action.startTime ? new Date(action.startTime) : null
+                const actionEndedAt = action.endTime ? new Date(action.endTime) : packet.timestamp
                 await prisma.batchIngredient.update({
                   where: { id: latestIngredient.id },
                   data: {
                     actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
-                    addedAt: packet.timestamp
+                    startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
+                    startLat: latestIngredient.startLat ?? (Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null),
+                    startLon: latestIngredient.startLon ?? (Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null),
+                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
+                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    addedAt: Number.isNaN(actionEndedAt?.getTime?.()) ? packet.timestamp : actionEndedAt
                   }
                 })
               } else {
+                const actionStartedAt = action.startTime ? new Date(action.startTime) : null
+                const actionEndedAt = action.endTime ? new Date(action.endTime) : packet.timestamp
                 await prisma.batchIngredient.create({
                   data: {
                     batchId: activeBatch.id,
                     ingredientName,
                     actualWeight,
-                    addedAt: packet.timestamp
+                    startedAt: actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null,
+                    startLat: Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null,
+                    startLon: Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null,
+                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
+                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : packet.timestamp
                   }
                 })
               }
