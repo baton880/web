@@ -25,6 +25,7 @@ $(document).ready(function () {
     const trackMapElement = document.getElementById("batchTrackMap");
     const trackEmpty = document.getElementById("batchTrackEmpty");
     const trackMeta = document.getElementById("batchTrackMeta");
+    const trackResetButton = document.getElementById("batchTrackResetButton");
     const editCard = document.getElementById("batchEditCard");
     const editMeta = document.getElementById("batchEditMeta");
     const editState = document.getElementById("batchEditState");
@@ -37,7 +38,7 @@ $(document).ready(function () {
     const deleteButton = document.getElementById("batchDeleteButton");
 
     const batchUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
-    const telemetryUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=60`) || `/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=60`;
+    const telemetryUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=180&hostLookbackSeconds=180`) || `/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=180&hostLookbackSeconds=180`;
     const batchDeleteUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
     const stopBatchUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/host/manual-stop") || "/api/telemetry/host/manual-stop";
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
@@ -77,6 +78,8 @@ $(document).ready(function () {
         rations: [],
         groups: [],
         storageZones: [],
+        telemetryPayload: null,
+        selectedIngredientId: null,
         lookupStatus: {
             rations: {
                 loading: false,
@@ -103,6 +106,9 @@ $(document).ready(function () {
     const TRACK_MAX_GAP_MS = 45000;
     const TRACK_MAX_SPEED_MPS = 12;
     const TRACK_MIN_JUMP_DISTANCE_M = 30;
+    const INGREDIENT_TRACK_DEFAULT_LOOKBACK_MS = 3 * 60 * 1000;
+    const INGREDIENT_TRACK_AFTER_MS = 15 * 1000;
+    const INGREDIENT_TRACK_EDGE_TOLERANCE_MS = 30 * 1000;
     const HOST_TRACK_COLOR = "#3F6FAE";
     const RTK_GPS_FIX_COLOR = "#B65F55";
     const RTK_FIX_COLOR = "#5F8A6B";
@@ -518,15 +524,25 @@ $(document).ready(function () {
         );
         const seenComponentViolationBadge = new Set();
 
-        ingredientListBody.innerHTML = rows.map((row) => `
-            <tr>
+        ingredientListBody.innerHTML = rows.map((row) => {
+            const ingredientId = normalizeNullableId(row?.id);
+            const isSelected = ingredientId !== null && ingredientId === state.selectedIngredientId;
+
+            return `
+            <tr
+                class="batch-ingredient-row${isSelected ? " batch-ingredient-row--selected" : ""}"
+                data-role="ingredient-track-row"
+                data-ingredient-id="${ingredientId === null ? "" : ingredientId}"
+                tabindex="0"
+            >
                 <td>${escapeHtml(formatTime(row?.time))}</td>
                 <td>${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}</td>
                 <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
                 <td class="text-center">${renderIngredientActionsCell(row)}</td>
             </tr>
-        `).join("");
+        `;
+        }).join("");
     }
 
     function renderIngredientActionsCell(row) {
@@ -753,6 +769,7 @@ $(document).ready(function () {
         if (Array.isArray(payload)) {
             return {
                 hostTrack: payload,
+                hostContextTrack: payload,
                 loaderTrack: [],
                 meta: null,
             };
@@ -760,6 +777,7 @@ $(document).ready(function () {
 
         return {
             hostTrack: Array.isArray(payload?.hostTrack) ? payload.hostTrack : [],
+            hostContextTrack: Array.isArray(payload?.hostContextTrack) ? payload.hostContextTrack : [],
             loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
             meta: payload?.meta || null,
         };
@@ -1095,6 +1113,80 @@ $(document).ready(function () {
         return objects;
     }
 
+    function getIngredientRowsWithTimestamps(rows) {
+        return (Array.isArray(rows) ? rows : [])
+            .map((row) => ({
+                row,
+                id: normalizeNullableId(row?.id),
+                timestampMs: parseTimestampMs(row?.time),
+            }))
+            .filter((item) => item.id !== null && Number.isFinite(item.timestampMs))
+            .sort((left, right) => left.timestampMs - right.timestampMs || left.id - right.id);
+    }
+
+    function findSelectedIngredientRow(rows) {
+        const selectedId = normalizeNullableId(state.selectedIngredientId);
+        if (selectedId === null) {
+            return null;
+        }
+
+        return (Array.isArray(rows) ? rows : []).find((row) => normalizeNullableId(row?.id) === selectedId) || null;
+    }
+
+    function buildIngredientTrackWindow(row, rows) {
+        const ingredientId = normalizeNullableId(row?.id);
+        const endTimestampMs = parseTimestampMs(row?.time);
+        if (ingredientId === null || !Number.isFinite(endTimestampMs)) {
+            return null;
+        }
+
+        const rowsWithTimestamps = getIngredientRowsWithTimestamps(rows);
+        const rowIndex = rowsWithTimestamps.findIndex((item) => item.id === ingredientId);
+        const previousTimestampMs = rowIndex > 0 ? rowsWithTimestamps[rowIndex - 1].timestampMs : null;
+        const batchStartMs = parseTimestampMs(state.batch?.startTime);
+        let startTimestampMs = Number.isFinite(previousTimestampMs) && previousTimestampMs < endTimestampMs
+            ? previousTimestampMs
+            : (Number.isFinite(batchStartMs) ? batchStartMs : null);
+
+        if (!Number.isFinite(startTimestampMs) || startTimestampMs >= endTimestampMs - 1000) {
+            startTimestampMs = endTimestampMs - INGREDIENT_TRACK_DEFAULT_LOOKBACK_MS;
+        }
+
+        return {
+            startMs: startTimestampMs,
+            endMs: endTimestampMs + INGREDIENT_TRACK_AFTER_MS,
+            ingredientEndMs: endTimestampMs,
+        };
+    }
+
+    function sliceTrackPointsByWindow(trackPoints, windowRange) {
+        if (!windowRange || !Array.isArray(trackPoints) || !trackPoints.length) {
+            return [];
+        }
+
+        const inside = trackPoints.filter((point) =>
+            point.timestampMs >= windowRange.startMs &&
+            point.timestampMs <= windowRange.endMs
+        );
+        const before = [...trackPoints]
+            .reverse()
+            .find((point) =>
+                point.timestampMs < windowRange.startMs &&
+                windowRange.startMs - point.timestampMs <= INGREDIENT_TRACK_EDGE_TOLERANCE_MS
+            );
+        const after = trackPoints.find((point) =>
+            point.timestampMs > windowRange.endMs &&
+            point.timestampMs - windowRange.endMs <= INGREDIENT_TRACK_EDGE_TOLERANCE_MS
+        );
+
+        const byKey = new Map();
+        [before, ...inside, after].filter(Boolean).forEach((point) => {
+            byKey.set(`${point.timestampMs}:${point.lat}:${point.lon}:${point.deviceId || ""}`, point);
+        });
+
+        return [...byKey.values()].sort((left, right) => left.timestampMs - right.timestampMs);
+    }
+
     async function renderBatchTrack(trackPayload, ingredientRows) {
         if (!trackMapElement) {
             return;
@@ -1102,8 +1194,20 @@ $(document).ready(function () {
 
         const normalizedPayload = normalizeTelemetryPayload(trackPayload);
         const hostTrackPoints = normalizeTrackPoints(normalizedPayload.hostTrack);
+        const hostContextTrackPoints = normalizeTrackPoints(normalizedPayload.hostContextTrack);
         const loaderTrackPoints = normalizeTrackPoints(normalizedPayload.loaderTrack);
-        const allTrackPoints = [...hostTrackPoints, ...loaderTrackPoints]
+        const rows = Array.isArray(ingredientRows) ? ingredientRows : [];
+        const selectedIngredientRow = findSelectedIngredientRow(rows);
+        const selectedTrackWindow = selectedIngredientRow
+            ? buildIngredientTrackWindow(selectedIngredientRow, rows)
+            : null;
+        const visibleHostTrackPoints = selectedTrackWindow
+            ? sliceTrackPointsByWindow(hostContextTrackPoints.length ? hostContextTrackPoints : hostTrackPoints, selectedTrackWindow)
+            : hostTrackPoints;
+        const visibleLoaderTrackPoints = selectedTrackWindow
+            ? sliceTrackPointsByWindow(loaderTrackPoints, selectedTrackWindow)
+            : loaderTrackPoints;
+        const allTrackPoints = [...visibleHostTrackPoints, ...visibleLoaderTrackPoints]
             .sort((left, right) => left.timestampMs - right.timestampMs);
         let map;
 
@@ -1147,17 +1251,22 @@ $(document).ready(function () {
             if (trackMeta) {
                 setText(
                     trackMeta,
-                    activeZonesCount > 0
+                    selectedIngredientRow
+                        ? `Нет координат для выбранного ковша: ${getIngredientDisplayName(selectedIngredientRow?.name)} ${formatWeight(selectedIngredientRow?.fact ?? selectedIngredientRow?.actualWeight)}`
+                        : activeZonesCount > 0
                         ? `Нет координат трека. Показаны активные зоны: ${activeZonesCount}`
                         : "Нет координат в телеметрии этого замеса"
                 );
             }
             if (trackEmpty) {
-                if (activeZonesCount > 0) {
+                if (activeZonesCount > 0 && !selectedIngredientRow) {
                     trackEmpty.classList.add("d-none");
                 } else {
                     trackEmpty.classList.remove("d-none");
                 }
+            }
+            if (trackResetButton) {
+                trackResetButton.classList.toggle("d-none", !selectedIngredientRow);
             }
             return;
         }
@@ -1171,14 +1280,14 @@ $(document).ready(function () {
             map.container.fitToViewport();
         }
 
-        drawTrackLayer(map, hostTrackPoints, {
+        drawTrackLayer(map, visibleHostTrackPoints, {
             title: "Хозяин / кормораздатчик",
             color: HOST_TRACK_COLOR,
             strokeWidth: 4,
             startPreset: "islands#blueCircleDotIcon",
             endPreset: "islands#darkBlueCircleDotIcon",
         });
-        drawTrackLayer(map, loaderTrackPoints, {
+        drawTrackLayer(map, visibleLoaderTrackPoints, {
             title: "Погрузчик",
             kind: "rtk",
             color: RTK_GPS_FIX_COLOR,
@@ -1187,11 +1296,13 @@ $(document).ready(function () {
             endPreset: "islands#redCircleDotIcon",
         });
 
-        const rows = Array.isArray(ingredientRows) ? ingredientRows : [];
+        const markerRows = selectedIngredientRow ? [selectedIngredientRow] : rows;
         let linkedIngredients = 0;
-        const ingredientTrackPoints = loaderTrackPoints.length ? loaderTrackPoints : hostTrackPoints;
+        const ingredientTrackPoints = selectedIngredientRow
+            ? (visibleHostTrackPoints.length ? visibleHostTrackPoints : visibleLoaderTrackPoints)
+            : (loaderTrackPoints.length ? loaderTrackPoints : hostTrackPoints);
 
-        rows.forEach((row) => {
+        markerRows.forEach((row) => {
             const ingredientTimestampMs = parseTimestampMs(row?.time);
             const closest = findClosestTrackPointByTime(ingredientTimestampMs, ingredientTrackPoints);
             if (!closest?.point || closest.deltaMs > (2 * 60 * 1000)) {
@@ -1246,10 +1357,22 @@ $(document).ready(function () {
             const lastPoint = allTrackPoints[allTrackPoints.length - 1];
             const startLabel = formatDateTime(firstPoint.timestamp);
             const endLabel = formatDateTime(lastPoint.timestamp);
-            setText(
-                trackMeta,
-                `Хозяин: ${hostTrackPoints.length} точек • Погрузчик: ${loaderTrackPoints.length} точек • ${linkedIngredients} меток компонентов • ${startLabel} — ${endLabel}`
-            );
+            if (selectedIngredientRow) {
+                const ingredientName = getIngredientDisplayName(selectedIngredientRow?.name) || "Компонент";
+                setText(
+                    trackMeta,
+                    `${ingredientName}: ${formatWeight(selectedIngredientRow?.fact ?? selectedIngredientRow?.actualWeight)} • Хозяин: ${visibleHostTrackPoints.length} точек • Погрузчик: ${visibleLoaderTrackPoints.length} точек • ${startLabel} — ${endLabel}`
+                );
+            } else {
+                setText(
+                    trackMeta,
+                    `Хозяин: ${hostTrackPoints.length} точек • Погрузчик: ${loaderTrackPoints.length} точек • ${linkedIngredients} меток компонентов • ${startLabel} — ${endLabel}`
+                );
+            }
+        }
+
+        if (trackResetButton) {
+            trackResetButton.classList.toggle("d-none", !selectedIngredientRow);
         }
     }
 
@@ -1719,6 +1842,79 @@ $(document).ready(function () {
         }
     }
 
+    function shouldIgnoreIngredientTrackClick(target) {
+        return Boolean(target?.closest?.("button, select, input, textarea, a, label, [data-role='ingredient-replacement'], [data-role='ingredient-rename'], [data-role='ingredient-delete']"));
+    }
+
+    async function refreshTrackSelection() {
+        const actualRows = Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : [];
+        const selectedId = normalizeNullableId(state.selectedIngredientId);
+
+        if (selectedId !== null && !actualRows.some((row) => normalizeNullableId(row?.id) === selectedId)) {
+            state.selectedIngredientId = null;
+        }
+
+        renderIngredientList(actualRows);
+        await renderBatchTrack(state.telemetryPayload || { hostTrack: [], loaderTrack: [] }, actualRows);
+    }
+
+    async function selectIngredientTrack(ingredientId) {
+        const normalizedIngredientId = normalizeNullableId(ingredientId);
+        if (normalizedIngredientId === null || state.isBatchLoading) {
+            return;
+        }
+
+        state.selectedIngredientId = state.selectedIngredientId === normalizedIngredientId
+            ? null
+            : normalizedIngredientId;
+
+        try {
+            await refreshTrackSelection();
+        } catch (error) {
+            console.error("Ошибка отображения трека ковша:", error);
+        }
+    }
+
+    function handleIngredientTrackRowClick(event) {
+        if (shouldIgnoreIngredientTrackClick(event.target)) {
+            return;
+        }
+
+        const row = event.target?.closest?.("[data-role='ingredient-track-row']");
+        if (!row) {
+            return;
+        }
+
+        selectIngredientTrack(row.dataset.ingredientId);
+    }
+
+    function handleIngredientTrackRowKeydown(event) {
+        if (event.key !== "Enter" && event.key !== " ") {
+            return;
+        }
+
+        if (shouldIgnoreIngredientTrackClick(event.target)) {
+            return;
+        }
+
+        const row = event.target?.closest?.("[data-role='ingredient-track-row']");
+        if (!row) {
+            return;
+        }
+
+        event.preventDefault();
+        selectIngredientTrack(row.dataset.ingredientId);
+    }
+
+    async function handleTrackResetClick() {
+        state.selectedIngredientId = null;
+        try {
+            await refreshTrackSelection();
+        } catch (error) {
+            console.error("Ошибка сброса фильтра трека:", error);
+        }
+    }
+
     function updateStopButtonState(batch) {
         if (!stopButton) {
             return;
@@ -2002,6 +2198,13 @@ $(document).ready(function () {
             const summaryRows = Array.isArray(batch?.ingredients) ? batch.ingredients : [];
 
             state.batch = batch;
+            state.telemetryPayload = telemetryPayload;
+            if (
+                state.selectedIngredientId !== null &&
+                !actualRows.some((row) => normalizeNullableId(row?.id) === state.selectedIngredientId)
+            ) {
+                state.selectedIngredientId = null;
+            }
 
             renderBatchSummary(batch);
             renderIngredientList(actualRows);
@@ -2107,9 +2310,15 @@ $(document).ready(function () {
     }
 
     if (ingredientListBody) {
+        ingredientListBody.addEventListener("click", handleIngredientTrackRowClick);
+        ingredientListBody.addEventListener("keydown", handleIngredientTrackRowKeydown);
         ingredientListBody.addEventListener("change", handleIngredientReplacementChange);
         ingredientListBody.addEventListener("click", handleIngredientRenameClick);
         ingredientListBody.addEventListener("click", handleIngredientDeleteClick);
+    }
+
+    if (trackResetButton) {
+        trackResetButton.addEventListener("click", handleTrackResetClick);
     }
 
     if (stopButton) {

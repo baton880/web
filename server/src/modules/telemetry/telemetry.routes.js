@@ -14,6 +14,7 @@ const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
 const MAX_TELEMETRY_HISTORY_LIMIT = 5000
+const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 
 function normalizeZoneType(value) {
   if (!value) return ''
@@ -270,7 +271,18 @@ router.post('/', async (req, res) => {
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
       suppressLoading,
-      skipZoneVisit: effectivePosition.source === 'rtk'
+      skipZoneVisit: effectivePosition.source === 'rtk',
+      hostPosition: {
+        lat: Number(packet.lat),
+        lon: Number(packet.lon)
+      },
+      rtkPosition: effectivePosition.rtkPoint
+        ? {
+            lat: Number(effectivePosition.rtkPoint.lat),
+            lon: Number(effectivePosition.rtkPoint.lon)
+          }
+        : null,
+      rtkFresh: effectivePosition.source === 'rtk'
     });
 
     if (!result.isValid) {
@@ -383,15 +395,24 @@ router.post('/', async (req, res) => {
             {
               const ingredientName = String(action.ingredientName || '').trim() || 'Unknown'
               const actualWeight = Number(action.actualWeight || 0)
+              const ingredientAddedAt = telemetry.timestamp instanceof Date
+                ? telemetry.timestamp
+                : new Date(telemetry.timestamp)
               const latestIngredient = await tx.batchIngredient.findFirst({
                 where: { batchId: activeBatch.id },
                 orderBy: { addedAt: 'desc' }
               })
-
-              if (
-                latestIngredient &&
+              const latestAddedAtMs = new Date(latestIngredient?.addedAt || 0).getTime()
+              const ingredientAddedAtMs = ingredientAddedAt.getTime()
+              const timeSinceLatestMs = ingredientAddedAtMs - latestAddedAtMs
+              const isSameIngredient = latestIngredient &&
                 normalizeIngredientName(latestIngredient.ingredientName) === normalizeIngredientName(ingredientName)
-              ) {
+              const isSameBucket = isSameIngredient &&
+                Number.isFinite(timeSinceLatestMs) &&
+                timeSinceLatestMs >= 0 &&
+                timeSinceLatestMs < SAME_INGREDIENT_MERGE_WINDOW_MS
+
+              if (isSameBucket) {
                 await tx.batchIngredient.update({
                   where: { id: latestIngredient.id },
                   data: {
@@ -403,7 +424,8 @@ router.post('/', async (req, res) => {
                   data: {
                     batchId: activeBatch.id,
                     ingredientName,
-                    actualWeight
+                    actualWeight,
+                    addedAt: ingredientAddedAt
                   }
                 })
               }

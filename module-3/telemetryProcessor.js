@@ -23,7 +23,10 @@ import {
   ZONE_ENTRY_REAR_ANGLE_DEG,
   SQUARE_HEADING_SCORE_PER_SECOND,
   SQUARE_HEADING_SCORE_CAP,
-  SQUARE_HEADING_MAX_ANGLE_DEG
+  SQUARE_HEADING_MAX_ANGLE_DEG,
+  HOST_ZONE_OVERRIDE_NEAR_METERS,
+  HOST_ZONE_OVERRIDE_MIN_DWELL_SECONDS,
+  HOST_ZONE_OVERRIDE_MIN_RTK_DISTANCE_METERS
 } from './config.js';
 
 function normalizeDegrees(value) {
@@ -77,6 +80,115 @@ function parsePolygonCoords(value) {
   });
 
   return coords.every(Boolean) ? coords : null;
+}
+
+function normalizeIngredientKey(value) {
+  return String(value || '').trim().toLowerCase();
+}
+
+function isPointInsidePolygon(lat, lon, polygonCoords = []) {
+  let isInside = false;
+
+  for (let i = 0, j = polygonCoords.length - 1; i < polygonCoords.length; j = i++) {
+    const yi = Number(polygonCoords[i]?.[0]);
+    const xi = Number(polygonCoords[i]?.[1]);
+    const yj = Number(polygonCoords[j]?.[0]);
+    const xj = Number(polygonCoords[j]?.[1]);
+
+    const intersects = ((yi > lat) !== (yj > lat)) &&
+      (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
+
+    if (intersects) {
+      isInside = !isInside;
+    }
+  }
+
+  return isInside;
+}
+
+function distanceToSegmentMeters(lat, lon, start, end) {
+  const lat1 = Number(start?.[0]);
+  const lon1 = Number(start?.[1]);
+  const lat2 = Number(end?.[0]);
+  const lon2 = Number(end?.[1]);
+
+  if (
+    !Number.isFinite(lat1) ||
+    !Number.isFinite(lon1) ||
+    !Number.isFinite(lat2) ||
+    !Number.isFinite(lon2)
+  ) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const metersPerLat = 111320;
+  const metersPerLon = Math.max(Math.cos(lat * Math.PI / 180) * 111320, 1);
+  const px = 0;
+  const py = 0;
+  const ax = (lon1 - lon) * metersPerLon;
+  const ay = (lat1 - lat) * metersPerLat;
+  const bx = (lon2 - lon) * metersPerLon;
+  const by = (lat2 - lat) * metersPerLat;
+  const abx = bx - ax;
+  const aby = by - ay;
+  const abLengthSq = abx * abx + aby * aby;
+
+  if (abLengthSq <= Number.EPSILON) {
+    return Math.hypot(ax - px, ay - py);
+  }
+
+  const t = Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / abLengthSq));
+  return Math.hypot(ax + abx * t - px, ay + aby * t - py);
+}
+
+function distanceToZoneMeters(lat, lon, zoneObject) {
+  const numericLat = Number(lat);
+  const numericLon = Number(lon);
+
+  if (!Number.isFinite(numericLat) || !Number.isFinite(numericLon) || !zoneObject) {
+    return Number.POSITIVE_INFINITY;
+  }
+
+  const shapeType = String(zoneObject?.shapeType || 'CIRCLE').trim().toUpperCase();
+  const polygonCoords = shapeType === 'SQUARE' ? parsePolygonCoords(zoneObject?.polygonCoords) : null;
+
+  if (polygonCoords && polygonCoords.length >= 3) {
+    if (isPointInsidePolygon(numericLat, numericLon, polygonCoords)) {
+      return 0;
+    }
+
+    return polygonCoords.reduce((minDistance, point, index) => {
+      const nextPoint = polygonCoords[(index + 1) % polygonCoords.length];
+      return Math.min(minDistance, distanceToSegmentMeters(numericLat, numericLon, point, nextPoint));
+    }, Number.POSITIVE_INFINITY);
+  }
+
+  if (
+    shapeType === 'SQUARE' &&
+    Number.isFinite(Number(zoneObject.squareMinLat)) &&
+    Number.isFinite(Number(zoneObject.squareMinLon)) &&
+    Number.isFinite(Number(zoneObject.squareMaxLat)) &&
+    Number.isFinite(Number(zoneObject.squareMaxLon))
+  ) {
+    const minLat = Math.min(Number(zoneObject.squareMinLat), Number(zoneObject.squareMaxLat));
+    const maxLat = Math.max(Number(zoneObject.squareMinLat), Number(zoneObject.squareMaxLat));
+    const minLon = Math.min(Number(zoneObject.squareMinLon), Number(zoneObject.squareMaxLon));
+    const maxLon = Math.max(Number(zoneObject.squareMinLon), Number(zoneObject.squareMaxLon));
+
+    if (numericLat >= minLat && numericLat <= maxLat && numericLon >= minLon && numericLon <= maxLon) {
+      return 0;
+    }
+
+    const closestLat = Math.min(Math.max(numericLat, minLat), maxLat);
+    const closestLon = Math.min(Math.max(numericLon, minLon), maxLon);
+    return calculateHaversine(numericLat, numericLon, closestLat, closestLon);
+  }
+
+  const radius = Number(zoneObject?.radius || 0);
+  return Math.max(
+    0,
+    calculateHaversine(numericLat, numericLon, Number(zoneObject?.lat), Number(zoneObject?.lon)) - radius
+  );
 }
 
 function calculateLoadingNormalDeg(zoneObject) {
@@ -156,6 +268,10 @@ export class TelemetryProcessor {
       currentZoneDwellMs: 0,
       lastZoneTrackPoint: null,
       lastRealZoneSeenAtMs: null,
+      hostZoneCandidates: [],
+      lastHostZoneKey: null,
+      lastHostZoneDwellAtMs: null,
+      hostCurrentZoneDwellMs: 0,
       // Дебаунс смены зоны
       pendingZoneName: null,
       pendingZoneEnteredAtMs: null,
@@ -199,7 +315,16 @@ export class TelemetryProcessor {
       zoneEntryRearAngleDeg: resolveBoundedNumber(settings.zoneEntryRearAngleDeg, ZONE_ENTRY_REAR_ANGLE_DEG, 1, 180),
       squareHeadingScorePerSecond: resolveNonNegativeNumber(settings.squareHeadingScorePerSecond, SQUARE_HEADING_SCORE_PER_SECOND),
       squareHeadingScoreCap: resolveNonNegativeNumber(settings.squareHeadingScoreCap, SQUARE_HEADING_SCORE_CAP),
-      squareHeadingMaxAngleDeg: resolveBoundedNumber(settings.squareHeadingMaxAngleDeg, SQUARE_HEADING_MAX_ANGLE_DEG, 1, 180)
+      squareHeadingMaxAngleDeg: resolveBoundedNumber(settings.squareHeadingMaxAngleDeg, SQUARE_HEADING_MAX_ANGLE_DEG, 1, 180),
+      hostZoneOverrideNearMeters: resolveNonNegativeNumber(settings.hostZoneOverrideNearMeters, HOST_ZONE_OVERRIDE_NEAR_METERS),
+      hostZoneOverrideMinDwellMs: resolveNonNegativeNumber(
+        Number(settings.hostZoneOverrideMinDwellSeconds) * 1000,
+        HOST_ZONE_OVERRIDE_MIN_DWELL_SECONDS * 1000
+      ),
+      hostZoneOverrideMinRtkDistanceMeters: resolveNonNegativeNumber(
+        settings.hostZoneOverrideMinRtkDistanceMeters,
+        HOST_ZONE_OVERRIDE_MIN_RTK_DISTANCE_METERS
+      )
     };
   }
 
@@ -444,6 +569,179 @@ export class TelemetryProcessor {
       : null;
   }
 
+  _findHostZoneCandidate(zonesConfig, hostPosition, thresholds) {
+    const lat = Number(hostPosition?.lat);
+    const lon = Number(hostPosition?.lon);
+
+    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Array.isArray(zonesConfig)) {
+      return null;
+    }
+
+    const nearMeters = Number(thresholds.hostZoneOverrideNearMeters || 0);
+    const nearby = zonesConfig
+      .map((zone) => {
+        const distanceMeters = distanceToZoneMeters(lat, lon, zone);
+        return {
+          zone,
+          distanceMeters,
+          ingredient: zone?.ingredient || zone?.name || null,
+          key: this._zoneVisitKey(zone, zone?.name || null)
+        };
+      })
+      .filter((candidate) =>
+        candidate.key &&
+        candidate.ingredient &&
+        Number.isFinite(candidate.distanceMeters) &&
+        candidate.distanceMeters <= nearMeters
+      )
+      .sort((left, right) => left.distanceMeters - right.distanceMeters);
+
+    if (!nearby.length) return null;
+
+    const best = nearby[0];
+    const bestIngredientKey = normalizeIngredientKey(best.ingredient);
+    const hasAmbiguousNeighbor = nearby.slice(1).some((candidate) =>
+      normalizeIngredientKey(candidate.ingredient) !== bestIngredientKey &&
+      candidate.distanceMeters <= nearMeters
+    );
+
+    if (hasAmbiguousNeighbor) {
+      return null;
+    }
+
+    return best;
+  }
+
+  _getOrCreateHostZoneCandidate(state, candidate, packetTimeMs, currentWeight) {
+    if (!Array.isArray(state.hostZoneCandidates)) {
+      state.hostZoneCandidates = [];
+    }
+
+    let hostCandidate = state.hostZoneCandidates.find((item) => item.key === candidate.key);
+    if (!hostCandidate) {
+      hostCandidate = {
+        key: candidate.key,
+        zoneId: candidate.zone?.id ?? null,
+        name: candidate.zone?.name || candidate.ingredient || null,
+        ingredient: candidate.ingredient || candidate.zone?.ingredient || candidate.zone?.name || null,
+        firstSeenAtMs: packetTimeMs,
+        lastSeenAtMs: packetTimeMs,
+        dwellMs: 0,
+        maxContinuousDwellMs: 0,
+        samples: 0,
+        minDistanceMeters: candidate.distanceMeters,
+        maxDistanceMeters: candidate.distanceMeters,
+        minWeight: currentWeight,
+        maxWeight: currentWeight,
+        rtkFreshSamples: 0,
+        rtkFarSamples: 0,
+        minRtkDistanceMeters: null,
+        maxRtkDistanceMeters: null
+      };
+      state.hostZoneCandidates.push(hostCandidate);
+    }
+
+    hostCandidate.lastSeenAtMs = packetTimeMs;
+    hostCandidate.name = hostCandidate.name || candidate.zone?.name || candidate.ingredient || null;
+    hostCandidate.ingredient = hostCandidate.ingredient || candidate.ingredient || candidate.zone?.ingredient || candidate.zone?.name || null;
+    hostCandidate.samples = Number(hostCandidate.samples || 0) + 1;
+    hostCandidate.minDistanceMeters = Math.min(
+      Number(hostCandidate.minDistanceMeters ?? candidate.distanceMeters),
+      candidate.distanceMeters
+    );
+    hostCandidate.maxDistanceMeters = Math.max(
+      Number(hostCandidate.maxDistanceMeters ?? candidate.distanceMeters),
+      candidate.distanceMeters
+    );
+    hostCandidate.minWeight = Math.min(Number(hostCandidate.minWeight ?? currentWeight), currentWeight);
+    hostCandidate.maxWeight = Math.max(Number(hostCandidate.maxWeight ?? currentWeight), currentWeight);
+    return hostCandidate;
+  }
+
+  _recordHostZoneCandidate(state, zonesConfig, packetTimeMs, currentWeight, thresholds, options = {}) {
+    const candidate = this._findHostZoneCandidate(zonesConfig, options.hostPosition, thresholds);
+    const activeHostKey = candidate?.key || null;
+    const previousHostKey = state.lastHostZoneKey || null;
+    const previousTimeMs = Number(state.lastHostZoneDwellAtMs);
+    const elapsedMs = Number.isFinite(previousTimeMs)
+      ? Math.max(0, Math.min(30000, packetTimeMs - previousTimeMs))
+      : 0;
+
+    if (previousHostKey && elapsedMs > 0) {
+      const previousCandidate = (state.hostZoneCandidates || []).find((item) => item.key === previousHostKey);
+      if (previousCandidate) {
+        previousCandidate.dwellMs = Number(previousCandidate.dwellMs || 0) + elapsedMs;
+        const continuousDwellMs = previousHostKey === activeHostKey
+          ? Number(state.hostCurrentZoneDwellMs || 0) + elapsedMs
+          : elapsedMs;
+        previousCandidate.maxContinuousDwellMs = Math.max(
+          Number(previousCandidate.maxContinuousDwellMs || 0),
+          continuousDwellMs
+        );
+      }
+    }
+
+    if (previousHostKey && previousHostKey === activeHostKey) {
+      state.hostCurrentZoneDwellMs = Number(state.hostCurrentZoneDwellMs || 0) + elapsedMs;
+    } else {
+      state.hostCurrentZoneDwellMs = 0;
+    }
+
+    if (candidate) {
+      const hostCandidate = this._getOrCreateHostZoneCandidate(state, candidate, packetTimeMs, currentWeight);
+      const rtkPosition = options.rtkPosition || null;
+      const rtkFresh = Boolean(options.rtkFresh);
+      if (rtkFresh && Number.isFinite(Number(rtkPosition?.lat)) && Number.isFinite(Number(rtkPosition?.lon))) {
+        const rtkDistanceMeters = distanceToZoneMeters(Number(rtkPosition.lat), Number(rtkPosition.lon), candidate.zone);
+        hostCandidate.rtkFreshSamples = Number(hostCandidate.rtkFreshSamples || 0) + 1;
+        hostCandidate.minRtkDistanceMeters = hostCandidate.minRtkDistanceMeters === null
+          ? rtkDistanceMeters
+          : Math.min(Number(hostCandidate.minRtkDistanceMeters), rtkDistanceMeters);
+        hostCandidate.maxRtkDistanceMeters = hostCandidate.maxRtkDistanceMeters === null
+          ? rtkDistanceMeters
+          : Math.max(Number(hostCandidate.maxRtkDistanceMeters), rtkDistanceMeters);
+
+        if (rtkDistanceMeters >= thresholds.hostZoneOverrideMinRtkDistanceMeters) {
+          hostCandidate.rtkFarSamples = Number(hostCandidate.rtkFarSamples || 0) + 1;
+        }
+      }
+    }
+
+    state.lastHostZoneKey = activeHostKey;
+    state.lastHostZoneDwellAtMs = packetTimeMs;
+  }
+
+  _pickHostZoneOverride(state, thresholds) {
+    if (!Array.isArray(state?.hostZoneCandidates)) return null;
+
+    const minDwellMs = Number(thresholds.hostZoneOverrideMinDwellMs || 0);
+    const minDeltaKg = Number(thresholds.batchStartThresholdKg || 0);
+
+    const candidates = state.hostZoneCandidates
+      .map((candidate) => ({
+        ...candidate,
+        weightDeltaKg: Number(candidate.maxWeight || 0) - Number(candidate.minWeight || 0)
+      }))
+      .filter((candidate) => {
+        const hasEnoughDwell = Number(candidate.maxContinuousDwellMs || 0) >= minDwellMs;
+        const hasEnoughWeight = Number(candidate.weightDeltaKg || 0) > minDeltaKg;
+        const hasNoFreshRtk = Number(candidate.rtkFreshSamples || 0) <= 0;
+        const hasMostlyFarRtk = Number(candidate.rtkFreshSamples || 0) > 0 &&
+          Number(candidate.rtkFarSamples || 0) / Number(candidate.rtkFreshSamples || 1) >= 0.8;
+
+        return hasEnoughDwell && hasEnoughWeight && (hasNoFreshRtk || hasMostlyFarRtk);
+      })
+      .sort((left, right) => {
+        const weightDiff = Number(right.weightDeltaKg || 0) - Number(left.weightDeltaKg || 0);
+        if (weightDiff !== 0) return weightDiff;
+        const dwellDiff = Number(right.maxContinuousDwellMs || 0) - Number(left.maxContinuousDwellMs || 0);
+        if (dwellDiff !== 0) return dwellDiff;
+        return Number(right.lastSeenAtMs || 0) - Number(left.lastSeenAtMs || 0);
+      });
+
+    return candidates[0]?.ingredient || candidates[0]?.name || null;
+  }
+
   _pickVisitedZoneIngredient(state) {
     if (!Array.isArray(state?.visitedZones)) return null;
 
@@ -468,6 +766,10 @@ export class TelemetryProcessor {
     state.lastZoneDwellAtMs = packetTimeMs;
     state.currentZoneDwellMs = 0;
     state.lastZoneTrackPoint = null;
+    state.hostZoneCandidates = [];
+    state.lastHostZoneKey = null;
+    state.lastHostZoneDwellAtMs = packetTimeMs;
+    state.hostCurrentZoneDwellMs = 0;
   }
 
   _serializeZoneCandidates(state) {
@@ -506,6 +808,31 @@ export class TelemetryProcessor {
       dbActions: [],
       state: this.getState(deviceId)
     };
+  }
+
+  _serializeHostZoneCandidates(state) {
+    if (!Array.isArray(state?.hostZoneCandidates)) return [];
+
+    return state.hostZoneCandidates.map((candidate) => ({
+      name: candidate.name,
+      ingredient: candidate.ingredient,
+      dwellSeconds: Math.round(Number(candidate.dwellMs || 0) / 100) / 10,
+      maxContinuousSeconds: Math.round(Number(candidate.maxContinuousDwellMs || 0) / 100) / 10,
+      weightDeltaKg: Math.round((Number(candidate.maxWeight || 0) - Number(candidate.minWeight || 0)) * 10) / 10,
+      minDistanceMeters: Number.isFinite(Number(candidate.minDistanceMeters))
+        ? Math.round(Number(candidate.minDistanceMeters) * 10) / 10
+        : null,
+      maxDistanceMeters: Number.isFinite(Number(candidate.maxDistanceMeters))
+        ? Math.round(Number(candidate.maxDistanceMeters) * 10) / 10
+        : null,
+      rtkFreshSamples: Number(candidate.rtkFreshSamples || 0),
+      rtkFarSamples: Number(candidate.rtkFarSamples || 0),
+      minRtkDistanceMeters: candidate.minRtkDistanceMeters !== null &&
+        Number.isFinite(Number(candidate.minRtkDistanceMeters))
+        ? Math.round(Number(candidate.minRtkDistanceMeters) * 10) / 10
+        : null,
+      samples: Number(candidate.samples || 0)
+    }));
   }
 
   processLoaderPacket(packet, zonesConfig, settings = {}, options = {}) {
@@ -555,8 +882,12 @@ export class TelemetryProcessor {
     };
   }
 
-  _resolveSegmentIngredient(state) {
-    return this._pickVisitedZoneIngredient(state) || state.currentZone?.ingredient || state.lastIngredientName || 'Unknown';
+  _resolveSegmentIngredient(state, thresholds) {
+    return this._pickHostZoneOverride(state, thresholds) ||
+      this._pickVisitedZoneIngredient(state) ||
+      state.currentZone?.ingredient ||
+      state.lastIngredientName ||
+      'Unknown';
   }
 
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
@@ -579,7 +910,7 @@ export class TelemetryProcessor {
       });
     }
 
-    const ingredientName = this._resolveSegmentIngredient(state);
+    const ingredientName = this._resolveSegmentIngredient(state, thresholds);
     state.isMixing = true;
     state.lastIngredientName = ingredientName;
 
@@ -713,6 +1044,17 @@ export class TelemetryProcessor {
           packet
         );
       }
+      this._recordHostZoneCandidate(
+        state,
+        zonesConfig,
+        packetTimeMs,
+        currentWeight,
+        thresholds,
+        {
+          ...options,
+          hostPosition: options.hostPosition || { lat, lon }
+        }
+      );
       if (activeZoneName) {
         state.lastRealZoneSeenAtMs = packetTimeMs;
       }
@@ -815,7 +1157,7 @@ export class TelemetryProcessor {
     ) {
       state.isBatchStarted = true;
       state.isMixing = true;
-      state.lastIngredientName = this._resolveSegmentIngredient(state);
+      state.lastIngredientName = this._resolveSegmentIngredient(state, thresholds);
 
       result.dbActions.push({
         type: 'START_BATCH',
@@ -919,7 +1261,8 @@ export class TelemetryProcessor {
       lastIngredientName: state.lastIngredientName,
       isBatchStarted: state.isBatchStarted,
       currentMode: this._getCurrentMode(state),
-      zoneCandidates: this._serializeZoneCandidates(state)
+      zoneCandidates: this._serializeZoneCandidates(state),
+      hostZoneCandidates: this._serializeHostZoneCandidates(state)
     };
 
     state.lastAcceptedWeight = currentWeight;
@@ -934,7 +1277,8 @@ export class TelemetryProcessor {
       currentIngredient: state.currentZone?.ingredient || state.lastIngredientName || null,
       isMoving: state.isMoving,
       currentMode: this._getCurrentMode(state),
-      zoneCandidates: this._serializeZoneCandidates(state)
+      zoneCandidates: this._serializeZoneCandidates(state),
+      hostZoneCandidates: this._serializeHostZoneCandidates(state)
     };
   }
 

@@ -229,7 +229,13 @@
                     <div class="card shadow mb-4">
                         <div class="card-header py-3 d-flex flex-column flex-md-row align-items-md-center justify-content-between">
                             <h6 class="m-0 font-weight-bold text-primary">Трек замеса на карте</h6>
-                            <div id="batchTrackMeta" class="small text-muted mt-2 mt-md-0">Загрузка трека...</div>
+                            <div class="batch-track-toolbar mt-2 mt-md-0">
+                                <div id="batchTrackMeta" class="small text-muted">Загрузка трека...</div>
+                                <button id="batchTrackResetButton" type="button" class="btn btn-sm btn-outline-secondary d-none" title="Показать весь трек">
+                                    <i class="fas fa-route mr-1"></i>
+                                    Весь трек
+                                </button>
+                            </div>
                         </div>
                         <div class="card-body">
                             <div class="dashboard-map-wrap batch-track-map-wrap">

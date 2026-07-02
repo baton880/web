@@ -744,6 +744,22 @@
     height: 360px;
 }
 
+.batch-track-toolbar {
+    display: flex;
+    align-items: center;
+    justify-content: flex-end;
+    gap: 0.75rem;
+    flex-wrap: wrap;
+}
+
+.batch-track-toolbar .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 2rem;
+    white-space: nowrap;
+}
+
 .batch-track-empty {
     position: absolute;
     inset: 0;
@@ -757,6 +773,25 @@
     padding: 1rem !important;
     text-align: center;
     color: #858796;
+}
+
+.batch-ingredient-row {
+    cursor: pointer;
+}
+
+.batch-ingredient-row:hover td,
+.batch-ingredient-row:focus td {
+    background: #f5f9ef;
+}
+
+.batch-ingredient-row:focus {
+    outline: 2px solid #8fbf4d;
+    outline-offset: -2px;
+}
+
+.batch-ingredient-row--selected td {
+    background: #edf6df;
+    box-shadow: inset 3px 0 0 #5F9815;
 }
 
 .batch-edit-state {
@@ -3478,6 +3513,18 @@ textarea.form-control,
 .batch-table-row:hover td,
 .admin-users-table tbody tr:hover td {
   background: var(--accent-yellow-bg) !important;
+}
+
+.batch-ingredient-row:hover td,
+.batch-ingredient-row:focus td {
+  background: #f5f9ef !important;
+}
+
+.batch-ingredient-row--selected td,
+.batch-ingredient-row--selected:hover td,
+.batch-ingredient-row--selected:focus td {
+  background: #edf6df !important;
+  box-shadow: inset 3px 0 0 #5F9815;
 }
 
 .dashboard-status-pill,

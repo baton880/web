@@ -409,6 +409,8 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
 
         const includeRtk = req.query.includeRtk === 'true' || req.query.includeRtk === '1';
         const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 60);
+        const hostLookbackSeconds = parsePositiveInteger(req.query.hostLookbackSeconds, 0);
+        const hostWindowStart = new Date(new Date(batch.startTime).getTime() - hostLookbackSeconds * 1000);
 
         // Ищем все точки телеметрии за время этого замеса
         const hostTrack = await prisma.telemetry.findMany({
@@ -432,18 +434,40 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             return res.json(hostTrack);
         }
 
+        const hostContextTrack = hostLookbackSeconds > 0
+            ? await prisma.telemetry.findMany({
+                where: {
+                    deviceId: batch.deviceId,
+                    timestamp: {
+                        gte: hostWindowStart,
+                        lte: batch.endTime || new Date()
+                    }
+                },
+                select: {
+                    timestamp: true,
+                    weight: true,
+                    lat: true,
+                    lon: true
+                },
+                orderBy: { timestamp: 'asc' }
+            })
+            : hostTrack;
+
         const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
             lookbackSeconds: loaderLookbackSeconds
         });
 
         res.json({
             hostTrack,
+            hostContextTrack,
             loaderTrack,
             meta: {
                 batchId: batch.id,
                 deviceId: batch.deviceId,
+                hostLookbackSeconds,
                 loaderLookbackSeconds,
                 hostPoints: hostTrack.length,
+                hostContextPoints: hostContextTrack.length,
                 loaderPoints: loaderTrack.length
             }
         });
