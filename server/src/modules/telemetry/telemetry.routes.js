@@ -80,7 +80,7 @@ function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryS
   let streak = 0
   for (const point of Array.isArray(recentPoints) ? recentPoints : []) {
     const speed = Number(point?.speedKmh)
-    if (Number.isFinite(speed) && speed > speedThreshold) {
+    if (Number.isFinite(speed) && speed >= speedThreshold) {
       streak += 1
       if (streak >= confirmPackets) {
         return true
@@ -251,10 +251,15 @@ router.post('/', async (req, res) => {
     const autoCloseNegativeStreak = Number(telemetrySettings.autoCloseNegativeStreak) > 0
       ? Number(telemetrySettings.autoCloseNegativeStreak)
       : DEFAULT_TELEMETRY_SETTINGS.autoCloseNegativeStreak
+    const emptyVehicleThresholdKg = Number(telemetrySettings.emptyVehicleThresholdKg) > 0
+      ? Number(telemetrySettings.emptyVehicleThresholdKg)
+      : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
     const effectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
       deviceId,
-      referenceTime: packet.timestamp
+      referenceTime: packet.timestamp,
+      loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+      loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
     });
     const processorPacket = {
       ...packet,
@@ -338,9 +343,10 @@ router.post('/', async (req, res) => {
         switch (action.type) {
           case 'START_BATCH':
             if (!activeBatch) {
+              const actionStartTime = action.startTime ? new Date(action.startTime) : telemetry.timestamp
               const initialBatchData = {
                 deviceId,
-                startTime: telemetry.timestamp,
+                startTime: Number.isNaN(actionStartTime.getTime()) ? telemetry.timestamp : actionStartTime,
                 startWeight: Number(action.startWeight ?? telemetry.weight),
                 hasViolations: false
               }
@@ -361,9 +367,10 @@ router.post('/', async (req, res) => {
 
           case 'ADD_INGREDIENT':
             if (!activeBatch) {
+              const actionStartTime = action.startTime ? new Date(action.startTime) : telemetry.timestamp
               const initialBatchData = {
                 deviceId,
-                startTime: telemetry.timestamp,
+                startTime: Number.isNaN(actionStartTime.getTime()) ? telemetry.timestamp : actionStartTime,
                 startWeight: telemetry.weight,
                 hasViolations: false
               }
@@ -425,7 +432,9 @@ router.post('/', async (req, res) => {
 
           case 'UPDATE_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
+              if (Number(action.endWeight ?? telemetry.weight) >= emptyVehicleThresholdKg) {
+                await bindBatchToResolvedGroup()
+              }
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: action.endWeight }
@@ -456,7 +465,6 @@ router.post('/', async (req, res) => {
 
           case 'COMPLETE_BATCH':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
               const completedBatchId = activeBatch.id
               await tx.batch.update({
                 where: { id: activeBatch.id },
@@ -534,7 +542,6 @@ router.post('/', async (req, res) => {
 
             if (shouldAutoCloseByNegative || shouldAutoCloseByEmpty) {
               const closedBatchId = activeBatch.id
-              await bindBatchToResolvedGroup()
               await tx.batch.update({
                 where: { id: closedBatchId },
                 data: {
@@ -660,7 +667,7 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
     const memoryState = telemetryProcessor.getState(data.deviceId);
-    const [activeBatch, activeZones, effectivePosition, telemetrySettings] = await Promise.all([
+    const [activeBatch, activeZones, telemetrySettings] = await Promise.all([
       prisma.batch.findFirst({
       where: { deviceId: data.deviceId, endTime: null },
       include: {
@@ -679,12 +686,14 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
       orderBy: { startTime: 'desc' }
       }),
       prisma.storageZone.findMany({ where: { active: true } }),
-      resolveEffectiveCoordinates(prisma, data, {
-        deviceId: data.deviceId,
-        referenceTime: data.timestamp
-      }),
       getTelemetrySettings(prisma)
     ]);
+    const effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
+      deviceId: data.deviceId,
+      referenceTime: data.timestamp,
+      loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+      loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
+    });
     const detectedZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
 
     const machineState = await inferMachineStateFromDatabase(

@@ -536,6 +536,16 @@
                                         <small class="form-text text-muted">Сколько подряд пакетов выше порога нужно, чтобы считать технику в движении и не учитывать вес.</small>
                                     </div>
                                     <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryLoaderMaxDistanceMeters">Погрузчик: дистанция до Хозяина, м</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryLoaderMaxDistanceMeters" name="loaderMaxDistanceMeters" required>
+                                        <small class="form-text text-muted">Координаты погрузчика учитываются в расчете только если он ближе этого радиуса к Хозяину.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryLoaderOfflineTimeoutMinutes">Погрузчик: нет связи, мин</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryLoaderOfflineTimeoutMinutes" name="loaderOfflineTimeoutMinutes" required>
+                                        <small class="form-text text-muted">Если погрузчик не присылал данные дольше этого времени, Хозяин считает зону по своему GPS.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryAnomalyThresholdKg">Скачок аномалии, кг</label>
                                         <input type="number" min="1" step="1" class="form-control" id="telemetryAnomalyThresholdKg" name="anomalyThresholdKg" required>
                                         <small class="form-text text-muted">Если скачок между пакетами выше порога, пакет не принимается сразу.</small>

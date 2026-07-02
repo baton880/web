@@ -2,6 +2,7 @@ import { Router } from 'express';
 import prisma from '../../database.js';
 import { authenticate, requireAdmin, requireWriteAccess } from '../../middleware/auth.js';
 import { getZoneByCoordinates, isFreshTimestamp, resolveEffectiveCoordinates } from './telemetry-helpers.js';
+import { getTelemetrySettings } from './telemetry-settings.js';
 import { syncTechnicalWarnings } from './technical-warning-service.js';
 
 const router = Router();
@@ -48,7 +49,7 @@ function toTrackedWarning(baseWarning, scopeKey, deviceId = null) {
 
 router.get('/current', authenticate, requireAdmin, async (req, res) => {
     try {
-        const [latestHost, latestRtk, activeZones] = await Promise.all([
+        const [latestHost, latestRtk, activeZones, telemetrySettings] = await Promise.all([
             prisma.telemetry.findFirst({
                 orderBy: { timestamp: 'desc' },
                 select: {
@@ -73,7 +74,8 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             }),
             prisma.storageZone.findMany({
                 where: { active: true }
-            })
+            }),
+            getTelemetrySettings(prisma)
         ]);
 
         const items = [];
@@ -117,7 +119,8 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             trackedWarnings.push(toTrackedWarning(warning, latestHost.deviceId, latestHost.deviceId));
         }
 
-        if (!latestRtk || !isFreshTimestamp(latestRtk.timestamp)) {
+        const loaderFreshnessMs = Number(telemetrySettings.loaderOfflineTimeoutMinutes || 15) * 60 * 1000;
+        if (!latestRtk || !isFreshTimestamp(latestRtk.timestamp, loaderFreshnessMs)) {
             const warning = {
                 code: 'no_rtk',
                 title: 'Нет RTK',
@@ -133,7 +136,9 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
         if (activeZones.length > 0 && hasGpsCoordinates) {
             const effectivePosition = await resolveEffectiveCoordinates(prisma, latestHost, {
                 deviceId: latestHost.deviceId,
-                referenceTime: latestHost.timestamp
+                referenceTime: latestHost.timestamp,
+                loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+                loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
             });
             const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
             if (!currentZone) {
