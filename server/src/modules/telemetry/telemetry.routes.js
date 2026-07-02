@@ -20,6 +20,12 @@ function normalizeZoneType(value) {
   return String(value).trim().toUpperCase()
 }
 
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function isBarnZone(zone, linkedBarnZoneIds = new Set()) {
   if (!zone) return false
   const zoneType = normalizeZoneType(zone.zoneType)
@@ -406,10 +412,10 @@ router.post('/', async (req, res) => {
                   data: {
                     actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
                     startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
-                    startLat: latestIngredient.startLat ?? (Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null),
-                    startLon: latestIngredient.startLon ?? (Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null),
-                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
-                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    startLat: latestIngredient.startLat ?? finiteNumberOrNull(action.startLat),
+                    startLon: latestIngredient.startLon ?? finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
                     addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : telemetry.timestamp
                   }
                 })
@@ -422,10 +428,10 @@ router.post('/', async (req, res) => {
                     ingredientName,
                     actualWeight,
                     startedAt: actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null,
-                    startLat: Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null,
-                    startLon: Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null,
-                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
-                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    startLat: finiteNumberOrNull(action.startLat),
+                    startLon: finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
                     addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : telemetry.timestamp
                   }
                 })

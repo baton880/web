@@ -231,6 +231,13 @@ export class TelemetryProcessor {
     }
   }
 
+  _getBatchStartWeight(state) {
+    if (state.recoveredOutsideLoadingContext) {
+      return 0;
+    }
+    return Math.round(Number(state.zoneStartWeight || 0));
+  }
+
   _getCurrentMode(state) {
     if (state.isUnloading) return 'unloading';
     if (state.isMixing) return 'loading';
@@ -652,11 +659,12 @@ export class TelemetryProcessor {
       state.isBatchStarted = true;
       result.dbActions.push({
         type: 'START_BATCH',
-        startWeight: Math.round(state.zoneStartWeight),
+        startWeight: this._getBatchStartWeight(state),
         startTime: Number.isFinite(Number(state.zoneStartTimeMs))
           ? new Date(Number(state.zoneStartTimeMs)).toISOString()
           : null
       });
+      state.recoveredOutsideLoadingContext = false;
     }
 
     const ingredientName = this._resolveSegmentIngredient(state);
@@ -965,11 +973,12 @@ export class TelemetryProcessor {
 
       result.dbActions.push({
         type: 'START_BATCH',
-        startWeight: Math.round(state.zoneStartWeight),
+        startWeight: this._getBatchStartWeight(state),
         startTime: Number.isFinite(Number(state.zoneStartTimeMs))
           ? new Date(Number(state.zoneStartTimeMs)).toISOString()
           : null
       });
+      state.recoveredOutsideLoadingContext = false;
     }
 
     // Защита от недовыгрузки

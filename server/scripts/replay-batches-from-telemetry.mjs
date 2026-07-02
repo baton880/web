@@ -21,6 +21,12 @@ function parseBoolean(value) {
   return Boolean(value)
 }
 
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
 function normalizeZoneType(value) {
   if (!value) return ''
   return String(value).trim().toUpperCase()
@@ -442,10 +448,10 @@ async function main() {
                   data: {
                     actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
                     startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
-                    startLat: latestIngredient.startLat ?? (Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null),
-                    startLon: latestIngredient.startLon ?? (Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null),
-                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
-                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    startLat: latestIngredient.startLat ?? finiteNumberOrNull(action.startLat),
+                    startLon: latestIngredient.startLon ?? finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
                     addedAt: Number.isNaN(actionEndedAt?.getTime?.()) ? packet.timestamp : actionEndedAt
                   }
                 })
@@ -458,10 +464,10 @@ async function main() {
                     ingredientName,
                     actualWeight,
                     startedAt: actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null,
-                    startLat: Number.isFinite(Number(action.startLat)) ? Number(action.startLat) : null,
-                    startLon: Number.isFinite(Number(action.startLon)) ? Number(action.startLon) : null,
-                    endLat: Number.isFinite(Number(action.endLat)) ? Number(action.endLat) : null,
-                    endLon: Number.isFinite(Number(action.endLon)) ? Number(action.endLon) : null,
+                    startLat: finiteNumberOrNull(action.startLat),
+                    startLon: finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
                     addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : packet.timestamp
                   }
                 })
