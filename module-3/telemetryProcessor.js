@@ -388,7 +388,7 @@ export class TelemetryProcessor {
       endLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null
     });
     state.recoveryMassRecorded = true;
-    state.lastIngredientName = null;
+    state.lastIngredientName = 'Восстановление терминала';
     return true;
   }
 
@@ -840,6 +840,13 @@ export class TelemetryProcessor {
     );
   }
 
+  _isTerminalRecoveryContext(state, options = {}) {
+    return !this._hasLoadingContext(state, options) && (
+      state.recoveredOutsideLoadingContext ||
+      normalizeIngredientName(state.lastIngredientName) === normalizeIngredientName('Восстановление терминала')
+    );
+  }
+
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
     if (options.suppressLoading && !state.currentZone) {
       return false;
@@ -880,9 +887,14 @@ export class TelemetryProcessor {
       state.recoveredOutsideLoadingContext = false;
     }
 
-    const ingredientName = this._resolveSegmentIngredient(state, options.expectedIngredients, {
-      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
-    });
+    const ingredientName = this._isTerminalRecoveryContext(state, options)
+      ? 'Восстановление терминала'
+      : this._resolveSegmentIngredient(state, options.expectedIngredients, {
+        allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
+      });
+    if (normalizeIngredientName(ingredientName) === 'unknown') {
+      return false;
+    }
     state.isMixing = true;
     state.lastIngredientName = ingredientName;
     const ingredientKey = normalizeIngredientName(ingredientName);
@@ -1037,9 +1049,30 @@ export class TelemetryProcessor {
     }
 
     if (movement.exitedMoving && state.loadingStartTimeMs !== null && !state.isUnloading) {
+      const motionActiveZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+      const motionActiveZoneName = motionActiveZone?.name || null;
+      const confirmedLoadingZoneName = state.confirmedZoneName || null;
+      const segmentPeakWeight = Number(state.segmentPeakWeight);
+      const usePreviousZonePeak = Boolean(
+        motionActiveZoneName &&
+        confirmedLoadingZoneName &&
+        motionActiveZoneName !== confirmedLoadingZoneName &&
+        Number.isFinite(segmentPeakWeight) &&
+        currentWeight - segmentPeakWeight > thresholds.batchStartThresholdKg
+      );
+      const segmentEndWeight = usePreviousZonePeak ? segmentPeakWeight : currentWeight;
+      const segmentEndTimeMs = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakTimeMs))
+        ? Number(state.segmentPeakTimeMs)
+        : packetTimeMs;
+      const segmentEndLat = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakLat))
+        ? Number(state.segmentPeakLat)
+        : lat;
+      const segmentEndLon = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakLon))
+        ? Number(state.segmentPeakLon)
+        : lon;
       const flushed = this._flushCurrentSegment(
         state,
-        currentWeight,
+        segmentEndWeight,
         thresholds,
         result,
         {
@@ -1050,14 +1083,14 @@ export class TelemetryProcessor {
           lon,
           expectedIngredients,
           allowVisitedZoneIngredient,
-          segmentEndWeight: currentWeight,
-          segmentEndTimeMs: packetTimeMs,
-          segmentEndLat: lat,
-          segmentEndLon: lon
+          segmentEndWeight,
+          segmentEndTimeMs,
+          segmentEndLat,
+          segmentEndLon
         }
       );
       if (flushed) {
-        this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
+        this._setZoneBaseline(state, segmentEndWeight, segmentEndTimeMs, segmentEndLat, segmentEndLon);
       }
     }
 
