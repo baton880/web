@@ -1,5 +1,6 @@
 import prisma from '../../database.js';
 import { aggregateFacts, buildIngredientSummary, getBatchPlan } from '../batches/batch-violations.js';
+import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 
 export const DEFAULT_LIMIT = 500;
 export const MAX_LIMIT = 1000;
@@ -93,7 +94,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         };
     }
 
-    const batches = await prisma.batch.findMany({
+    const [batches, telemetrySettings] = await Promise.all([
+        prisma.batch.findMany({
         where,
         include: {
             group: {
@@ -146,9 +148,14 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                     plannedWeight: true,
                     actualWeight: true,
                     isViolation: true,
+                    startedAt: true,
                     addedAt: true
                 },
-                orderBy: { addedAt: 'asc' }
+                orderBy: [
+                    { startedAt: 'asc' },
+                    { addedAt: 'asc' },
+                    { id: 'asc' }
+                ]
             },
             violations: {
                 where: { status: { in: WORKFLOW_STATUSES_ALL } },
@@ -160,7 +167,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         },
         orderBy: { startTime: 'desc' },
         take: Math.min(limit, MAX_LIMIT)
-    });
+        }),
+        getTelemetrySettings(prisma)
+    ]);
 
     const violations = await prisma.violation.findMany({
         where: {
@@ -223,10 +232,10 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             violationsCount,
             openViolationsCount,
             resolvedViolationsCount: resolvedForBatchCount,
-            hasViolations: violationsCount > 0
+            hasViolations: openViolationsCount > 0
         });
 
-        const componentRows = buildIngredientSummary(batch);
+        const componentRows = buildIngredientSummary(batch, telemetrySettings);
         for (const componentRow of componentRows) {
             if (componentRow.isCompound && Array.isArray(componentRow.components) && componentRow.components.length > 0) {
                 for (const child of componentRow.components) {
@@ -242,7 +251,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         plan: round1(child.plan || 0),
                         fact: round1(child.fact || 0),
                         deviation: round1((child.fact || 0) - (child.plan || 0)),
-                        deviationPercent: child.deviation_percent ?? 0
+                        deviationPercent: child.deviation_percent ?? 0,
+                        isViolation: Boolean(child.isViolation ?? child.is_violation)
                     });
                 }
                 continue;
@@ -260,7 +270,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 plan: round1(componentRow.plan || 0),
                 fact: round1(componentRow.fact || 0),
                 deviation: round1((componentRow.fact || 0) - (componentRow.plan || 0)),
-                deviationPercent: componentRow.deviation_percent ?? 0
+                deviationPercent: componentRow.deviation_percent ?? 0,
+                isViolation: Boolean(componentRow.isViolation ?? componentRow.is_violation)
             });
         }
     }
@@ -309,7 +320,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
     }
 
     const batchesWithViolationsCount = reportBatches.reduce((sum, item) => (
-        sum + (item.violationsCount > 0 ? 1 : 0)
+        sum + (item.openViolationsCount > 0 ? 1 : 0)
     ), 0);
 
     return {

@@ -9,6 +9,7 @@ import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../..
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
+import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -19,6 +20,12 @@ const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 function normalizeZoneType(value) {
   if (!value) return ''
   return String(value).trim().toUpperCase()
+}
+
+function finiteNumberOrNull(value) {
+  if (value === null || value === undefined || value === '') return null
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? parsed : null
 }
 
 function isBarnZone(zone, linkedBarnZoneIds = new Set()) {
@@ -34,6 +41,19 @@ function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
   const zoneType = normalizeZoneType(zone.zoneType)
   if (!zoneType) return true
   return zoneType === 'STORAGE' || zoneType === 'FEED' || zoneType === 'LOADING'
+}
+
+function resolveExpectedIngredientsFromBatch(batch) {
+  const ingredients = batch?.ration?.ingredients?.length
+    ? batch.ration.ingredients
+    : batch?.group?.ration?.ingredients
+
+  return Array.isArray(ingredients)
+    ? ingredients.map((ingredient) => ({
+      name: ingredient.name,
+      sortOrder: Number(ingredient.sortOrder || 0)
+    }))
+    : []
 }
 
 function parseBoolean(value) {
@@ -81,7 +101,7 @@ function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryS
   let streak = 0
   for (const point of Array.isArray(recentPoints) ? recentPoints : []) {
     const speed = Number(point?.speedKmh)
-    if (Number.isFinite(speed) && speed > speedThreshold) {
+    if (Number.isFinite(speed) && speed >= speedThreshold) {
       streak += 1
       if (streak >= confirmPackets) {
         return true
@@ -230,13 +250,21 @@ router.post('/', async (req, res) => {
     const deviceId = packet.deviceId;
 
     // 1. Достаем геозоны из базы
-    const [activeZones, groupsWithZones, telemetrySettings] = await Promise.all([
+    const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints] = await Promise.all([
       prisma.storageZone.findMany({ where: { active: true } }),
       prisma.livestockGroup.findMany({
         where: { storageZoneId: { not: null } },
         select: { storageZoneId: true }
       }),
-      getTelemetrySettings(prisma)
+      getTelemetrySettings(prisma),
+      prisma.batch.findFirst({
+        where: { deviceId, endTime: null },
+        orderBy: { startTime: 'desc' },
+        include: {
+          ration: { include: { ingredients: true } },
+          group: { include: { ration: { include: { ingredients: true } } } }
+        }
+      })
     ]);
     const linkedBarnZoneIds = new Set(
       groupsWithZones
@@ -252,10 +280,15 @@ router.post('/', async (req, res) => {
     const autoCloseNegativeStreak = Number(telemetrySettings.autoCloseNegativeStreak) > 0
       ? Number(telemetrySettings.autoCloseNegativeStreak)
       : DEFAULT_TELEMETRY_SETTINGS.autoCloseNegativeStreak
+    const emptyVehicleThresholdKg = Number(telemetrySettings.emptyVehicleThresholdKg) > 0
+      ? Number(telemetrySettings.emptyVehicleThresholdKg)
+      : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
     const effectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
       deviceId,
-      referenceTime: packet.timestamp
+      referenceTime: packet.timestamp,
+      loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+      loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
     });
     const processorPacket = {
       ...packet,
@@ -272,17 +305,8 @@ router.post('/', async (req, res) => {
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
       suppressLoading,
       skipZoneVisit: effectivePosition.source === 'rtk',
-      hostPosition: {
-        lat: Number(packet.lat),
-        lon: Number(packet.lon)
-      },
-      rtkPosition: effectivePosition.rtkPoint
-        ? {
-            lat: Number(effectivePosition.rtkPoint.lat),
-            lon: Number(effectivePosition.rtkPoint.lon)
-          }
-        : null,
-      rtkFresh: effectivePosition.source === 'rtk'
+      allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
+      expectedIngredients: resolveExpectedIngredientsFromBatch(activeBatchForHints)
     });
 
     if (!result.isValid) {
@@ -336,12 +360,22 @@ router.post('/', async (req, res) => {
         }
 
         if (!Object.keys(patch).length) {
+          await alignAmbiguousIngredientsWithRation(tx, {
+            batchId: activeBatch.id,
+            expectedIngredients: resolvedGroup.ration?.ingredients || [],
+            loadingZones
+          })
           return
         }
 
         activeBatch = await tx.batch.update({
           where: { id: activeBatch.id },
           data: patch
+        })
+        await alignAmbiguousIngredientsWithRation(tx, {
+          batchId: activeBatch.id,
+          expectedIngredients: resolvedGroup.ration?.ingredients || [],
+          loadingZones
         })
         batchIdsToRecalculate.add(activeBatch.id)
       }
@@ -350,9 +384,10 @@ router.post('/', async (req, res) => {
         switch (action.type) {
           case 'START_BATCH':
             if (!activeBatch) {
+              const actionStartTime = action.startTime ? new Date(action.startTime) : telemetry.timestamp
               const initialBatchData = {
                 deviceId,
-                startTime: telemetry.timestamp,
+                startTime: Number.isNaN(actionStartTime.getTime()) ? telemetry.timestamp : actionStartTime,
                 startWeight: Number(action.startWeight ?? telemetry.weight),
                 hasViolations: false
               }
@@ -373,9 +408,10 @@ router.post('/', async (req, res) => {
 
           case 'ADD_INGREDIENT':
             if (!activeBatch) {
+              const actionStartTime = action.startTime ? new Date(action.startTime) : telemetry.timestamp
               const initialBatchData = {
                 deviceId,
-                startTime: telemetry.timestamp,
+                startTime: Number.isNaN(actionStartTime.getTime()) ? telemetry.timestamp : actionStartTime,
                 startWeight: telemetry.weight,
                 hasViolations: false
               }
@@ -395,15 +431,17 @@ router.post('/', async (req, res) => {
             {
               const ingredientName = String(action.ingredientName || '').trim() || 'Unknown'
               const actualWeight = Number(action.actualWeight || 0)
-              const ingredientAddedAt = telemetry.timestamp instanceof Date
-                ? telemetry.timestamp
-                : new Date(telemetry.timestamp)
+              const actionStartedAt = action.startTime ? new Date(action.startTime) : null
+              const actionEndedAt = action.endTime ? new Date(action.endTime) : telemetry.timestamp
+              const effectiveIngredientAddedAt = actionEndedAt && !Number.isNaN(actionEndedAt.getTime())
+                ? actionEndedAt
+                : telemetry.timestamp
               const latestIngredient = await tx.batchIngredient.findFirst({
                 where: { batchId: activeBatch.id },
                 orderBy: { addedAt: 'desc' }
               })
               const latestAddedAtMs = new Date(latestIngredient?.addedAt || 0).getTime()
-              const ingredientAddedAtMs = ingredientAddedAt.getTime()
+              const ingredientAddedAtMs = new Date(effectiveIngredientAddedAt).getTime()
               const timeSinceLatestMs = ingredientAddedAtMs - latestAddedAtMs
               const isSameIngredient = latestIngredient &&
                 normalizeIngredientName(latestIngredient.ingredientName) === normalizeIngredientName(ingredientName)
@@ -416,7 +454,13 @@ router.post('/', async (req, res) => {
                 await tx.batchIngredient.update({
                   where: { id: latestIngredient.id },
                   data: {
-                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight
+                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
+                    startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
+                    startLat: latestIngredient.startLat ?? finiteNumberOrNull(action.startLat),
+                    startLon: latestIngredient.startLon ?? finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
+                    addedAt: actionEndedAt && !Number.isNaN(actionEndedAt.getTime()) ? actionEndedAt : telemetry.timestamp
                   }
                 })
               } else {
@@ -425,7 +469,12 @@ router.post('/', async (req, res) => {
                     batchId: activeBatch.id,
                     ingredientName,
                     actualWeight,
-                    addedAt: ingredientAddedAt
+                    startedAt: actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null,
+                    startLat: finiteNumberOrNull(action.startLat),
+                    startLon: finiteNumberOrNull(action.startLon),
+                    endLat: finiteNumberOrNull(action.endLat),
+                    endLon: finiteNumberOrNull(action.endLon),
+                    addedAt: effectiveIngredientAddedAt
                   }
                 })
               }
@@ -447,7 +496,9 @@ router.post('/', async (req, res) => {
 
           case 'UPDATE_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
+              if (Number(action.endWeight ?? telemetry.weight) >= emptyVehicleThresholdKg) {
+                await bindBatchToResolvedGroup()
+              }
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: action.endWeight }
@@ -478,7 +529,6 @@ router.post('/', async (req, res) => {
 
           case 'COMPLETE_BATCH':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
               const completedBatchId = activeBatch.id
               await tx.batch.update({
                 where: { id: activeBatch.id },
@@ -556,7 +606,6 @@ router.post('/', async (req, res) => {
 
             if (shouldAutoCloseByNegative || shouldAutoCloseByEmpty) {
               const closedBatchId = activeBatch.id
-              await bindBatchToResolvedGroup()
               await tx.batch.update({
                 where: { id: closedBatchId },
                 data: {
@@ -682,7 +731,7 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
     const memoryState = telemetryProcessor.getState(data.deviceId);
-    const [activeBatch, activeZones, effectivePosition, telemetrySettings] = await Promise.all([
+    const [activeBatch, activeZones, telemetrySettings] = await Promise.all([
       prisma.batch.findFirst({
       where: { deviceId: data.deviceId, endTime: null },
       include: {
@@ -701,12 +750,14 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
       orderBy: { startTime: 'desc' }
       }),
       prisma.storageZone.findMany({ where: { active: true } }),
-      resolveEffectiveCoordinates(prisma, data, {
-        deviceId: data.deviceId,
-        referenceTime: data.timestamp
-      }),
       getTelemetrySettings(prisma)
     ]);
+    const effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
+      deviceId: data.deviceId,
+      referenceTime: data.timestamp,
+      loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+      loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
+    });
     const detectedZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
 
     const machineState = await inferMachineStateFromDatabase(

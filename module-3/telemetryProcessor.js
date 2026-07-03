@@ -1,5 +1,6 @@
 import { calculateHaversine, detectZoneObject } from '../module-1/geo.js';
 import { isValidLocation } from '../module-1/validator.js';
+import { normalizeIngredientName } from '../module-2/rationManager.js';
 import {
   BATCH_START_THRESHOLD_KG,
   LEFTOVER_THRESHOLD_KG,
@@ -23,11 +24,13 @@ import {
   ZONE_ENTRY_REAR_ANGLE_DEG,
   SQUARE_HEADING_SCORE_PER_SECOND,
   SQUARE_HEADING_SCORE_CAP,
-  SQUARE_HEADING_MAX_ANGLE_DEG,
-  HOST_ZONE_OVERRIDE_NEAR_METERS,
-  HOST_ZONE_OVERRIDE_MIN_DWELL_SECONDS,
-  HOST_ZONE_OVERRIDE_MIN_RTK_DISTANCE_METERS
+  SQUARE_HEADING_MAX_ANGLE_DEG
 } from './config.js';
+
+const LOADING_START_CONFIRM_PACKETS = 2;
+const MIN_LOADING_IDLE_CLOSE_MS = 15000;
+const FIRST_BATCH_START_MARGIN_MIN_KG = 5;
+const FIRST_BATCH_START_MARGIN_RATIO = 0.15;
 
 function normalizeDegrees(value) {
   const parsed = Number(value);
@@ -43,6 +46,37 @@ function angleDiffDeg(first, second) {
 
   const diff = Math.abs(normalizedFirst - normalizedSecond) % 360;
   return diff > 180 ? 360 - diff : diff;
+}
+
+function detectZoneWithRadiusFallback(lat, lon, zonesConfig = []) {
+  const exactZone = detectZoneObject(lat, lon, zonesConfig);
+  if (exactZone) return exactZone;
+
+  let closestZone = null;
+  let closestDistance = Number.POSITIVE_INFINITY;
+
+  for (const zone of zonesConfig) {
+    const zoneLat = Number(zone?.lat);
+    const zoneLon = Number(zone?.lon);
+    const radius = Number(zone?.radius);
+
+    if (
+      !Number.isFinite(zoneLat) ||
+      !Number.isFinite(zoneLon) ||
+      !Number.isFinite(radius) ||
+      radius <= 0
+    ) {
+      continue;
+    }
+
+    const distance = calculateHaversine(lat, lon, zoneLat, zoneLon);
+    if (distance <= radius && distance < closestDistance) {
+      closestZone = zone;
+      closestDistance = distance;
+    }
+  }
+
+  return closestZone;
 }
 
 function calculateBearingDeg(lat1, lon1, lat2, lon2) {
@@ -80,115 +114,6 @@ function parsePolygonCoords(value) {
   });
 
   return coords.every(Boolean) ? coords : null;
-}
-
-function normalizeIngredientKey(value) {
-  return String(value || '').trim().toLowerCase();
-}
-
-function isPointInsidePolygon(lat, lon, polygonCoords = []) {
-  let isInside = false;
-
-  for (let i = 0, j = polygonCoords.length - 1; i < polygonCoords.length; j = i++) {
-    const yi = Number(polygonCoords[i]?.[0]);
-    const xi = Number(polygonCoords[i]?.[1]);
-    const yj = Number(polygonCoords[j]?.[0]);
-    const xj = Number(polygonCoords[j]?.[1]);
-
-    const intersects = ((yi > lat) !== (yj > lat)) &&
-      (lon < ((xj - xi) * (lat - yi)) / ((yj - yi) || Number.EPSILON) + xi);
-
-    if (intersects) {
-      isInside = !isInside;
-    }
-  }
-
-  return isInside;
-}
-
-function distanceToSegmentMeters(lat, lon, start, end) {
-  const lat1 = Number(start?.[0]);
-  const lon1 = Number(start?.[1]);
-  const lat2 = Number(end?.[0]);
-  const lon2 = Number(end?.[1]);
-
-  if (
-    !Number.isFinite(lat1) ||
-    !Number.isFinite(lon1) ||
-    !Number.isFinite(lat2) ||
-    !Number.isFinite(lon2)
-  ) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  const metersPerLat = 111320;
-  const metersPerLon = Math.max(Math.cos(lat * Math.PI / 180) * 111320, 1);
-  const px = 0;
-  const py = 0;
-  const ax = (lon1 - lon) * metersPerLon;
-  const ay = (lat1 - lat) * metersPerLat;
-  const bx = (lon2 - lon) * metersPerLon;
-  const by = (lat2 - lat) * metersPerLat;
-  const abx = bx - ax;
-  const aby = by - ay;
-  const abLengthSq = abx * abx + aby * aby;
-
-  if (abLengthSq <= Number.EPSILON) {
-    return Math.hypot(ax - px, ay - py);
-  }
-
-  const t = Math.max(0, Math.min(1, ((px - ax) * abx + (py - ay) * aby) / abLengthSq));
-  return Math.hypot(ax + abx * t - px, ay + aby * t - py);
-}
-
-function distanceToZoneMeters(lat, lon, zoneObject) {
-  const numericLat = Number(lat);
-  const numericLon = Number(lon);
-
-  if (!Number.isFinite(numericLat) || !Number.isFinite(numericLon) || !zoneObject) {
-    return Number.POSITIVE_INFINITY;
-  }
-
-  const shapeType = String(zoneObject?.shapeType || 'CIRCLE').trim().toUpperCase();
-  const polygonCoords = shapeType === 'SQUARE' ? parsePolygonCoords(zoneObject?.polygonCoords) : null;
-
-  if (polygonCoords && polygonCoords.length >= 3) {
-    if (isPointInsidePolygon(numericLat, numericLon, polygonCoords)) {
-      return 0;
-    }
-
-    return polygonCoords.reduce((minDistance, point, index) => {
-      const nextPoint = polygonCoords[(index + 1) % polygonCoords.length];
-      return Math.min(minDistance, distanceToSegmentMeters(numericLat, numericLon, point, nextPoint));
-    }, Number.POSITIVE_INFINITY);
-  }
-
-  if (
-    shapeType === 'SQUARE' &&
-    Number.isFinite(Number(zoneObject.squareMinLat)) &&
-    Number.isFinite(Number(zoneObject.squareMinLon)) &&
-    Number.isFinite(Number(zoneObject.squareMaxLat)) &&
-    Number.isFinite(Number(zoneObject.squareMaxLon))
-  ) {
-    const minLat = Math.min(Number(zoneObject.squareMinLat), Number(zoneObject.squareMaxLat));
-    const maxLat = Math.max(Number(zoneObject.squareMinLat), Number(zoneObject.squareMaxLat));
-    const minLon = Math.min(Number(zoneObject.squareMinLon), Number(zoneObject.squareMaxLon));
-    const maxLon = Math.max(Number(zoneObject.squareMinLon), Number(zoneObject.squareMaxLon));
-
-    if (numericLat >= minLat && numericLat <= maxLat && numericLon >= minLon && numericLon <= maxLon) {
-      return 0;
-    }
-
-    const closestLat = Math.min(Math.max(numericLat, minLat), maxLat);
-    const closestLon = Math.min(Math.max(numericLon, minLon), maxLon);
-    return calculateHaversine(numericLat, numericLon, closestLat, closestLon);
-  }
-
-  const radius = Number(zoneObject?.radius || 0);
-  return Math.max(
-    0,
-    calculateHaversine(numericLat, numericLon, Number(zoneObject?.lat), Number(zoneObject?.lon)) - radius
-  );
 }
 
 function calculateLoadingNormalDeg(zoneObject) {
@@ -248,6 +173,21 @@ export class TelemetryProcessor {
       currentZone: null,            // ПОДТВЕРЖДЁННАЯ зона (используется в бизнес-логике)
       confirmedZoneName: null,      // имя подтверждённой зоны для сравнения
       zoneStartWeight: weight,
+      zoneStartTimeMs: null,
+      zoneStartLat: null,
+      zoneStartLon: null,
+      segmentPeakWeight: weight,
+      segmentPeakTimeMs: null,
+      segmentPeakLat: null,
+      segmentPeakLon: null,
+      loadingStartTimeMs: null,
+      loadingStartLat: null,
+      loadingStartLon: null,
+      loadingCandidateCount: 0,
+      loadingCandidateTimeMs: null,
+      loadingCandidateLat: null,
+      loadingCandidateLon: null,
+      loadingCandidateWeight: null,
       peakWeight: weight,
       isMixing: false,
       isUnloading: false,
@@ -259,6 +199,17 @@ export class TelemetryProcessor {
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
       lastStationaryWeight: weight,
+      lastKnownNormalWeight: Math.max(0, Number(weight || 0)),
+      lastKnownNormalTimeMs: null,
+      lastKnownNormalLat: null,
+      lastKnownNormalLon: null,
+      recoveryBaselineWeight: null,
+      recoveryBaselineTimeMs: null,
+      recoveryBaselineLat: null,
+      recoveryBaselineLon: null,
+      recoveryMassRecorded: false,
+      recoveringFromInvalidWeight: false,
+      recoveredOutsideLoadingContext: false,
       isMoving: false,
       movingSpeedStreak: 0,
       stationarySpeedStreak: 0,
@@ -268,15 +219,177 @@ export class TelemetryProcessor {
       currentZoneDwellMs: 0,
       lastZoneTrackPoint: null,
       lastRealZoneSeenAtMs: null,
-      hostZoneCandidates: [],
-      lastHostZoneKey: null,
-      lastHostZoneDwellAtMs: null,
-      hostCurrentZoneDwellMs: 0,
+      loadedIngredientKeys: [],
       // Дебаунс смены зоны
       pendingZoneName: null,
       pendingZoneEnteredAtMs: null,
       pendingZoneCount: 0
     };
+  }
+
+  _setZoneBaseline(state, weight, packetTimeMs = null, lat = null, lon = null) {
+    state.zoneStartWeight = weight;
+    if (Number.isFinite(Number(packetTimeMs))) {
+      state.zoneStartTimeMs = Number(packetTimeMs);
+    }
+    if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+      state.zoneStartLat = Number(lat);
+      state.zoneStartLon = Number(lon);
+    }
+    state.segmentPeakWeight = weight;
+    state.segmentPeakTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
+    state.segmentPeakLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+    state.segmentPeakLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
+    state.loadingStartTimeMs = null;
+    state.loadingStartLat = null;
+    state.loadingStartLon = null;
+    this._clearLoadingCandidate(state);
+  }
+
+  _clearLoadingCandidate(state) {
+    state.loadingCandidateCount = 0;
+    state.loadingCandidateTimeMs = null;
+    state.loadingCandidateLat = null;
+    state.loadingCandidateLon = null;
+    state.loadingCandidateWeight = null;
+  }
+
+  _rememberSegmentPeak(state, weight, packetTimeMs = null, lat = null, lon = null) {
+    const parsedWeight = Number(weight);
+    if (!Number.isFinite(parsedWeight)) {
+      return;
+    }
+
+    if (
+      !Number.isFinite(Number(state.segmentPeakWeight)) ||
+      parsedWeight > Number(state.segmentPeakWeight)
+    ) {
+      state.segmentPeakWeight = parsedWeight;
+      state.segmentPeakTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
+      state.segmentPeakLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+      state.segmentPeakLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
+    }
+  }
+
+  _rememberLoadingStart(state, packetTimeMs = null, lat = null, lon = null) {
+    if (state.loadingStartTimeMs === null && Number.isFinite(Number(packetTimeMs))) {
+      state.loadingStartTimeMs = Number(packetTimeMs);
+    }
+    if (
+      state.loadingStartLat === null &&
+      state.loadingStartLon === null &&
+      Number.isFinite(Number(lat)) &&
+      Number.isFinite(Number(lon))
+    ) {
+      state.loadingStartLat = Number(lat);
+      state.loadingStartLon = Number(lon);
+    }
+  }
+
+  _getEffectiveBatchStartThreshold(state, thresholds) {
+    const baseThreshold = Number(thresholds.batchStartThresholdKg || 0);
+    if (state.isBatchStarted || state.isMixing) {
+      return baseThreshold;
+    }
+
+    return baseThreshold + Math.max(FIRST_BATCH_START_MARGIN_MIN_KG, baseThreshold * FIRST_BATCH_START_MARGIN_RATIO);
+  }
+
+  _updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs = null, lat = null, lon = null) {
+    if (state.loadingStartTimeMs !== null) {
+      return true;
+    }
+
+    const delta = Number(currentWeight) - Number(state.zoneStartWeight || 0);
+    if (!(delta > this._getEffectiveBatchStartThreshold(state, thresholds))) {
+      this._clearLoadingCandidate(state);
+      return false;
+    }
+
+    if (state.loadingCandidateTimeMs === null) {
+      state.loadingCandidateCount = 1;
+      state.loadingCandidateTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
+      state.loadingCandidateLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+      state.loadingCandidateLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
+      state.loadingCandidateWeight = Number.isFinite(Number(currentWeight)) ? Number(currentWeight) : null;
+    } else {
+      state.loadingCandidateCount = Number(state.loadingCandidateCount || 0) + 1;
+      if (
+        Number.isFinite(Number(currentWeight)) &&
+        (
+          state.loadingCandidateWeight === null ||
+          Number(currentWeight) > Number(state.loadingCandidateWeight)
+        )
+      ) {
+        state.loadingCandidateWeight = Number(currentWeight);
+      }
+    }
+
+    if (Number(state.loadingCandidateCount || 0) < LOADING_START_CONFIRM_PACKETS) {
+      return false;
+    }
+
+    this._rememberLoadingStart(
+      state,
+      state.loadingCandidateTimeMs ?? packetTimeMs,
+      state.loadingCandidateLat ?? lat,
+      state.loadingCandidateLon ?? lon
+    );
+    return true;
+  }
+
+  _getBatchStartWeight(state) {
+    if (state.recoveredOutsideLoadingContext) {
+      return Math.round(Number(state.recoveryBaselineWeight ?? state.lastKnownNormalWeight ?? 0));
+    }
+    return Math.round(Number(state.zoneStartWeight || 0));
+  }
+
+  _rememberNormalWeight(state, weight) {
+    const normalWeight = Number(weight);
+    if (
+      !Number.isFinite(normalWeight) ||
+      normalWeight < 0 ||
+      state.recoveringFromInvalidWeight ||
+      state.recoveredOutsideLoadingContext
+    ) {
+      return;
+    }
+    state.lastKnownNormalWeight = normalWeight;
+  }
+
+  _emitRecoveryMassIfNeeded(state, result, thresholds) {
+    if (!state.recoveredOutsideLoadingContext || state.recoveryMassRecorded) {
+      return false;
+    }
+
+    const recoveryBaselineWeight = Number(state.recoveryBaselineWeight ?? state.lastKnownNormalWeight ?? 0);
+    const recoveredWeight = Number(state.zoneStartWeight || 0);
+    const recoveryDelta = recoveredWeight - recoveryBaselineWeight;
+
+    if (!(recoveryDelta > thresholds.batchStartThresholdKg)) {
+      state.recoveryMassRecorded = true;
+      return false;
+    }
+
+    result.dbActions.push({
+      type: 'ADD_INGREDIENT',
+      ingredientName: 'Восстановление терминала',
+      actualWeight: Math.round(recoveryDelta),
+      startTime: Number.isFinite(Number(state.zoneStartTimeMs))
+        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+        : null,
+      startLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
+      startLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null,
+      endTime: Number.isFinite(Number(state.zoneStartTimeMs))
+        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+        : null,
+      endLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
+      endLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null
+    });
+    state.recoveryMassRecorded = true;
+    state.lastIngredientName = 'Восстановление терминала';
+    return true;
   }
 
   _getCurrentMode(state) {
@@ -315,22 +428,14 @@ export class TelemetryProcessor {
       zoneEntryRearAngleDeg: resolveBoundedNumber(settings.zoneEntryRearAngleDeg, ZONE_ENTRY_REAR_ANGLE_DEG, 1, 180),
       squareHeadingScorePerSecond: resolveNonNegativeNumber(settings.squareHeadingScorePerSecond, SQUARE_HEADING_SCORE_PER_SECOND),
       squareHeadingScoreCap: resolveNonNegativeNumber(settings.squareHeadingScoreCap, SQUARE_HEADING_SCORE_CAP),
-      squareHeadingMaxAngleDeg: resolveBoundedNumber(settings.squareHeadingMaxAngleDeg, SQUARE_HEADING_MAX_ANGLE_DEG, 1, 180),
-      hostZoneOverrideNearMeters: resolveNonNegativeNumber(settings.hostZoneOverrideNearMeters, HOST_ZONE_OVERRIDE_NEAR_METERS),
-      hostZoneOverrideMinDwellMs: resolveNonNegativeNumber(
-        Number(settings.hostZoneOverrideMinDwellSeconds) * 1000,
-        HOST_ZONE_OVERRIDE_MIN_DWELL_SECONDS * 1000
-      ),
-      hostZoneOverrideMinRtkDistanceMeters: resolveNonNegativeNumber(
-        settings.hostZoneOverrideMinRtkDistanceMeters,
-        HOST_ZONE_OVERRIDE_MIN_RTK_DISTANCE_METERS
-      )
+      squareHeadingMaxAngleDeg: resolveBoundedNumber(settings.squareHeadingMaxAngleDeg, SQUARE_HEADING_MAX_ANGLE_DEG, 1, 180)
     };
   }
 
   _updateMovementState(state, speedKmh, thresholds) {
     const speed = Number.isFinite(Number(speedKmh)) ? Math.max(0, Number(speedKmh)) : 0;
-    const isAboveThreshold = speed > thresholds.movementSpeedThresholdKmh;
+    const isAboveThreshold = speed >= thresholds.movementSpeedThresholdKmh;
+    const isStopped = speed === 0;
 
     if (isAboveThreshold) {
       state.movingSpeedStreak = Number(state.movingSpeedStreak || 0) + 1;
@@ -345,7 +450,7 @@ export class TelemetryProcessor {
     if (!wasMoving && state.movingSpeedStreak >= thresholds.movementConfirmPackets) {
       state.isMoving = true;
       state.stationarySpeedStreak = 0;
-    } else if (wasMoving && !isAboveThreshold) {
+    } else if (wasMoving && isStopped) {
       state.isMoving = false;
       state.movingSpeedStreak = 0;
     }
@@ -569,180 +674,36 @@ export class TelemetryProcessor {
       : null;
   }
 
-  _findHostZoneCandidate(zonesConfig, hostPosition, thresholds) {
-    const lat = Number(hostPosition?.lat);
-    const lon = Number(hostPosition?.lon);
-
-    if (!Number.isFinite(lat) || !Number.isFinite(lon) || !Array.isArray(zonesConfig)) {
-      return null;
-    }
-
-    const nearMeters = Number(thresholds.hostZoneOverrideNearMeters || 0);
-    const nearby = zonesConfig
-      .map((zone) => {
-        const distanceMeters = distanceToZoneMeters(lat, lon, zone);
-        return {
-          zone,
-          distanceMeters,
-          ingredient: zone?.ingredient || zone?.name || null,
-          key: this._zoneVisitKey(zone, zone?.name || null)
-        };
+  _normalizeExpectedIngredients(expectedIngredients = []) {
+    return (Array.isArray(expectedIngredients) ? expectedIngredients : [])
+      .map((item, index) => {
+        const name = typeof item === 'string' ? item : item?.name;
+        const key = normalizeIngredientName(name);
+        const sortOrder = Number(item?.sortOrder ?? item?.loadOrder ?? index + 1);
+        return key ? {
+          key,
+          name,
+          sortOrder: Number.isFinite(sortOrder) && sortOrder > 0 ? sortOrder : index + 1
+        } : null;
       })
-      .filter((candidate) =>
-        candidate.key &&
-        candidate.ingredient &&
-        Number.isFinite(candidate.distanceMeters) &&
-        candidate.distanceMeters <= nearMeters
-      )
-      .sort((left, right) => left.distanceMeters - right.distanceMeters);
+      .filter(Boolean)
+      .sort((left, right) => left.sortOrder - right.sortOrder);
+  }
 
-    if (!nearby.length) return null;
+  _getExpectedNextIngredientKey(state, expectedIngredients = []) {
+    const expected = this._normalizeExpectedIngredients(expectedIngredients);
+    if (!expected.length) return null;
 
-    const best = nearby[0];
-    const bestIngredientKey = normalizeIngredientKey(best.ingredient);
-    const hasAmbiguousNeighbor = nearby.slice(1).some((candidate) =>
-      normalizeIngredientKey(candidate.ingredient) !== bestIngredientKey &&
-      candidate.distanceMeters <= nearMeters
+    const loadedKeys = new Set(
+      (Array.isArray(state.loadedIngredientKeys) ? state.loadedIngredientKeys : [])
+        .map((key) => normalizeIngredientName(key))
+        .filter(Boolean)
     );
 
-    if (hasAmbiguousNeighbor) {
-      return null;
-    }
-
-    return best;
+    return expected.find((ingredient) => !loadedKeys.has(ingredient.key))?.key || null;
   }
 
-  _getOrCreateHostZoneCandidate(state, candidate, packetTimeMs, currentWeight) {
-    if (!Array.isArray(state.hostZoneCandidates)) {
-      state.hostZoneCandidates = [];
-    }
-
-    let hostCandidate = state.hostZoneCandidates.find((item) => item.key === candidate.key);
-    if (!hostCandidate) {
-      hostCandidate = {
-        key: candidate.key,
-        zoneId: candidate.zone?.id ?? null,
-        name: candidate.zone?.name || candidate.ingredient || null,
-        ingredient: candidate.ingredient || candidate.zone?.ingredient || candidate.zone?.name || null,
-        firstSeenAtMs: packetTimeMs,
-        lastSeenAtMs: packetTimeMs,
-        dwellMs: 0,
-        maxContinuousDwellMs: 0,
-        samples: 0,
-        minDistanceMeters: candidate.distanceMeters,
-        maxDistanceMeters: candidate.distanceMeters,
-        minWeight: currentWeight,
-        maxWeight: currentWeight,
-        rtkFreshSamples: 0,
-        rtkFarSamples: 0,
-        minRtkDistanceMeters: null,
-        maxRtkDistanceMeters: null
-      };
-      state.hostZoneCandidates.push(hostCandidate);
-    }
-
-    hostCandidate.lastSeenAtMs = packetTimeMs;
-    hostCandidate.name = hostCandidate.name || candidate.zone?.name || candidate.ingredient || null;
-    hostCandidate.ingredient = hostCandidate.ingredient || candidate.ingredient || candidate.zone?.ingredient || candidate.zone?.name || null;
-    hostCandidate.samples = Number(hostCandidate.samples || 0) + 1;
-    hostCandidate.minDistanceMeters = Math.min(
-      Number(hostCandidate.minDistanceMeters ?? candidate.distanceMeters),
-      candidate.distanceMeters
-    );
-    hostCandidate.maxDistanceMeters = Math.max(
-      Number(hostCandidate.maxDistanceMeters ?? candidate.distanceMeters),
-      candidate.distanceMeters
-    );
-    hostCandidate.minWeight = Math.min(Number(hostCandidate.minWeight ?? currentWeight), currentWeight);
-    hostCandidate.maxWeight = Math.max(Number(hostCandidate.maxWeight ?? currentWeight), currentWeight);
-    return hostCandidate;
-  }
-
-  _recordHostZoneCandidate(state, zonesConfig, packetTimeMs, currentWeight, thresholds, options = {}) {
-    const candidate = this._findHostZoneCandidate(zonesConfig, options.hostPosition, thresholds);
-    const activeHostKey = candidate?.key || null;
-    const previousHostKey = state.lastHostZoneKey || null;
-    const previousTimeMs = Number(state.lastHostZoneDwellAtMs);
-    const elapsedMs = Number.isFinite(previousTimeMs)
-      ? Math.max(0, Math.min(30000, packetTimeMs - previousTimeMs))
-      : 0;
-
-    if (previousHostKey && elapsedMs > 0) {
-      const previousCandidate = (state.hostZoneCandidates || []).find((item) => item.key === previousHostKey);
-      if (previousCandidate) {
-        previousCandidate.dwellMs = Number(previousCandidate.dwellMs || 0) + elapsedMs;
-        const continuousDwellMs = previousHostKey === activeHostKey
-          ? Number(state.hostCurrentZoneDwellMs || 0) + elapsedMs
-          : elapsedMs;
-        previousCandidate.maxContinuousDwellMs = Math.max(
-          Number(previousCandidate.maxContinuousDwellMs || 0),
-          continuousDwellMs
-        );
-      }
-    }
-
-    if (previousHostKey && previousHostKey === activeHostKey) {
-      state.hostCurrentZoneDwellMs = Number(state.hostCurrentZoneDwellMs || 0) + elapsedMs;
-    } else {
-      state.hostCurrentZoneDwellMs = 0;
-    }
-
-    if (candidate) {
-      const hostCandidate = this._getOrCreateHostZoneCandidate(state, candidate, packetTimeMs, currentWeight);
-      const rtkPosition = options.rtkPosition || null;
-      const rtkFresh = Boolean(options.rtkFresh);
-      if (rtkFresh && Number.isFinite(Number(rtkPosition?.lat)) && Number.isFinite(Number(rtkPosition?.lon))) {
-        const rtkDistanceMeters = distanceToZoneMeters(Number(rtkPosition.lat), Number(rtkPosition.lon), candidate.zone);
-        hostCandidate.rtkFreshSamples = Number(hostCandidate.rtkFreshSamples || 0) + 1;
-        hostCandidate.minRtkDistanceMeters = hostCandidate.minRtkDistanceMeters === null
-          ? rtkDistanceMeters
-          : Math.min(Number(hostCandidate.minRtkDistanceMeters), rtkDistanceMeters);
-        hostCandidate.maxRtkDistanceMeters = hostCandidate.maxRtkDistanceMeters === null
-          ? rtkDistanceMeters
-          : Math.max(Number(hostCandidate.maxRtkDistanceMeters), rtkDistanceMeters);
-
-        if (rtkDistanceMeters >= thresholds.hostZoneOverrideMinRtkDistanceMeters) {
-          hostCandidate.rtkFarSamples = Number(hostCandidate.rtkFarSamples || 0) + 1;
-        }
-      }
-    }
-
-    state.lastHostZoneKey = activeHostKey;
-    state.lastHostZoneDwellAtMs = packetTimeMs;
-  }
-
-  _pickHostZoneOverride(state, thresholds) {
-    if (!Array.isArray(state?.hostZoneCandidates)) return null;
-
-    const minDwellMs = Number(thresholds.hostZoneOverrideMinDwellMs || 0);
-    const minDeltaKg = Number(thresholds.batchStartThresholdKg || 0);
-
-    const candidates = state.hostZoneCandidates
-      .map((candidate) => ({
-        ...candidate,
-        weightDeltaKg: Number(candidate.maxWeight || 0) - Number(candidate.minWeight || 0)
-      }))
-      .filter((candidate) => {
-        const hasEnoughDwell = Number(candidate.maxContinuousDwellMs || 0) >= minDwellMs;
-        const hasEnoughWeight = Number(candidate.weightDeltaKg || 0) > minDeltaKg;
-        const hasNoFreshRtk = Number(candidate.rtkFreshSamples || 0) <= 0;
-        const hasMostlyFarRtk = Number(candidate.rtkFreshSamples || 0) > 0 &&
-          Number(candidate.rtkFarSamples || 0) / Number(candidate.rtkFreshSamples || 1) >= 0.8;
-
-        return hasEnoughDwell && hasEnoughWeight && (hasNoFreshRtk || hasMostlyFarRtk);
-      })
-      .sort((left, right) => {
-        const weightDiff = Number(right.weightDeltaKg || 0) - Number(left.weightDeltaKg || 0);
-        if (weightDiff !== 0) return weightDiff;
-        const dwellDiff = Number(right.maxContinuousDwellMs || 0) - Number(left.maxContinuousDwellMs || 0);
-        if (dwellDiff !== 0) return dwellDiff;
-        return Number(right.lastSeenAtMs || 0) - Number(left.lastSeenAtMs || 0);
-      });
-
-    return candidates[0]?.ingredient || candidates[0]?.name || null;
-  }
-
-  _pickVisitedZoneIngredient(state) {
+  _pickVisitedZoneIngredient(state, expectedIngredients = []) {
     if (!Array.isArray(state?.visitedZones)) return null;
 
     const candidates = state.visitedZones
@@ -757,6 +718,18 @@ export class TelemetryProcessor {
         return Number(b.lastSeenAtMs || 0) - Number(a.lastSeenAtMs || 0);
       });
 
+    const expectedNextKey = this._getExpectedNextIngredientKey(state, expectedIngredients);
+    if (expectedNextKey && candidates.length > 1) {
+      const topScore = Number(candidates[0]?.score || 0);
+      const expectedCandidate = candidates.find((visit) => (
+        normalizeIngredientName(visit.ingredient || visit.name) === expectedNextKey
+      ));
+
+      if (expectedCandidate && topScore - Number(expectedCandidate.score || 0) <= ZONE_ENTRY_FRONT_BONUS) {
+        return expectedCandidate.ingredient || expectedCandidate.name || null;
+      }
+    }
+
     return candidates[0]?.ingredient || candidates[0]?.name || null;
   }
 
@@ -766,10 +739,6 @@ export class TelemetryProcessor {
     state.lastZoneDwellAtMs = packetTimeMs;
     state.currentZoneDwellMs = 0;
     state.lastZoneTrackPoint = null;
-    state.hostZoneCandidates = [];
-    state.lastHostZoneKey = null;
-    state.lastHostZoneDwellAtMs = packetTimeMs;
-    state.hostCurrentZoneDwellMs = 0;
   }
 
   _serializeZoneCandidates(state) {
@@ -810,31 +779,6 @@ export class TelemetryProcessor {
     };
   }
 
-  _serializeHostZoneCandidates(state) {
-    if (!Array.isArray(state?.hostZoneCandidates)) return [];
-
-    return state.hostZoneCandidates.map((candidate) => ({
-      name: candidate.name,
-      ingredient: candidate.ingredient,
-      dwellSeconds: Math.round(Number(candidate.dwellMs || 0) / 100) / 10,
-      maxContinuousSeconds: Math.round(Number(candidate.maxContinuousDwellMs || 0) / 100) / 10,
-      weightDeltaKg: Math.round((Number(candidate.maxWeight || 0) - Number(candidate.minWeight || 0)) * 10) / 10,
-      minDistanceMeters: Number.isFinite(Number(candidate.minDistanceMeters))
-        ? Math.round(Number(candidate.minDistanceMeters) * 10) / 10
-        : null,
-      maxDistanceMeters: Number.isFinite(Number(candidate.maxDistanceMeters))
-        ? Math.round(Number(candidate.maxDistanceMeters) * 10) / 10
-        : null,
-      rtkFreshSamples: Number(candidate.rtkFreshSamples || 0),
-      rtkFarSamples: Number(candidate.rtkFarSamples || 0),
-      minRtkDistanceMeters: candidate.minRtkDistanceMeters !== null &&
-        Number.isFinite(Number(candidate.minRtkDistanceMeters))
-        ? Math.round(Number(candidate.minRtkDistanceMeters) * 10) / 10
-        : null,
-      samples: Number(candidate.samples || 0)
-    }));
-  }
-
   processLoaderPacket(packet, zonesConfig, settings = {}, options = {}) {
     const deviceId = options.deviceId || packet.deviceId || packet.hostDeviceId || packet.host_device_id || 'host_01';
     const lat = Number(packet.lat);
@@ -857,7 +801,7 @@ export class TelemetryProcessor {
       this.deviceStates.set(deviceId, state);
     }
 
-    const activeZone = detectZoneObject(lat, lon, zonesConfig);
+    const activeZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
 
@@ -882,12 +826,25 @@ export class TelemetryProcessor {
     };
   }
 
-  _resolveSegmentIngredient(state, thresholds) {
-    return this._pickHostZoneOverride(state, thresholds) ||
-      this._pickVisitedZoneIngredient(state) ||
+  _resolveSegmentIngredient(state, expectedIngredients = [], options = {}) {
+    const visitedIngredient = options.allowVisitedZoneIngredient === false
+      ? null
+      : this._pickVisitedZoneIngredient(state, expectedIngredients);
+    return visitedIngredient || state.currentZone?.ingredient || state.lastIngredientName || 'Unknown';
+  }
+
+  _hasLoadingContext(state, options = {}) {
+    return Boolean(
       state.currentZone?.ingredient ||
-      state.lastIngredientName ||
-      'Unknown';
+      (options.allowVisitedZoneIngredient !== false && this._pickVisitedZoneIngredient(state, options.expectedIngredients))
+    );
+  }
+
+  _isTerminalRecoveryContext(state, options = {}) {
+    return !this._hasLoadingContext(state, options) && (
+      state.recoveredOutsideLoadingContext ||
+      normalizeIngredientName(state.lastIngredientName) === normalizeIngredientName('Восстановление терминала')
+    );
   }
 
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
@@ -895,10 +852,23 @@ export class TelemetryProcessor {
       return false;
     }
 
-    const segmentEndWeight = Number(options.segmentEndWeight ?? currentWeight);
+    if (options.requireLoadingContext && !this._hasLoadingContext(state, options)) {
+      return false;
+    }
+
+    if (!state.loadingStartTimeMs && !options.allowUnconfirmedLoadingStart) {
+      return false;
+    }
+
+    const hasExplicitSegmentEnd = options.segmentEndWeight !== undefined && options.segmentEndWeight !== null;
+    const segmentEndWeight = Number(
+      hasExplicitSegmentEnd
+        ? options.segmentEndWeight
+        : (Number.isFinite(Number(state.segmentPeakWeight)) ? state.segmentPeakWeight : currentWeight)
+    );
     const delta = segmentEndWeight - Number(state.zoneStartWeight || 0);
 
-    if (!(delta > thresholds.batchStartThresholdKg)) {
+    if (!(delta > this._getEffectiveBatchStartThreshold(state, thresholds))) {
       return false;
     }
 
@@ -906,18 +876,77 @@ export class TelemetryProcessor {
       state.isBatchStarted = true;
       result.dbActions.push({
         type: 'START_BATCH',
-        startWeight: Math.round(state.zoneStartWeight)
+        startWeight: this._getBatchStartWeight(state),
+        startTime: state.loadingStartTimeMs !== null && Number.isFinite(Number(state.loadingStartTimeMs))
+          ? new Date(Number(state.loadingStartTimeMs)).toISOString()
+          : Number.isFinite(Number(state.zoneStartTimeMs))
+            ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+            : null
       });
+      this._emitRecoveryMassIfNeeded(state, result, thresholds);
+      state.recoveredOutsideLoadingContext = false;
     }
 
-    const ingredientName = this._resolveSegmentIngredient(state, thresholds);
+    const ingredientName = this._isTerminalRecoveryContext(state, options)
+      ? 'Восстановление терминала'
+      : this._resolveSegmentIngredient(state, options.expectedIngredients, {
+        allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
+      });
+    if (normalizeIngredientName(ingredientName) === 'unknown') {
+      return false;
+    }
     state.isMixing = true;
     state.lastIngredientName = ingredientName;
+    const ingredientKey = normalizeIngredientName(ingredientName);
+    if (ingredientKey) {
+      if (!Array.isArray(state.loadedIngredientKeys)) {
+        state.loadedIngredientKeys = [];
+      }
+      if (!state.loadedIngredientKeys.includes(ingredientKey)) {
+        state.loadedIngredientKeys.push(ingredientKey);
+      }
+    }
 
     result.dbActions.push({
       type: 'ADD_INGREDIENT',
       ingredientName,
-      actualWeight: Math.round(delta)
+      actualWeight: Math.round(delta),
+      startTime: state.loadingStartTimeMs !== null && Number.isFinite(Number(state.loadingStartTimeMs))
+        ? new Date(Number(state.loadingStartTimeMs)).toISOString()
+        : state.zoneStartTimeMs !== null && Number.isFinite(Number(state.zoneStartTimeMs))
+          ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+          : null,
+      startLat: state.loadingStartLat !== null && Number.isFinite(Number(state.loadingStartLat))
+        ? Number(state.loadingStartLat)
+        : state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat))
+          ? Number(state.zoneStartLat)
+          : null,
+      startLon: state.loadingStartLon !== null && Number.isFinite(Number(state.loadingStartLon))
+        ? Number(state.loadingStartLon)
+        : state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon))
+          ? Number(state.zoneStartLon)
+          : null,
+      endTime: Number.isFinite(Number(options.segmentEndTimeMs))
+        ? new Date(Number(options.segmentEndTimeMs)).toISOString()
+        : !hasExplicitSegmentEnd && Number.isFinite(Number(state.segmentPeakTimeMs))
+          ? new Date(Number(state.segmentPeakTimeMs)).toISOString()
+          : Number.isFinite(Number(options.packetTimeMs))
+            ? new Date(Number(options.packetTimeMs)).toISOString()
+            : null,
+      endLat: Number.isFinite(Number(options.segmentEndLat))
+        ? Number(options.segmentEndLat)
+        : !hasExplicitSegmentEnd && state.segmentPeakLat !== null && Number.isFinite(Number(state.segmentPeakLat))
+          ? Number(state.segmentPeakLat)
+          : Number.isFinite(Number(options.lat))
+            ? Number(options.lat)
+            : null,
+      endLon: Number.isFinite(Number(options.segmentEndLon))
+        ? Number(options.segmentEndLon)
+        : !hasExplicitSegmentEnd && state.segmentPeakLon !== null && Number.isFinite(Number(state.segmentPeakLon))
+          ? Number(state.segmentPeakLon)
+          : Number.isFinite(Number(options.lon))
+            ? Number(options.lon)
+            : null
     });
 
     this._resetVisitedZones(state, Number(options.packetTimeMs || Date.now()));
@@ -929,13 +958,16 @@ export class TelemetryProcessor {
     // Флешим сегмент ПРЕДЫДУЩЕЙ подтверждённой зоны
     this._flushCurrentSegment(state, currentWeight, thresholds, result, {
       suppressLoading: options.suppressLoading,
-      packetTimeMs: options.packetTimeMs
+      packetTimeMs: options.packetTimeMs,
+      expectedIngredients: options.expectedIngredients,
+      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
     });
 
     // Обновляем состояние на НОВУЮ подтверждённую зону
     state.currentZone = zoneObject ? { ...zoneObject, ingredient: ingredientName } : null;
     state.confirmedZoneName = zoneName;
-    state.zoneStartWeight = currentWeight;
+    this._setZoneBaseline(state, currentWeight, options.packetTimeMs, options.lat, options.lon);
+    state.recoveringFromInvalidWeight = false;
   }
 
   processPacket(packet, zonesConfig, settings = {}, options = {}) {
@@ -954,7 +986,7 @@ export class TelemetryProcessor {
       ? Math.max(0, currentWeightRaw)
       : 0;
     const thresholds = this._resolveThresholds(settings);
-    const suppressLoading = Boolean(options.suppressLoading);
+    const requestedSuppressLoading = Boolean(options.suppressLoading);
     const packetTimeMs = this._parsePacketTimestampMs(packet);
 
     if (!isValidLocation(lat, lon)) {
@@ -966,41 +998,103 @@ export class TelemetryProcessor {
     let state = this.deviceStates.get(deviceId);
     if (!state) {
       state = this.getInitialState(currentWeight);
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       this.deviceStates.set(deviceId, state);
     } else if (state.hasWeightBaseline === false) {
-      state.zoneStartWeight = currentWeight;
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       state.peakWeight = currentWeight;
       state.lastStationaryWeight = currentWeight;
       state.lastAcceptedWeight = null;
       state.hasWeightBaseline = true;
     }
 
+    let suppressLoading = requestedSuppressLoading && (
+      state.isMixing ||
+      state.isUnloading ||
+      state.isBatchStarted
+    );
+    const expectedIngredients = Array.isArray(options.expectedIngredients) ? options.expectedIngredients : [];
+    const allowVisitedZoneIngredient = options.allowVisitedZoneIngredient !== false;
+
+    if (!Number.isFinite(currentWeightRaw) || currentWeightRaw < 0) {
+      if (!state.recoveringFromInvalidWeight) {
+        state.recoveryBaselineWeight = Number.isFinite(Number(state.lastKnownNormalWeight))
+          ? Number(state.lastKnownNormalWeight)
+          : Math.max(0, Number(state.lastAcceptedWeight ?? state.lastStationaryWeight ?? 0));
+        state.recoveryBaselineTimeMs = state.lastKnownNormalTimeMs;
+        state.recoveryBaselineLat = state.lastKnownNormalLat;
+        state.recoveryBaselineLon = state.lastKnownNormalLon;
+      }
+      state.hasWeightBaseline = false;
+      state.recoveringFromInvalidWeight = true;
+      state.recoveredOutsideLoadingContext = false;
+      state.lastAcceptedWeight = null;
+      state.anomalyCandidateWeight = null;
+      state.anomalyCandidateCount = 0;
+      return this._buildSkippedResult(deviceId);
+    }
+
     const movement = this._updateMovementState(state, packet.speedKmh, thresholds);
     const isMotionSuppressed = Boolean(movement.suppressMotion);
 
-    if (state.lastAcceptedWeight === null) {
+    if (!isMotionSuppressed && state.lastAcceptedWeight === null) {
       state.lastAcceptedWeight = currentWeight;
     }
 
     // Фильтр аномалий веса
     if (movement.enteredMoving) {
-      const departureWeight = Number(state.lastStationaryWeight ?? state.lastAcceptedWeight ?? currentWeight);
-      this._flushCurrentSegment(
-        state,
-        departureWeight,
-        thresholds,
-        result,
-        { suppressLoading, packetTimeMs }
-      );
-      state.zoneStartWeight = departureWeight;
-      this._resetVisitedZones(state, packetTimeMs);
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
       state.pendingZoneCount = 0;
     }
 
+    if (movement.exitedMoving && state.loadingStartTimeMs !== null && !state.isUnloading) {
+      const motionActiveZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+      const motionActiveZoneName = motionActiveZone?.name || null;
+      const confirmedLoadingZoneName = state.confirmedZoneName || null;
+      const segmentPeakWeight = Number(state.segmentPeakWeight);
+      const usePreviousZonePeak = Boolean(
+        motionActiveZoneName &&
+        confirmedLoadingZoneName &&
+        motionActiveZoneName !== confirmedLoadingZoneName &&
+        Number.isFinite(segmentPeakWeight) &&
+        currentWeight - segmentPeakWeight > thresholds.batchStartThresholdKg
+      );
+      const segmentEndWeight = usePreviousZonePeak ? segmentPeakWeight : currentWeight;
+      const segmentEndTimeMs = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakTimeMs))
+        ? Number(state.segmentPeakTimeMs)
+        : packetTimeMs;
+      const segmentEndLat = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakLat))
+        ? Number(state.segmentPeakLat)
+        : lat;
+      const segmentEndLon = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakLon))
+        ? Number(state.segmentPeakLon)
+        : lon;
+      const flushed = this._flushCurrentSegment(
+        state,
+        segmentEndWeight,
+        thresholds,
+        result,
+        {
+          suppressLoading,
+          packetTimeMs,
+          requireLoadingContext: true,
+          lat,
+          lon,
+          expectedIngredients,
+          allowVisitedZoneIngredient,
+          segmentEndWeight,
+          segmentEndTimeMs,
+          segmentEndLat,
+          segmentEndLon
+        }
+      );
+      if (flushed) {
+        this._setZoneBaseline(state, segmentEndWeight, segmentEndTimeMs, segmentEndLat, segmentEndLon);
+      }
+    }
+
     if (isMotionSuppressed) {
-      state.lastAcceptedWeight = currentWeight;
       state.anomalyCandidateWeight = null;
       state.anomalyCandidateCount = 0;
     } else {
@@ -1029,9 +1123,50 @@ export class TelemetryProcessor {
       }
     }
 
-    const activeZone = detectZoneObject(lat, lon, zonesConfig);
+    const nearbyLoadingZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+    if (suppressLoading && nearbyLoadingZone && !state.isUnloading) {
+      suppressLoading = false;
+    }
+
+    const activeZone = (suppressLoading || state.isUnloading)
+      ? null
+      : nearbyLoadingZone;
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
+
+    if (
+      state.recoveringFromInvalidWeight &&
+      !isMotionSuppressed &&
+      !activeZoneName &&
+      !state.currentZone &&
+      !state.isMixing &&
+      !state.isUnloading
+    ) {
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
+      state.peakWeight = currentWeight;
+      state.lastStationaryWeight = currentWeight;
+      state.lastAcceptedWeight = currentWeight;
+      state.recoveringFromInvalidWeight = false;
+      state.recoveredOutsideLoadingContext = true;
+      state.recoveryMassRecorded = false;
+      state.lastKnownNormalWeight = Number.isFinite(Number(state.recoveryBaselineWeight))
+        ? Number(state.recoveryBaselineWeight)
+        : state.lastKnownNormalWeight;
+      if (state.recoveryBaselineTimeMs === null && Number.isFinite(Number(packetTimeMs))) {
+        state.recoveryBaselineTimeMs = Number(packetTimeMs);
+      }
+      if (
+        state.recoveryBaselineLat === null &&
+        state.recoveryBaselineLon === null &&
+        Number.isFinite(Number(lat)) &&
+        Number.isFinite(Number(lon))
+      ) {
+        state.recoveryBaselineLat = Number(lat);
+        state.recoveryBaselineLon = Number(lon);
+      }
+      return this._buildSkippedResult(deviceId);
+    }
+
     if (!isMotionSuppressed) {
       if (!options.skipZoneVisit) {
         this._recordZoneVisit(
@@ -1044,17 +1179,6 @@ export class TelemetryProcessor {
           packet
         );
       }
-      this._recordHostZoneCandidate(
-        state,
-        zonesConfig,
-        packetTimeMs,
-        currentWeight,
-        thresholds,
-        {
-          ...options,
-          hostPosition: options.hostPosition || { lat, lon }
-        }
-      );
       if (activeZoneName) {
         state.lastRealZoneSeenAtMs = packetTimeMs;
       }
@@ -1081,16 +1205,16 @@ export class TelemetryProcessor {
       currentWeight < state.peakWeight - thresholds.unloadDropThresholdKg;
 
     if (!isMotionSuppressed && shouldConfirmNullZone && !looksLikeUnloadDrop) {
-      this._confirmZoneChange(
-        state,
-        null,
-        null,
-        null,
-        currentWeight,
-        thresholds,
-        result,
-        { suppressLoading, packetTimeMs }
-      );
+          this._confirmZoneChange(
+            state,
+            null,
+            null,
+            null,
+            currentWeight,
+            thresholds,
+            result,
+            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient }
+          );
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
       state.pendingZoneCount = 0;
@@ -1118,7 +1242,7 @@ export class TelemetryProcessor {
             currentWeight,
             thresholds,
             result,
-            { suppressLoading, packetTimeMs }
+            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient }
           );
           state.pendingZoneName = null;
           state.pendingZoneEnteredAtMs = null;
@@ -1135,34 +1259,78 @@ export class TelemetryProcessor {
       state.pendingZoneCount = 0;
     }
 
+    const hasConfirmedLoadingStart = (
+      !isMotionSuppressed &&
+      !state.isUnloading &&
+      this._updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs, lat, lon)
+    );
+
     // Базовый вес обновляется только в спокойном режиме
-    if (!isMotionSuppressed && !state.isMixing && !state.isUnloading) {
+    if (
+      !isMotionSuppressed &&
+      !state.isUnloading &&
+      (!state.isMixing || state.loadingStartTimeMs === null)
+    ) {
       if (currentWeight < state.zoneStartWeight) {
-        state.zoneStartWeight = currentWeight;
+        this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
+      }
+    }
+
+    const recentCurrentZoneSeen = state.currentZone &&
+      !activeZoneName &&
+      Number.isFinite(lastRealZoneSeenAtMs) &&
+      packetTimeMs - lastRealZoneSeenAtMs <= Math.max(10000, thresholds.zoneChangeDebounceMs * 2);
+    const isInCurrentLoadingZone = Boolean(
+      state.currentZone
+        ? (activeZoneName === confirmedZoneName || recentCurrentZoneSeen)
+        : activeZoneName
+    );
+
+    if (
+      !isMotionSuppressed &&
+      !suppressLoading &&
+      !state.isUnloading &&
+      isInCurrentLoadingZone &&
+      hasConfirmedLoadingStart
+    ) {
+      this._rememberSegmentPeak(state, currentWeight, packetTimeMs, lat, lon);
+    }
+
+    if (
+      !isMotionSuppressed &&
+      !suppressLoading &&
+      !state.isUnloading &&
+      state.loadingStartTimeMs !== null &&
+      Number.isFinite(Number(state.segmentPeakTimeMs)) &&
+      packetTimeMs - Number(state.segmentPeakTimeMs) >= Math.max(MIN_LOADING_IDLE_CLOSE_MS, thresholds.zoneChangeDebounceMs * 3) &&
+      currentWeight >= Number(state.segmentPeakWeight || 0) - thresholds.batchStartThresholdKg
+    ) {
+      const segmentEndWeight = Number(state.segmentPeakWeight);
+      const segmentEndTimeMs = Number(state.segmentPeakTimeMs);
+      const flushed = this._flushCurrentSegment(state, currentWeight, thresholds, result, {
+        suppressLoading,
+        packetTimeMs,
+        segmentEndWeight,
+        segmentEndTimeMs,
+        segmentEndLat: state.segmentPeakLat,
+        segmentEndLon: state.segmentPeakLon,
+        expectedIngredients,
+        allowVisitedZoneIngredient
+      });
+
+      if (flushed) {
+        this._setZoneBaseline(
+          state,
+          segmentEndWeight,
+          segmentEndTimeMs,
+          state.segmentPeakLat,
+          state.segmentPeakLon
+        );
       }
     }
 
     if (!isMotionSuppressed && currentWeight > state.peakWeight) {
       state.peakWeight = currentWeight;
-    }
-
-    // ЯВНАЯ ДЕТЕКЦИЯ UNKNOWN ВНЕ ЗОН
-    if (
-      !state.currentZone &&
-      !suppressLoading &&
-      !isMotionSuppressed &&
-      !state.isUnloading &&
-      !state.isBatchStarted &&
-      (currentWeight - Number(state.zoneStartWeight || 0)) > thresholds.batchStartThresholdKg
-    ) {
-      state.isBatchStarted = true;
-      state.isMixing = true;
-      state.lastIngredientName = this._resolveSegmentIngredient(state, thresholds);
-
-      result.dbActions.push({
-        type: 'START_BATCH',
-        startWeight: Math.round(state.zoneStartWeight)
-      });
     }
 
     // Защита от недовыгрузки
@@ -1187,7 +1355,7 @@ export class TelemetryProcessor {
         nextStartWeight: Math.round(currentWeight)
       });
 
-      state.zoneStartWeight = state.lastUnloadWeight;
+      this._setZoneBaseline(state, state.lastUnloadWeight, packetTimeMs, lat, lon);
       state.isMixing = false;
       state.isUnloading = false;
       state.isBatchStarted = false;
@@ -1207,8 +1375,9 @@ export class TelemetryProcessor {
       currentWeight < state.peakWeight - thresholds.unloadDropThresholdKg
     ) {
       this._flushCurrentSegment(state, currentWeight, thresholds, result, {
-        segmentEndWeight: state.peakWeight,
-        packetTimeMs
+        packetTimeMs,
+        expectedIngredients,
+        allowVisitedZoneIngredient
       });
       state.isUnloading = true;
       state.lastUnloadWeight = currentWeight;
@@ -1261,11 +1430,22 @@ export class TelemetryProcessor {
       lastIngredientName: state.lastIngredientName,
       isBatchStarted: state.isBatchStarted,
       currentMode: this._getCurrentMode(state),
-      zoneCandidates: this._serializeZoneCandidates(state),
-      hostZoneCandidates: this._serializeHostZoneCandidates(state)
+      zoneCandidates: this._serializeZoneCandidates(state)
     };
 
-    state.lastAcceptedWeight = currentWeight;
+    if (!isMotionSuppressed) {
+      state.lastAcceptedWeight = currentWeight;
+      if (!state.isMixing && !state.isUnloading) {
+        this._rememberNormalWeight(state, currentWeight);
+        if (Number.isFinite(Number(packetTimeMs))) {
+          state.lastKnownNormalTimeMs = Number(packetTimeMs);
+        }
+        if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+          state.lastKnownNormalLat = Number(lat);
+          state.lastKnownNormalLon = Number(lon);
+        }
+      }
+    }
     return result;
   }
 
@@ -1277,8 +1457,7 @@ export class TelemetryProcessor {
       currentIngredient: state.currentZone?.ingredient || state.lastIngredientName || null,
       isMoving: state.isMoving,
       currentMode: this._getCurrentMode(state),
-      zoneCandidates: this._serializeZoneCandidates(state),
-      hostZoneCandidates: this._serializeHostZoneCandidates(state)
+      zoneCandidates: this._serializeZoneCandidates(state)
     };
   }
 

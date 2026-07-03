@@ -2,6 +2,7 @@ import { Router } from 'express';
 import prisma from '../../database.js';
 import { authenticate, requireAdmin, requireWriteAccess } from '../../middleware/auth.js';
 import { getZoneByCoordinates, isFreshTimestamp, resolveEffectiveCoordinates } from './telemetry-helpers.js';
+import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js';
 import { syncTechnicalWarnings } from './technical-warning-service.js';
 
 const router = Router();
@@ -87,7 +88,7 @@ function toTrackedWarning(baseWarning, scopeKey, deviceId = null) {
 
 router.get('/current', authenticate, requireAdmin, async (req, res) => {
     try {
-        const [latestHost, latestRtkRows, activeZones] = await Promise.all([
+        const [latestHost, latestRtkRows, activeZones, telemetrySettings] = await Promise.all([
             prisma.telemetry.findFirst({
                 orderBy: { timestamp: 'desc' },
                 select: {
@@ -118,7 +119,8 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             }),
             prisma.storageZone.findMany({
                 where: { active: true }
-            })
+            }),
+            getTelemetrySettings(prisma)
         ]);
         const latestRtk = latestRtkRows.find((row) => !isStaleBufferedRtkRow(row)) || null;
 
@@ -164,8 +166,12 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
         }
 
         const latestRtkReceivedAt = latestRtk?.createdAt ?? latestRtk?.timestamp;
+        const loaderFreshnessMs = Number(
+            telemetrySettings.loaderOfflineTimeoutMinutes ||
+            DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes
+        ) * 60 * 1000;
 
-        if (!latestRtk || !isFreshTimestamp(latestRtkReceivedAt)) {
+        if (!latestRtk || !isFreshTimestamp(latestRtkReceivedAt, loaderFreshnessMs)) {
             const warning = {
                 code: 'no_rtk',
                 title: 'Нет RTK',
@@ -181,7 +187,9 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
         if (activeZones.length > 0 && hasGpsCoordinates) {
             const effectivePosition = await resolveEffectiveCoordinates(prisma, latestHost, {
                 deviceId: latestHost.deviceId,
-                referenceTime: latestHost.timestamp
+                referenceTime: latestHost.timestamp,
+                loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
+                loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
             });
             const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
             if (!currentZone) {

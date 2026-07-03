@@ -45,7 +45,7 @@ function sortPlanIngredients(ingredients) {
 }
 
 function getIngredientTimestampMs(ingredient) {
-    const parsed = new Date(ingredient?.addedAt || 0).getTime();
+    const parsed = new Date(ingredient?.startedAt || ingredient?.addedAt || 0).getTime();
     return Number.isFinite(parsed) ? parsed : 0;
 }
 
@@ -78,14 +78,14 @@ export function buildOrderViolations(planIngredients, actualIngredients) {
 
     const violations = [];
     const loadedKeys = new Set();
+    let maxExpectedPosition = 0;
 
     actualSequence.forEach((actual, actualIndex) => {
         const expected = expectedByKey.get(actual.key);
         if (!expected) return;
 
         if (!loadedKeys.has(actual.key)) {
-            const expectedPosition = loadedKeys.size + 1;
-            if (expected.position !== expectedPosition) {
+            if (expected.position < maxExpectedPosition) {
                 violations.push({
                     code: 'ORDER_MISMATCH',
                     ingredient: actual.name,
@@ -95,6 +95,7 @@ export function buildOrderViolations(planIngredients, actualIngredients) {
                     message: `Компонент "${actual.name}" загружен ${actualIndex + 1}-м, но в рационе должен идти ${expected.position}-м`
                 });
             }
+            maxExpectedPosition = Math.max(maxExpectedPosition, expected.position);
             loadedKeys.add(actual.key);
         }
     });
@@ -102,7 +103,7 @@ export function buildOrderViolations(planIngredients, actualIngredients) {
     return violations;
 }
 
-function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight) {
+function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight, parentIsViolation = false) {
     if (!planItem?.isCompound) {
         return [];
     }
@@ -130,7 +131,8 @@ function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactW
             plan: round1(componentPlanWeight),
             fact: round1(componentFactWeight),
             deviation_percent: deviationPercent,
-            is_violation: false
+            is_violation: Boolean(parentIsViolation),
+            isViolation: Boolean(parentIsViolation)
         };
     });
 }
@@ -261,7 +263,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             deviation_percent: deviationPercent,
             is_violation: isViolation,
             isCompound: Boolean(planItem?.isCompound),
-            components: buildCompoundComponentSummaries(planItem, planWeight, factWeight)
+            components: buildCompoundComponentSummaries(planItem, planWeight, factWeight, isViolation)
         };
     });
 }

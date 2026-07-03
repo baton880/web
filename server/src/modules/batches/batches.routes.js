@@ -7,6 +7,7 @@ import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
 
 const router = Router();
+const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
 
 function round1(value) {
     return Math.round(Number(value || 0) * 10) / 10;
@@ -211,7 +212,11 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
                 include: { ingredients: true }
             },
             actualIngredients: {
-                orderBy: { addedAt: 'asc' }
+                orderBy: [
+                    { startedAt: 'asc' },
+                    { addedAt: 'asc' },
+                    { id: 'asc' }
+                ]
             }
         }
     });
@@ -281,14 +286,50 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
         actualIngredients: batch.actualIngredients.map((ing) => ({
             id: ing.id,
             name: toDisplayIngredientName(ing.ingredientName),
+            startTime: ing.startedAt || null,
             time: ing.addedAt,
+            endTime: ing.addedAt,
             plan: ing.plannedWeight || 0,
             fact: ing.actualWeight,
             deviation: ing.plannedWeight ? (ing.actualWeight - ing.plannedWeight) : 0,
-            isViolation: ing.isViolation
+            isViolation: ing.isViolation,
+            startLat: ing.startLat,
+            startLon: ing.startLon,
+            endLat: ing.endLat,
+            endLon: ing.endLon
         })),
         ingredients: buildIngredientSummary(batch, telemetrySettings)
     };
+}
+
+function normalizeBatchTrackWeights(batch, hostTrack = []) {
+    if (!Array.isArray(hostTrack) || hostTrack.length === 0) {
+        return [];
+    }
+
+    const batchStartWeight = Number(batch?.startWeight || 0);
+    const firstRawWeight = Number(hostTrack[0]?.weight);
+    if (!Number.isFinite(firstRawWeight)) {
+        return hostTrack;
+    }
+
+    const weightOffset = firstRawWeight - batchStartWeight;
+    if (!Number.isFinite(weightOffset) || Math.abs(weightOffset) < 1) {
+        return hostTrack;
+    }
+
+    return hostTrack.map((point) => {
+        const rawWeight = Number(point?.weight);
+        if (!Number.isFinite(rawWeight)) {
+            return point;
+        }
+
+        return {
+            ...point,
+            weight: Math.max(0, rawWeight - weightOffset),
+            rawWeight
+        };
+    });
 }
 
 // ============================================================================
@@ -333,6 +374,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                     ration: { include: { ingredients: true } }, // Связка с "Планом"
                     actualIngredients: true, // Тут лежат компоненты и их нарушения
                     violations: {
+                        where: { status: { in: ACTIVE_VIOLATION_STATUSES } },
                         select: {
                             id: true
                         }
@@ -430,8 +472,10 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             orderBy: { timestamp: 'asc' }
         });
 
+        const normalizedHostTrack = normalizeBatchTrackWeights(batch, hostTrack);
+
         if (!includeRtk) {
-            return res.json(hostTrack);
+            return res.json(normalizedHostTrack);
         }
 
         const hostContextTrack = hostLookbackSeconds > 0
@@ -452,22 +496,25 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
                 orderBy: { timestamp: 'asc' }
             })
             : hostTrack;
+        const normalizedHostContextTrack = hostContextTrack === hostTrack
+            ? normalizedHostTrack
+            : normalizeBatchTrackWeights(batch, hostContextTrack);
 
         const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
             lookbackSeconds: loaderLookbackSeconds
         });
 
         res.json({
-            hostTrack,
-            hostContextTrack,
+            hostTrack: normalizedHostTrack,
+            hostContextTrack: normalizedHostContextTrack,
             loaderTrack,
             meta: {
                 batchId: batch.id,
                 deviceId: batch.deviceId,
                 hostLookbackSeconds,
                 loaderLookbackSeconds,
-                hostPoints: hostTrack.length,
-                hostContextPoints: hostContextTrack.length,
+                hostPoints: normalizedHostTrack.length,
+                hostContextPoints: normalizedHostContextTrack.length,
                 loaderPoints: loaderTrack.length
             }
         });

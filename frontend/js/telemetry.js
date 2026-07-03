@@ -19,6 +19,8 @@ const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "anomalyConfirmPackets",
     "movementSpeedThresholdKmh",
     "movementConfirmPackets",
+    "loaderMaxDistanceMeters",
+    "loaderOfflineTimeoutMinutes",
     "zoneChangeDebounceMs",
     "nullZoneConfirmSeconds",
     "zoneChangeConfirmPackets",

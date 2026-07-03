@@ -34,7 +34,9 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   deviationPercentThreshold: 10,
   deviationMinKgThreshold: 10,
   rtkTrackResetTime: '03:00',
-  rtkHeadingOffsetDeg: 0
+  rtkHeadingOffsetDeg: 0,
+  loaderMaxDistanceMeters: 4,
+  loaderOfflineTimeoutMinutes: 4
 }
 
 function toPositiveInteger(value, fallback) {
@@ -138,6 +140,8 @@ export function coerceTelemetrySettings(row = {}) {
     deviationMinKgThreshold: toPositiveInteger(row.deviationMinKgThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationMinKgThreshold),
     rtkTrackResetTime: normalizeTime(row.rtkTrackResetTime, DEFAULT_TELEMETRY_SETTINGS.rtkTrackResetTime),
     rtkHeadingOffsetDeg: normalizeHeadingOffset(row.rtkHeadingOffsetDeg, DEFAULT_TELEMETRY_SETTINGS.rtkHeadingOffsetDeg),
+    loaderMaxDistanceMeters: toPositiveInteger(row.loaderMaxDistanceMeters, DEFAULT_TELEMETRY_SETTINGS.loaderMaxDistanceMeters),
+    loaderOfflineTimeoutMinutes: toPositiveInteger(row.loaderOfflineTimeoutMinutes, DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes),
     createdAt: row.createdAt || null,
     updatedAt: row.updatedAt || null
   }
@@ -190,7 +194,9 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     'zoneChangeConfirmPackets',
     'zoneDwellScoreCapSeconds',
     'deviationPercentThreshold',
-    'deviationMinKgThreshold'
+    'deviationMinKgThreshold',
+    'loaderMaxDistanceMeters',
+    'loaderOfflineTimeoutMinutes'
   ]
   const nonNegativeIntegerFields = [
     'zoneEntryFrontBonus',

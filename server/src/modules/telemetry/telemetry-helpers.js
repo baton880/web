@@ -1,6 +1,8 @@
-import { detectZoneObject } from '../../../../module-1/geo.js'
+import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
 
 export const TELEMETRY_FRESHNESS_MS = 15000
+export const DEFAULT_LOADER_MAX_DISTANCE_METERS = 150
+export const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 15
 
 export function isFreshTimestamp(value, thresholdMs = TELEMETRY_FRESHNESS_MS) {
   if (!value) return false
@@ -14,7 +16,10 @@ export function isFreshTimestamp(value, thresholdMs = TELEMETRY_FRESHNESS_MS) {
 function buildFreshnessBoundary(referenceTime, thresholdMs = TELEMETRY_FRESHNESS_MS) {
   const parsedReference = referenceTime ? new Date(referenceTime) : new Date()
   const referenceTimestamp = Number.isNaN(parsedReference.getTime()) ? Date.now() : parsedReference.getTime()
-  return new Date(referenceTimestamp - thresholdMs)
+  return {
+    from: new Date(referenceTimestamp - thresholdMs),
+    to: new Date(referenceTimestamp)
+  }
 }
 
 export async function findFreshRtkPoint(prisma, { deviceId = null, referenceTime = null, thresholdMs = TELEMETRY_FRESHNESS_MS } = {}) {
@@ -24,7 +29,10 @@ export async function findFreshRtkPoint(prisma, { deviceId = null, referenceTime
     const sameDevicePoint = await prisma.rtkTelemetry.findFirst({
       where: {
         deviceId,
-        timestamp: { gte: freshnessBoundary }
+        timestamp: {
+          gte: freshnessBoundary.from,
+          lte: freshnessBoundary.to
+        }
       },
       orderBy: [
         { timestamp: 'desc' },
@@ -39,7 +47,10 @@ export async function findFreshRtkPoint(prisma, { deviceId = null, referenceTime
 
   return prisma.rtkTelemetry.findFirst({
     where: {
-      timestamp: { gte: freshnessBoundary }
+      timestamp: {
+        gte: freshnessBoundary.from,
+        lte: freshnessBoundary.to
+      }
     },
     orderBy: [
       { timestamp: 'desc' },
@@ -51,18 +62,58 @@ export async function findFreshRtkPoint(prisma, { deviceId = null, referenceTime
 export async function resolveEffectiveCoordinates(prisma, telemetryLike, options = {}) {
   const source = telemetryLike || {}
   const referenceTime = options.referenceTime || source.timestamp || new Date()
+  const loaderOfflineTimeoutMinutes = Number(options.loaderOfflineTimeoutMinutes) > 0
+    ? Number(options.loaderOfflineTimeoutMinutes)
+    : DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES
+  const loaderMaxDistanceMeters = Number(options.loaderMaxDistanceMeters) > 0
+    ? Number(options.loaderMaxDistanceMeters)
+    : DEFAULT_LOADER_MAX_DISTANCE_METERS
   const rtkPoint = await findFreshRtkPoint(prisma, {
     deviceId: options.deviceId || source.deviceId || null,
     referenceTime,
-    thresholdMs: options.thresholdMs || TELEMETRY_FRESHNESS_MS
+    thresholdMs: options.thresholdMs || loaderOfflineTimeoutMinutes * 60 * 1000
   })
 
   if (rtkPoint) {
+    const hostLat = Number(source.lat)
+    const hostLon = Number(source.lon)
+    const loaderLat = Number(rtkPoint.lat)
+    const loaderLon = Number(rtkPoint.lon)
+    const canCheckDistance = Number.isFinite(hostLat) &&
+      Number.isFinite(hostLon) &&
+      Number.isFinite(loaderLat) &&
+      Number.isFinite(loaderLon)
+
+    if (canCheckDistance) {
+      const distanceMeters = calculateHaversine(hostLat, hostLon, loaderLat, loaderLon)
+      if (distanceMeters > loaderMaxDistanceMeters) {
+        return {
+          lat: hostLat,
+          lon: hostLon,
+          source: 'host',
+          rtkPoint: null,
+          ignoredRtkPoint: rtkPoint,
+          ignoredReason: 'loader_far',
+          loaderDistanceMeters: distanceMeters
+        }
+      }
+
+      return {
+        lat: loaderLat,
+        lon: loaderLon,
+        source: 'rtk',
+        rtkPoint,
+        loaderDistanceMeters: distanceMeters
+      }
+    }
+
     return {
-      lat: Number(rtkPoint.lat),
-      lon: Number(rtkPoint.lon),
-      source: 'rtk',
-      rtkPoint
+      lat: Number(source.lat),
+      lon: Number(source.lon),
+      source: 'host',
+      rtkPoint: null,
+      ignoredRtkPoint: rtkPoint,
+      ignoredReason: 'host_position_missing'
     }
   }
 
@@ -70,7 +121,21 @@ export async function resolveEffectiveCoordinates(prisma, telemetryLike, options
     lat: Number(source.lat),
     lon: Number(source.lon),
     source: 'host',
-    rtkPoint: null
+    rtkPoint: null,
+    ignoredReason: 'loader_offline'
+  }
+}
+
+export function serializeEffectivePositionDebug(effectivePosition) {
+  if (!effectivePosition) return null
+
+  return {
+    source: effectivePosition.source,
+    ignoredReason: effectivePosition.ignoredReason || null,
+    loaderDistanceMeters: Number.isFinite(Number(effectivePosition.loaderDistanceMeters))
+      ? Math.round(Number(effectivePosition.loaderDistanceMeters))
+      : null,
+    loaderTimestamp: effectivePosition.rtkPoint?.timestamp || effectivePosition.ignoredRtkPoint?.timestamp || null
   }
 }
 
@@ -124,6 +189,7 @@ export async function resolveGroupByCoordinates(prisma, lat, lon) {
   const groups = await prisma.livestockGroup.findMany({
     include: {
       storageZone: true,
+      ration: { include: { ingredients: true } },
     },
     orderBy: { id: 'asc' },
   })
@@ -139,6 +205,7 @@ export async function resolveGroupByCoordinates(prisma, lat, lon) {
       id: group.id,
       name: group.name,
       rationId: group.rationId ?? null,
+      ration: group.ration || null,
       storageZoneId: group.storageZoneId ?? null,
       matchedZoneId: group.storageZone?.id ?? null,
     }

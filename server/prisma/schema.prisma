@@ -129,6 +129,8 @@ model TelemetrySettings {
   deviationMinKgThreshold   Int   @default(10)
   rtkTrackResetTime         String @default("03:00")
   rtkHeadingOffsetDeg       Float  @default(0)
+  loaderMaxDistanceMeters   Int    @default(4)
+  loaderOfflineTimeoutMinutes Int   @default(4)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt
 }
@@ -228,6 +230,11 @@ model BatchIngredient {
   
   plannedWeight   Float?   // Пока опционально
   actualWeight    Float    
+  startedAt       DateTime?
+  startLat        Float?
+  startLon        Float?
+  endLat          Float?
+  endLon          Float?
   
   isViolation     Boolean  @default(false)
 
