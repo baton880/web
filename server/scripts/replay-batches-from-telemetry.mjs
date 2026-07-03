@@ -234,6 +234,7 @@ function normalizeTelemetryRow(row) {
     gpsSatellites: Number(row.gpsSatellites || 0),
     speedKmh: row.speedKmh === null || row.speedKmh === undefined ? null : Number(row.speedKmh),
     weight: Number(row.weight || 0),
+    rawWeight: row.rawWeight === null || row.rawWeight === undefined ? null : Number(row.rawWeight),
     weightValid: parseBoolean(row.weightValid),
     gpsQuality: Number(row.gpsQuality || 0),
     wifiClients: row.wifiClients ?? [],
@@ -241,6 +242,18 @@ function normalizeTelemetryRow(row) {
     lteRssiDbm: row.lteRssiDbm ?? null,
     lteAccessTech: row.lteAccessTech ?? null,
     eventsReaderOk: parseBoolean(row.eventsReaderOk)
+  }
+}
+
+function applyWeightCalibration(packet, telemetrySettings = {}) {
+  const factor = Number(telemetrySettings.weightCalibrationFactor)
+  if (!Number.isFinite(factor) || factor <= 0 || factor === 1) {
+    return packet
+  }
+
+  return {
+    ...packet,
+    weight: Number(packet.weight || 0) * factor
   }
 }
 
@@ -337,6 +350,13 @@ async function resetCalculatedTables() {
   await prisma.batchIngredient.deleteMany({})
   await prisma.batch.deleteMany({})
   await prisma.$executeRawUnsafe("DELETE FROM sqlite_sequence WHERE name IN ('Violation', 'BatchIngredient', 'Batch')")
+
+  const batchIdSequenceStart = Number.parseInt(process.env.REPLAY_BATCH_ID_SEQUENCE_START || '', 10)
+  if (Number.isInteger(batchIdSequenceStart) && batchIdSequenceStart > 0) {
+    await prisma.$executeRawUnsafe(
+      `INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('Batch', ${batchIdSequenceStart})`
+    )
+  }
 }
 
 async function main() {
@@ -438,7 +458,7 @@ async function main() {
     if (!rows.length) break
 
     for (const row of rows) {
-      const packet = normalizeTelemetryRow(row)
+      const packet = applyWeightCalibration(normalizeTelemetryRow(row), telemetrySettings)
       const deviceId = packet.deviceId
       const packetTimeMs = new Date(packet.timestamp).getTime()
       rtkReplayCursor = replayRtkScoreboardUntil({
@@ -462,11 +482,15 @@ async function main() {
       const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
       const expectedIngredients = activeBatchForHints?.expectedIngredients || resolveExpectedIngredientsFromGroup(resolvedGroup)
       const currentZone = detectZoneObject(effectivePosition.lat, effectivePosition.lon, activeZones)
+      const hostLoadingZone = detectZoneObject(packet.lat, packet.lon, loadingZones)
+      const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
       const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
         skipZoneVisit: effectivePosition.source === 'rtk',
         allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
+        preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
+        hostForceIngredientName,
         expectedIngredients
       })
 
@@ -728,8 +752,14 @@ async function main() {
             const nearZeroCount = recentWeights.filter((weight) => Math.max(0, Number(weight || 0)) <= autoCloseZeroWeightKg).length
             const shouldAutoCloseByNegative = recentWeights.length >= autoCloseNegativeStreak && negativeCount >= autoCloseNegativeStreak
             const shouldAutoCloseByEmpty = recentWeights.length >= autoCloseEmptyStreak && nearZeroCount >= autoCloseEmptyStreak
+            const currentWeight = Number(packet.weight || 0)
+            const currentPacketIsNegative = currentWeight < 0
+            const currentPacketIsEmpty = Math.max(0, currentWeight) <= autoCloseZeroWeightKg
 
-            if (shouldAutoCloseByNegative || shouldAutoCloseByEmpty) {
+            if (
+              (shouldAutoCloseByNegative && currentPacketIsNegative) ||
+              (shouldAutoCloseByEmpty && currentPacketIsEmpty)
+            ) {
               const closedBatchId = activeBatch.id
               await prisma.batch.update({
                 where: { id: closedBatchId },

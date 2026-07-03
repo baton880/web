@@ -1150,17 +1150,6 @@ $(document).ready(function () {
         return objects;
     }
 
-    function getIngredientRowsWithTimestamps(rows) {
-        return (Array.isArray(rows) ? rows : [])
-            .map((row) => ({
-                row,
-                id: normalizeNullableId(row?.id),
-                timestampMs: parseTimestampMs(row?.endTime || row?.time),
-            }))
-            .filter((item) => item.id !== null && Number.isFinite(item.timestampMs))
-            .sort((left, right) => left.timestampMs - right.timestampMs || left.id - right.id);
-    }
-
     function findSelectedIngredientRow(rows) {
         const selectedId = normalizeNullableId(state.selectedIngredientId);
         if (selectedId === null) {
@@ -1177,16 +1166,10 @@ $(document).ready(function () {
             return null;
         }
 
-        const rowsWithTimestamps = getIngredientRowsWithTimestamps(rows);
-        const rowIndex = rowsWithTimestamps.findIndex((item) => item.id === ingredientId);
-        const previousTimestampMs = rowIndex > 0 ? rowsWithTimestamps[rowIndex - 1].timestampMs : null;
         const storedStartTimestampMs = parseTimestampMs(row?.startTime);
-        const batchStartMs = parseTimestampMs(state.batch?.startTime);
         let startTimestampMs = Number.isFinite(storedStartTimestampMs) && storedStartTimestampMs < endTimestampMs
             ? storedStartTimestampMs
-            : Number.isFinite(previousTimestampMs) && previousTimestampMs < endTimestampMs
-            ? previousTimestampMs
-            : (Number.isFinite(batchStartMs) ? batchStartMs : null);
+            : null;
 
         if (!Number.isFinite(startTimestampMs) || startTimestampMs >= endTimestampMs - 1000) {
             startTimestampMs = endTimestampMs - INGREDIENT_TRACK_DEFAULT_LOOKBACK_MS;

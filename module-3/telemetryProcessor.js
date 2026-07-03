@@ -31,6 +31,12 @@ const LOADING_START_CONFIRM_PACKETS = 2;
 const MIN_LOADING_IDLE_CLOSE_MS = 15000;
 const FIRST_BATCH_START_MARGIN_MIN_KG = 5;
 const FIRST_BATCH_START_MARGIN_RATIO = 0.15;
+const LOADING_SCORE_FREEZE_LOOKBACK_MS = 3000;
+const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
+const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
+const FORCE_CURRENT_ZONE_INGREDIENT_KEYS = new Set([
+  normalizeIngredientName('Комбикорм')
+]);
 
 function normalizeDegrees(value) {
   const parsed = Number(value);
@@ -183,6 +189,7 @@ export class TelemetryProcessor {
       loadingStartTimeMs: null,
       loadingStartLat: null,
       loadingStartLon: null,
+      loadingForcedIngredientName: null,
       loadingCandidateCount: 0,
       loadingCandidateTimeMs: null,
       loadingCandidateLat: null,
@@ -214,6 +221,9 @@ export class TelemetryProcessor {
       movingSpeedStreak: 0,
       stationarySpeedStreak: 0,
       visitedZones: [],
+      zoneVisitSnapshots: [],
+      frozenVisitedZones: null,
+      frozenZoneScoreCutoffMs: null,
       lastActiveZoneKey: null,
       lastZoneDwellAtMs: null,
       currentZoneDwellMs: 0,
@@ -243,6 +253,7 @@ export class TelemetryProcessor {
     state.loadingStartTimeMs = null;
     state.loadingStartLat = null;
     state.loadingStartLon = null;
+    state.loadingForcedIngredientName = null;
     this._clearLoadingCandidate(state);
   }
 
@@ -539,6 +550,73 @@ export class TelemetryProcessor {
     visit.score = dwellScore + Number(visit.entryScore || 0) + squareHeadingScore;
   }
 
+  _cloneZoneVisit(visit) {
+    return visit ? { ...visit } : null;
+  }
+
+  _cloneZoneVisits(visits = []) {
+    return (Array.isArray(visits) ? visits : [])
+      .map((visit) => this._cloneZoneVisit(visit))
+      .filter(Boolean);
+  }
+
+  _rememberZoneVisitSnapshot(state, packetTimeMs) {
+    if (!Number.isFinite(Number(packetTimeMs))) return;
+    if (!Array.isArray(state.zoneVisitSnapshots)) {
+      state.zoneVisitSnapshots = [];
+    }
+
+    const timestampMs = Number(packetTimeMs);
+    state.zoneVisitSnapshots.push({
+      timestampMs,
+      visitedZones: this._cloneZoneVisits(state.visitedZones)
+    });
+
+    const minTimestampMs = timestampMs - ZONE_VISIT_SNAPSHOT_RETENTION_MS;
+    while (
+      state.zoneVisitSnapshots.length > ZONE_VISIT_SNAPSHOT_LIMIT ||
+      (
+        state.zoneVisitSnapshots.length > 1 &&
+        Number(state.zoneVisitSnapshots[0]?.timestampMs || 0) < minTimestampMs
+      )
+    ) {
+      state.zoneVisitSnapshots.shift();
+    }
+  }
+
+  _freezeZoneScoreboardForLoading(state) {
+    if (!state || state.frozenVisitedZones || !Number.isFinite(Number(state.loadingStartTimeMs))) {
+      return;
+    }
+
+    const cutoffMs = Number(state.loadingStartTimeMs) - LOADING_SCORE_FREEZE_LOOKBACK_MS;
+    const snapshots = Array.isArray(state.zoneVisitSnapshots) ? state.zoneVisitSnapshots : [];
+    let selectedSnapshot = null;
+
+    for (const snapshot of snapshots) {
+      const snapshotTimeMs = Number(snapshot?.timestampMs);
+      if (!Number.isFinite(snapshotTimeMs)) continue;
+      if (snapshotTimeMs <= cutoffMs) {
+        selectedSnapshot = snapshot;
+      } else {
+        break;
+      }
+    }
+
+    state.frozenVisitedZones = this._cloneZoneVisits(
+      selectedSnapshot?.visitedZones?.length ? selectedSnapshot.visitedZones : state.visitedZones
+    );
+    state.frozenZoneScoreCutoffMs = cutoffMs;
+  }
+
+  _getIngredientZoneVisits(state) {
+    if (Array.isArray(state?.frozenVisitedZones)) {
+      return state.frozenVisitedZones;
+    }
+
+    return Array.isArray(state?.visitedZones) ? state.visitedZones : [];
+  }
+
   _applyEntryScore(visit, previousPoint, currentPoint, thresholds) {
     if (!visit || visit.entryKind !== 'unknown') return;
     if (!previousPoint || !currentPoint?.headingUsable) return;
@@ -672,6 +750,7 @@ export class TelemetryProcessor {
     state.lastZoneTrackPoint = Number.isFinite(currentPoint.lat) && Number.isFinite(currentPoint.lon)
       ? currentPoint
       : null;
+    this._rememberZoneVisitSnapshot(state, packetTimeMs);
   }
 
   _normalizeExpectedIngredients(expectedIngredients = []) {
@@ -704,9 +783,10 @@ export class TelemetryProcessor {
   }
 
   _pickVisitedZoneIngredient(state, expectedIngredients = []) {
-    if (!Array.isArray(state?.visitedZones)) return null;
+    const zoneVisits = this._getIngredientZoneVisits(state);
+    if (!zoneVisits.length) return null;
 
-    const candidates = state.visitedZones
+    const candidates = zoneVisits
       .filter((visit) => Number(visit.dwellMs || 0) > 0 && (visit.ingredient || visit.name))
       .sort((a, b) => {
         const scoreDiff = Number(b.score || 0) - Number(a.score || 0);
@@ -735,16 +815,45 @@ export class TelemetryProcessor {
 
   _resetVisitedZones(state, packetTimeMs = Date.now()) {
     state.visitedZones = [];
+    state.zoneVisitSnapshots = [];
+    state.frozenVisitedZones = null;
+    state.frozenZoneScoreCutoffMs = null;
     state.lastActiveZoneKey = null;
     state.lastZoneDwellAtMs = packetTimeMs;
     state.currentZoneDwellMs = 0;
     state.lastZoneTrackPoint = null;
   }
 
-  _serializeZoneCandidates(state) {
-    if (!Array.isArray(state?.visitedZones)) return [];
+  _isForceCurrentZoneIngredientName(ingredientName) {
+    return FORCE_CURRENT_ZONE_INGREDIENT_KEYS.has(normalizeIngredientName(ingredientName));
+  }
 
-    return state.visitedZones.map((visit) => ({
+  _isForceCurrentZoneIngredient(zoneName, zoneObject) {
+    return this._isForceCurrentZoneIngredientName(zoneObject?.ingredient || zoneName);
+  }
+
+  _resolveForcedLoadingStartIngredient(state, zonesConfig = []) {
+    if (
+      !Number.isFinite(Number(state?.loadingStartLat)) ||
+      !Number.isFinite(Number(state?.loadingStartLon))
+    ) {
+      return null;
+    }
+
+    const loadingStartZone = detectZoneWithRadiusFallback(
+      Number(state.loadingStartLat),
+      Number(state.loadingStartLon),
+      zonesConfig
+    );
+    const ingredientName = loadingStartZone?.ingredient || loadingStartZone?.name || null;
+    return this._isForceCurrentZoneIngredientName(ingredientName) ? ingredientName : null;
+  }
+
+  _serializeZoneCandidates(state) {
+    const zoneVisits = this._getIngredientZoneVisits(state);
+    if (!zoneVisits.length) return [];
+
+    return zoneVisits.map((visit) => ({
       name: visit.name,
       ingredient: visit.ingredient,
       score: Math.round(Number(visit.score || 0) * 10) / 10,
@@ -827,6 +936,18 @@ export class TelemetryProcessor {
   }
 
   _resolveSegmentIngredient(state, expectedIngredients = [], options = {}) {
+    if (state.loadingForcedIngredientName) {
+      return state.loadingForcedIngredientName;
+    }
+
+    if (options.overrideIngredientName) {
+      return options.overrideIngredientName;
+    }
+
+    if (options.preferCurrentZoneIngredient && state.currentZone?.ingredient) {
+      return state.currentZone.ingredient;
+    }
+
     const visitedIngredient = options.allowVisitedZoneIngredient === false
       ? null
       : this._pickVisitedZoneIngredient(state, expectedIngredients);
@@ -890,7 +1011,9 @@ export class TelemetryProcessor {
     const ingredientName = this._isTerminalRecoveryContext(state, options)
       ? 'Восстановление терминала'
       : this._resolveSegmentIngredient(state, options.expectedIngredients, {
-        allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
+        allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+        preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
+        overrideIngredientName: options.overrideIngredientName
       });
     if (normalizeIngredientName(ingredientName) === 'unknown') {
       return false;
@@ -956,17 +1079,35 @@ export class TelemetryProcessor {
 
   _confirmZoneChange(state, zoneName, zoneObject, ingredientName, currentWeight, thresholds, result, options = {}) {
     // Флешим сегмент ПРЕДЫДУЩЕЙ подтверждённой зоны
-    this._flushCurrentSegment(state, currentWeight, thresholds, result, {
+    const previousSegmentPeakWeight = Number(state.segmentPeakWeight);
+    const previousSegmentPeakTimeMs = Number(state.segmentPeakTimeMs);
+    const previousSegmentPeakLat = Number(state.segmentPeakLat);
+    const previousSegmentPeakLon = Number(state.segmentPeakLon);
+    const flushed = this._flushCurrentSegment(state, currentWeight, thresholds, result, {
       suppressLoading: options.suppressLoading,
       packetTimeMs: options.packetTimeMs,
       expectedIngredients: options.expectedIngredients,
-      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient
+      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+      preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
+      overrideIngredientName: options.preferCurrentZoneIngredient ? ingredientName : null
     });
+    const nextBaselineWeight = flushed && Number.isFinite(previousSegmentPeakWeight)
+      ? previousSegmentPeakWeight
+      : currentWeight;
+    const nextBaselineTimeMs = flushed && Number.isFinite(previousSegmentPeakTimeMs)
+      ? previousSegmentPeakTimeMs
+      : options.packetTimeMs;
+    const nextBaselineLat = flushed && Number.isFinite(previousSegmentPeakLat)
+      ? previousSegmentPeakLat
+      : options.lat;
+    const nextBaselineLon = flushed && Number.isFinite(previousSegmentPeakLon)
+      ? previousSegmentPeakLon
+      : options.lon;
 
     // Обновляем состояние на НОВУЮ подтверждённую зону
     state.currentZone = zoneObject ? { ...zoneObject, ingredient: ingredientName } : null;
     state.confirmedZoneName = zoneName;
-    this._setZoneBaseline(state, currentWeight, options.packetTimeMs, options.lat, options.lon);
+    this._setZoneBaseline(state, nextBaselineWeight, nextBaselineTimeMs, nextBaselineLat, nextBaselineLon);
     state.recoveringFromInvalidWeight = false;
   }
 
@@ -1015,6 +1156,7 @@ export class TelemetryProcessor {
     );
     const expectedIngredients = Array.isArray(options.expectedIngredients) ? options.expectedIngredients : [];
     const allowVisitedZoneIngredient = options.allowVisitedZoneIngredient !== false;
+    const preferCurrentZoneIngredient = Boolean(options.preferCurrentZoneIngredient);
 
     if (!Number.isFinite(currentWeightRaw) || currentWeightRaw < 0) {
       if (!state.recoveringFromInvalidWeight) {
@@ -1070,6 +1212,7 @@ export class TelemetryProcessor {
       const segmentEndLon = usePreviousZonePeak && Number.isFinite(Number(state.segmentPeakLon))
         ? Number(state.segmentPeakLon)
         : lon;
+      const shouldPreferMotionZoneIngredient = preferCurrentZoneIngredient;
       const flushed = this._flushCurrentSegment(
         state,
         segmentEndWeight,
@@ -1083,6 +1226,10 @@ export class TelemetryProcessor {
           lon,
           expectedIngredients,
           allowVisitedZoneIngredient,
+          preferCurrentZoneIngredient: shouldPreferMotionZoneIngredient,
+          overrideIngredientName: shouldPreferMotionZoneIngredient
+            ? (motionActiveZone?.ingredient || motionActiveZoneName || null)
+            : null,
           segmentEndWeight,
           segmentEndTimeMs,
           segmentEndLat,
@@ -1133,6 +1280,14 @@ export class TelemetryProcessor {
       : nearbyLoadingZone;
     const activeZoneName = activeZone?.name || null;
     const activeIngredientName = activeZone?.ingredient || activeZoneName;
+    const forcedHostIngredientName = this._isForceCurrentZoneIngredientName(options.hostForceIngredientName)
+      ? options.hostForceIngredientName
+      : null;
+    const shouldPreferCurrentZoneIngredient = preferCurrentZoneIngredient;
+
+    if (!isMotionSuppressed && forcedHostIngredientName) {
+      this._resetVisitedZones(state, packetTimeMs);
+    }
 
     if (
       state.recoveringFromInvalidWeight &&
@@ -1213,7 +1368,7 @@ export class TelemetryProcessor {
             currentWeight,
             thresholds,
             result,
-            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient }
+            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient, preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient }
           );
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
@@ -1242,7 +1397,7 @@ export class TelemetryProcessor {
             currentWeight,
             thresholds,
             result,
-            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient }
+            { suppressLoading, packetTimeMs, lat, lon, expectedIngredients, allowVisitedZoneIngredient, preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient }
           );
           state.pendingZoneName = null;
           state.pendingZoneEnteredAtMs = null;
@@ -1264,6 +1419,13 @@ export class TelemetryProcessor {
       !state.isUnloading &&
       this._updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs, lat, lon)
     );
+    if (hasConfirmedLoadingStart) {
+      const loadingStartForcedIngredientName = this._resolveForcedLoadingStartIngredient(state, zonesConfig);
+      if (loadingStartForcedIngredientName) {
+        state.loadingForcedIngredientName = loadingStartForcedIngredientName;
+      }
+      this._freezeZoneScoreboardForLoading(state);
+    }
 
     // Базовый вес обновляется только в спокойном режиме
     if (
@@ -1315,7 +1477,8 @@ export class TelemetryProcessor {
         segmentEndLat: state.segmentPeakLat,
         segmentEndLon: state.segmentPeakLon,
         expectedIngredients,
-        allowVisitedZoneIngredient
+        allowVisitedZoneIngredient,
+        preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient
       });
 
       if (flushed) {
@@ -1377,7 +1540,8 @@ export class TelemetryProcessor {
       this._flushCurrentSegment(state, currentWeight, thresholds, result, {
         packetTimeMs,
         expectedIngredients,
-        allowVisitedZoneIngredient
+        allowVisitedZoneIngredient,
+        preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient
       });
       state.isUnloading = true;
       state.lastUnloadWeight = currentWeight;

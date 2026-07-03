@@ -35,7 +35,8 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   deviationMinKgThreshold: 10,
   rtkTrackResetTime: '03:00',
   rtkHeadingOffsetDeg: 0,
-  loaderMaxDistanceMeters: 4,
+  weightCalibrationFactor: 1,
+  loaderMaxDistanceMeters: 20,
   loaderOfflineTimeoutMinutes: 4
 }
 
@@ -106,6 +107,11 @@ function normalizeHeadingOffset(value, fallback) {
   return parsed
 }
 
+function toPositiveNumber(value, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback
+}
+
 export function coerceTelemetrySettings(row = {}) {
   return {
     batchStartThresholdKg: toPositiveInteger(row.batchStartThresholdKg, DEFAULT_TELEMETRY_SETTINGS.batchStartThresholdKg),
@@ -140,6 +146,7 @@ export function coerceTelemetrySettings(row = {}) {
     deviationMinKgThreshold: toPositiveInteger(row.deviationMinKgThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationMinKgThreshold),
     rtkTrackResetTime: normalizeTime(row.rtkTrackResetTime, DEFAULT_TELEMETRY_SETTINGS.rtkTrackResetTime),
     rtkHeadingOffsetDeg: normalizeHeadingOffset(row.rtkHeadingOffsetDeg, DEFAULT_TELEMETRY_SETTINGS.rtkHeadingOffsetDeg),
+    weightCalibrationFactor: toPositiveNumber(row.weightCalibrationFactor, DEFAULT_TELEMETRY_SETTINGS.weightCalibrationFactor),
     loaderMaxDistanceMeters: toPositiveInteger(row.loaderMaxDistanceMeters, DEFAULT_TELEMETRY_SETTINGS.loaderMaxDistanceMeters),
     loaderOfflineTimeoutMinutes: toPositiveInteger(row.loaderOfflineTimeoutMinutes, DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes),
     createdAt: row.createdAt || null,
@@ -209,6 +216,9 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     ['zoneEntryRearAngleDeg', 1, 180],
     ['squareHeadingMaxAngleDeg', 1, 180]
   ]
+  const positiveNumberFields = [
+    'weightCalibrationFactor'
+  ]
 
   const data = {}
 
@@ -260,6 +270,24 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     if (!Number.isInteger(parsed) || parsed < min || parsed > max) {
       return {
         error: `${field} должен быть целым числом от ${min} до ${max}`
+      }
+    }
+
+    data[field] = parsed
+  }
+
+  for (const field of positiveNumberFields) {
+    if (payload[field] === undefined) {
+      if (!partial) {
+        data[field] = DEFAULT_TELEMETRY_SETTINGS[field]
+      }
+      continue
+    }
+
+    const parsed = Number(payload[field])
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return {
+        error: `${field} должен быть положительным числом`
       }
     }
 

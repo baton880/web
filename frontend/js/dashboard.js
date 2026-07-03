@@ -57,6 +57,8 @@ let lastTelemetryChangeAt = 0;
 let lastTelemetrySnapshotKey = null;
 let isFetchingHistory = false;
 let trackHistoryVersion = { host: 0, rtk: 0 };
+let visibleTrackClearedThroughMs = { host: null, rtk: null };
+let lastTrackHistoryMaxTimestampMs = { host: null, rtk: null };
 let retainedTrackMarkerTelemetry = { host: null, rtk: null };
 let isMarkerTrackingEnabled = false;
 let markerTrackingTarget = "all";
@@ -1444,6 +1446,48 @@ function parseRouteTimestampMs(value) {
     return Number.isFinite(timestamp) ? timestamp : null;
 }
 
+function getHistoryMaxTimestampMs(historyRows) {
+    if (!Array.isArray(historyRows)) {
+        return null;
+    }
+
+    return historyRows.reduce((maxTimestamp, row) => {
+        const timestampMs = parseRouteTimestampMs(row?.timestamp);
+        if (timestampMs === null) {
+            return maxTimestamp;
+        }
+        return maxTimestamp === null ? timestampMs : Math.max(maxTimestamp, timestampMs);
+    }, null);
+}
+
+function rememberTrackHistoryMaxTimestamp(track, historyRows) {
+    const maxTimestampMs = getHistoryMaxTimestampMs(historyRows);
+    if (maxTimestampMs === null) {
+        return;
+    }
+
+    lastTrackHistoryMaxTimestampMs[track] = Math.max(
+        Number(lastTrackHistoryMaxTimestampMs[track] || 0),
+        maxTimestampMs
+    );
+}
+
+function filterVisibleTrackRows(track, historyRows) {
+    if (!Array.isArray(historyRows)) {
+        return [];
+    }
+
+    const clearedThroughMs = Number(visibleTrackClearedThroughMs[track]);
+    if (!Number.isFinite(clearedThroughMs) || clearedThroughMs <= 0) {
+        return historyRows;
+    }
+
+    return historyRows.filter((row) => {
+        const timestampMs = parseRouteTimestampMs(row?.timestamp);
+        return timestampMs !== null && timestampMs > clearedThroughMs;
+    });
+}
+
 function buildRoutePoints(historyRows) {
     if (!Array.isArray(historyRows)) {
         return [];
@@ -1591,7 +1635,8 @@ function createTrackPolylines(segments, options) {
 function renderRoute(historyRows) {
     if (!map) return;
 
-    const routeSegments = buildTrackSegments(historyRows);
+    rememberTrackHistoryMaxTimestamp("host", historyRows);
+    const routeSegments = buildTrackSegments(filterVisibleTrackRows("host", historyRows));
 
     if (!routeSegments.length) {
         clearRoutePolyline();
@@ -1610,7 +1655,8 @@ function renderRoute(historyRows) {
 function renderRtkRoute(historyRows) {
     if (!map) return;
 
-    const routeSegments = buildRtkTrackSegments(historyRows);
+    rememberTrackHistoryMaxTimestamp("rtk", historyRows);
+    const routeSegments = buildRtkTrackSegments(filterVisibleTrackRows("rtk", historyRows));
 
     if (!routeSegments.length) {
         clearRtkRoutePolyline();
@@ -1760,6 +1806,7 @@ function buildTelemetryRestorePayload(row) {
         gps_valid: Boolean(row.gpsValid),
         gps_satellites: Number(row.gpsSatellites) || 0,
         weight: row.weight == null ? 0 : Number(row.weight),
+        raw: row.rawWeight == null ? 0 : Number(row.rawWeight),
         weight_valid: Boolean(row.weightValid),
         gps_quality: Number(row.gpsQuality) || 0,
         wifi_clients: parseWifiClients(row.wifiClients),
@@ -1993,38 +2040,27 @@ async function clearTelemetryHistory(track = "host") {
     }
 
     try {
-        const shouldEnableUndo = config.enableUndo !== false;
-        const snapshotRows = shouldEnableUndo ? await fetchTelemetrySnapshot(track) : [];
-        const response = await fetch(config.clearApi, {
-            method: "DELETE",
-            headers: getHeaders(),
-        });
+        const latestTimestampMs = parseRouteTimestampMs(track === "rtk"
+            ? latestRtkTelemetry?.timestamp
+            : latestTelemetry?.timestamp);
+        const historyMaxTimestampMs = Number(lastTrackHistoryMaxTimestampMs[track]);
+        const knownTrackTimestampMs = Math.max(
+            Number.isFinite(latestTimestampMs) ? latestTimestampMs : 0,
+            Number.isFinite(historyMaxTimestampMs) ? historyMaxTimestampMs : 0
+        );
+        const clearedThroughMs = knownTrackTimestampMs > 0 ? knownTrackTimestampMs : Date.now();
 
-        if (!response.ok) {
-            let errorMessage = `Не удалось очистить трек (${config.label})`;
-
-            try {
-                const payload = await response.json();
-                if (payload?.error) {
-                    errorMessage = payload.error;
-                }
-            } catch (error) {
-                // keep generic message when response body is not JSON
-            }
-
-            throw new Error(errorMessage);
-        }
-
+        visibleTrackClearedThroughMs[track] = clearedThroughMs;
         trackHistoryVersion[track] += 1;
-        config.afterClear(snapshotRows);
-        if (shouldEnableUndo) {
-            pendingTelemetryUndo = { rows: snapshotRows, track };
-            showTelemetryUndoAlert(config.label);
+        if (track === "rtk") {
+            clearRtkRoutePolyline();
         } else {
-            removeUndoAlert();
-            pendingTelemetryUndo = null;
-            window.AppAuth?.showAlert?.(`Трек (${config.label}) очищен`, "success");
+            clearRoutePolyline();
         }
+        syncMapActionButtons();
+        removeUndoAlert();
+        pendingTelemetryUndo = null;
+        window.AppAuth?.showAlert?.(`Трек (${config.label}) убран с главной карты`, "success");
     } catch (error) {
         console.error("Error clearing telemetry history:", error);
         window.AppAuth?.showAlert?.(error.message || `Не удалось очистить трек (${config.label})`, "danger");

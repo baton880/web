@@ -22,6 +22,7 @@ router.put('/', authenticate, requireAdmin, async (req, res) => {
     if (
       error.message?.includes('должен быть положительным') ||
       error.message?.includes('формате HH:mm') ||
+      error.message?.includes('weightCalibrationFactor') ||
       error.message?.includes('rtkHeadingOffsetDeg')
     ) {
       return res.status(400).json({ error: error.message })

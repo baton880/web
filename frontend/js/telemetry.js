@@ -35,6 +35,9 @@ const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "deviationPercentThreshold",
     "deviationMinKgThreshold",
 ];
+const TELEMETRY_SETTINGS_FLOAT_FIELDS = [
+    "weightCalibrationFactor",
+];
 const TELEMETRY_SETTINGS_NON_NEGATIVE_FIELDS = new Set([
     "zoneEntryFrontBonus",
     "zoneEntryRearPenalty",
@@ -387,6 +390,13 @@ function fillTelemetrySettingsForm(settings) {
         }
     });
 
+    TELEMETRY_SETTINGS_FLOAT_FIELDS.forEach((field) => {
+        const input = form.elements.namedItem(field);
+        if (input) {
+            input.value = settings[field] != null ? String(settings[field]) : "";
+        }
+    });
+
     const resetTimeInput = form.elements.namedItem("rtkTrackResetTime");
     if (resetTimeInput) {
         resetTimeInput.value = settings.rtkTrackResetTime || "03:00";
@@ -439,6 +449,18 @@ async function saveTelemetrySettings(event) {
             (maxValue != null && number > maxValue)
         ) {
             window.AppAuth?.showAlert?.("Все числовые настройки должны быть целыми и попадать в допустимые диапазоны", "warning");
+            return;
+        }
+
+        payload[field] = number;
+    }
+
+    for (const field of TELEMETRY_SETTINGS_FLOAT_FIELDS) {
+        const rawValue = String(formData.get(field) || "").trim();
+        const number = Number(rawValue);
+
+        if (!rawValue || !Number.isFinite(number) || number <= 0) {
+            window.AppAuth?.showAlert?.("Коэффициент калибровки веса должен быть положительным числом", "warning");
             return;
         }
 
@@ -509,7 +531,7 @@ function renderHostTable(rows) {
     if (!tbody) return;
 
     if (!Array.isArray(rows) || rows.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="16" class="telemetry-empty-state">По хозяину пока нет записей.</td></tr>';
+        tbody.innerHTML = '<tr><td colspan="17" class="telemetry-empty-state">По хозяину пока нет записей.</td></tr>';
         return;
     }
 
@@ -524,6 +546,7 @@ function renderHostTable(rows) {
             <td>${row.gpsSatellites ?? "--"}</td>
             <td>${formatSpeedKmh(row.speedKmh)}</td>
             <td>${row.weight != null ? formatShortNumber(row.weight, 1) : "--"}</td>
+            <td>${row.rawWeight != null ? formatShortNumber(row.rawWeight, 1) : "--"}</td>
             <td>${boolBadge(row.weightValid)}</td>
             <td>${row.gpsQuality ?? "--"}</td>
             <td>${formatWifiClients(row.wifiClients)}</td>

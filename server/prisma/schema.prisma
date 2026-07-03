@@ -17,6 +17,7 @@ model Telemetry {
   gpsSatellites  Int      @default(0)
   speedKmh       Float?
   weight         Float
+  rawWeight      Float?
   weightValid    Boolean  @default(false)
   gpsQuality     Int      @default(0)
   wifiClients    String? 
@@ -129,6 +130,7 @@ model TelemetrySettings {
   deviationMinKgThreshold   Int   @default(10)
   rtkTrackResetTime         String @default("03:00")
   rtkHeadingOffsetDeg       Float  @default(0)
+  weightCalibrationFactor   Float  @default(1)
   loaderMaxDistanceMeters   Int    @default(4)
   loaderOfflineTimeoutMinutes Int   @default(4)
   createdAt              DateTime @default(now())

@@ -124,6 +124,7 @@ function normalizeTelemetryPacket(packet) {
     gpsSatellites: Number(packet.gpsSatellites ?? packet.gps_satellites ?? 0),
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
+    rawWeight: parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight),
     weightValid: parseBoolean(packet.weightValid ?? packet.weight_valid),
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
@@ -134,11 +135,23 @@ function normalizeTelemetryPacket(packet) {
   }
 }
 
+function applyWeightCalibration(packet, telemetrySettings = {}) {
+  const factor = Number(telemetrySettings.weightCalibrationFactor)
+  if (!Number.isFinite(factor) || factor <= 0 || factor === 1) {
+    return packet
+  }
+
+  return {
+    ...packet,
+    weight: Number(packet.weight || 0) * factor
+  }
+}
+
 // Хелпер для пустых ответов
 function buildEmptyLatestResponse(deviceId = null) {
   return {
     id: null, deviceId, timestamp: null, lat: null, lon: null,
-    speedKmh: null, weight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
+    speedKmh: null, weight: null, rawWeight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
     gpsQuality: 0, wifiClients: null, cpuTempC: null, lteRssiDbm: null,
     lteAccessTech: null, eventsReaderOk: false, banner: null,
     mode: 'Ожидание',
@@ -246,7 +259,7 @@ async function inferMachineStateFromDatabase(
 // ============================================================================
 router.post('/', async (req, res) => {
   try {
-    const packet = normalizeTelemetryPacket(req.body);
+    let packet = normalizeTelemetryPacket(req.body);
     const deviceId = packet.deviceId;
 
     // 1. Достаем геозоны из базы
@@ -284,6 +297,7 @@ router.post('/', async (req, res) => {
       ? Number(telemetrySettings.emptyVehicleThresholdKg)
       : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
+    packet = applyWeightCalibration(packet, telemetrySettings)
     const effectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
       deviceId,
       referenceTime: packet.timestamp,
@@ -299,6 +313,8 @@ router.post('/', async (req, res) => {
     };
     const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
     const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones)
+    const hostLoadingZone = getZoneByCoordinates(packet.lat, packet.lon, loadingZones)
+    const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
     const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
 
     // Вся валидация координат, смена зон и расчет дельт
@@ -306,6 +322,8 @@ router.post('/', async (req, res) => {
       suppressLoading,
       skipZoneVisit: effectivePosition.source === 'rtk',
       allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
+      preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
+      hostForceIngredientName,
       expectedIngredients: resolveExpectedIngredientsFromBatch(activeBatchForHints)
     });
 
@@ -327,6 +345,7 @@ router.post('/', async (req, res) => {
           gpsSatellites: packet.gpsSatellites,
           speedKmh: packet.speedKmh,
           weight: packet.weight,
+          rawWeight: packet.rawWeight,
           weightValid: packet.weightValid,
           gpsQuality: packet.gpsQuality,
           wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
@@ -587,7 +606,13 @@ router.post('/', async (req, res) => {
         if (!hasCloseAction && !hasAddAction) {
           const [recentTelemetry, ingredientCount] = await Promise.all([
             tx.telemetry.findMany({
-              where: { deviceId },
+              where: {
+                deviceId,
+                timestamp: {
+                  gte: activeBatch.startTime,
+                  lte: telemetry.timestamp
+                }
+              },
               orderBy: { timestamp: 'desc' },
               take: autoCloseEmptyStreak,
               select: { weight: true }
@@ -598,13 +623,19 @@ router.post('/', async (req, res) => {
           ])
 
           if (ingredientCount > 0) {
+            const currentWeight = Number(packet.weight || 0)
             const negativeCount = recentTelemetry.filter((item) => Number(item.weight || 0) < 0).length
             const nearZeroCount = recentTelemetry.filter((item) => Math.max(0, Number(item.weight || 0)) <= autoCloseZeroWeightKg).length
 
             const shouldAutoCloseByNegative = recentTelemetry.length >= autoCloseNegativeStreak && negativeCount >= autoCloseNegativeStreak
             const shouldAutoCloseByEmpty = recentTelemetry.length >= autoCloseEmptyStreak && nearZeroCount >= autoCloseEmptyStreak
+            const currentPacketIsNegative = currentWeight < 0
+            const currentPacketIsEmpty = Math.max(0, currentWeight) <= autoCloseZeroWeightKg
 
-            if (shouldAutoCloseByNegative || shouldAutoCloseByEmpty) {
+            if (
+              (shouldAutoCloseByNegative && currentPacketIsNegative) ||
+              (shouldAutoCloseByEmpty && currentPacketIsEmpty)
+            ) {
               const closedBatchId = activeBatch.id
               await tx.batch.update({
                 where: { id: closedBatchId },
@@ -846,7 +877,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
       orderBy: { timestamp: 'desc' }, take: limit,
-      select: { id: true, timestamp: true, lat: true, lon: true, speedKmh: true, weight: true, weightValid: true, gpsValid: true, deviceId: true }
+      select: { id: true, timestamp: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, deviceId: true }
     });
     res.json(data);
   } catch (error) {
