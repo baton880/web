@@ -45,7 +45,7 @@ function sortPlanIngredients(ingredients) {
 }
 
 function getIngredientTimestampMs(ingredient) {
-    const parsed = new Date(ingredient?.addedAt || 0).getTime();
+    const parsed = new Date(ingredient?.startedAt || ingredient?.addedAt || 0).getTime();
     return Number.isFinite(parsed) ? parsed : 0;
 }
 

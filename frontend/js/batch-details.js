@@ -520,7 +520,7 @@ $(document).ready(function () {
 
         ingredientListBody.innerHTML = rows.map((row) => `
             <tr>
-                <td>${escapeHtml(formatTime(row?.time))}</td>
+                <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
                 <td>${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}</td>
                 <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>

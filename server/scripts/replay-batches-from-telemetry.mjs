@@ -7,6 +7,7 @@ import { DEFAULT_TELEMETRY_SETTINGS } from '../src/modules/telemetry/telemetry-s
 import { TELEMETRY_FRESHNESS_MS } from '../src/modules/telemetry/telemetry-helpers.js'
 import { recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
 import { recordLeftoverViolation } from '../src/modules/violations/violation-service.js'
+import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/loading-zone-correction.js'
 
 const prisma = new PrismaClient()
 
@@ -94,11 +95,22 @@ function resolveGroupFromList(groups, lat, lon) {
       name: group.name,
       rationId: group.rationId ?? null,
       storageZoneId: group.storageZoneId ?? null,
-      matchedZoneId: group.storageZone?.id ?? null
+      matchedZoneId: group.storageZone?.id ?? null,
+      ration: group.ration || null
     }
   }
 
   return null
+}
+
+function resolveExpectedIngredientsFromGroup(group) {
+  const ingredients = group?.ration?.ingredients
+  return Array.isArray(ingredients)
+    ? ingredients.map((ingredient) => ({
+      name: ingredient.name,
+      sortOrder: Number(ingredient.sortOrder || 0)
+    }))
+    : []
 }
 
 function indexRtkPoints(points) {
@@ -231,6 +243,86 @@ function normalizeTelemetryRow(row) {
   }
 }
 
+function parseRawPayload(rawPayload) {
+  if (typeof rawPayload !== 'string' || !rawPayload.trim()) {
+    return {}
+  }
+
+  try {
+    const parsed = JSON.parse(rawPayload)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
+  }
+}
+
+function readRawBoolean(raw, keys = []) {
+  for (const key of keys) {
+    if (raw[key] === undefined || raw[key] === null) continue
+    if (typeof raw[key] === 'boolean') return raw[key]
+    if (typeof raw[key] === 'number') return raw[key] !== 0
+    if (typeof raw[key] === 'string') {
+      const normalized = raw[key].trim().toLowerCase()
+      if (normalized === 'true' || normalized === '1') return true
+      if (normalized === 'false' || normalized === '0') return false
+    }
+  }
+
+  return undefined
+}
+
+function readRawNumber(raw, keys = []) {
+  for (const key of keys) {
+    const parsed = Number(raw[key])
+    if (Number.isFinite(parsed)) return parsed
+  }
+
+  return null
+}
+
+function buildLoaderScoreboardPacket(row, hostDeviceId) {
+  const raw = parseRawPayload(row.rawPayload)
+
+  return {
+    deviceId: hostDeviceId,
+    hostDeviceId,
+    timestamp: row.timestamp,
+    lat: Number(row.lat),
+    lon: Number(row.lon),
+    speedKmh: Number(row.speed || 0),
+    headingDeg: readRawNumber(raw, ['heading', 'headingDeg', 'heading_deg']) ?? row.course,
+    headingAccDeg: readRawNumber(raw, ['heading_acc_deg', 'headingAccDeg', 'headingAcc']),
+    relPosValid: readRawBoolean(raw, ['rel_pos_valid', 'relPosValid']),
+    relPosHeadingValid: readRawBoolean(raw, ['rel_pos_heading_valid', 'relPosHeadingValid', 'headingValid'])
+  }
+}
+
+function replayRtkScoreboardUntil({
+  rtkPoints = [],
+  cursor = 0,
+  referenceMs,
+  hostDeviceId,
+  loadingZones,
+  telemetrySettings
+}) {
+  let nextCursor = cursor
+
+  while (
+    nextCursor < rtkPoints.length &&
+    Number(rtkPoints[nextCursor].timestampMs) <= referenceMs
+  ) {
+    telemetryProcessor.processLoaderPacket(
+      buildLoaderScoreboardPacket(rtkPoints[nextCursor], hostDeviceId),
+      loadingZones,
+      telemetrySettings,
+      { deviceId: hostDeviceId }
+    )
+    nextCursor += 1
+  }
+
+  return nextCursor
+}
+
 function rememberRecentWeight(recentWeightsByDevice, deviceId, weight, limit) {
   const list = recentWeightsByDevice.get(deviceId) || []
   list.unshift(Number(weight || 0))
@@ -260,7 +352,10 @@ async function main() {
     prisma.rtkTelemetry.count(),
     prisma.storageZone.findMany({ where: { active: true }, orderBy: { id: 'asc' } }),
     prisma.livestockGroup.findMany({
-      include: { storageZone: true },
+      include: {
+        storageZone: true,
+        ration: { include: { ingredients: true } }
+      },
       orderBy: { id: 'asc' }
     }),
     prisma.telemetrySettings.findUnique({ where: { id: 1 } })
@@ -304,6 +399,8 @@ async function main() {
       timestamp: true,
       lat: true,
       lon: true,
+      speed: true,
+      rawPayload: true,
       course: true
     }
   }))
@@ -325,6 +422,7 @@ async function main() {
 
   const pageSize = 1000
   let cursor = null
+  let rtkReplayCursor = 0
 
   while (true) {
     const rows = await prisma.telemetry.findMany({
@@ -341,6 +439,15 @@ async function main() {
     for (const row of rows) {
       const packet = normalizeTelemetryRow(row)
       const deviceId = packet.deviceId
+      const packetTimeMs = new Date(packet.timestamp).getTime()
+      rtkReplayCursor = replayRtkScoreboardUntil({
+        rtkPoints: rtkIndex.all,
+        cursor: rtkReplayCursor,
+        referenceMs: packetTimeMs,
+        hostDeviceId: deviceId,
+        loadingZones,
+        telemetrySettings
+      })
       const recentWeights = rememberRecentWeight(recentWeightsByDevice, deviceId, packet.weight, autoCloseEmptyStreak)
       const effectivePosition = resolveEffectivePosition(packet, rtkIndex, telemetrySettings)
       const processorPacket = {
@@ -351,11 +458,15 @@ async function main() {
         course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
       }
       const resolvedGroup = resolveGroupFromList(livestockGroups, effectivePosition.lat, effectivePosition.lon)
+      const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
+      const expectedIngredients = activeBatchForHints?.expectedIngredients || resolveExpectedIngredientsFromGroup(resolvedGroup)
       const currentZone = detectZoneObject(effectivePosition.lat, effectivePosition.lon, activeZones)
       const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
-        skipZoneVisit: effectivePosition.source === 'rtk'
+        skipZoneVisit: effectivePosition.source === 'rtk',
+        allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
+        expectedIngredients
       })
 
       stats.processed += 1
@@ -375,12 +486,25 @@ async function main() {
         if (resolvedGroup.rationId && activeBatch.rationId !== resolvedGroup.rationId) {
           patch.rationId = resolvedGroup.rationId
         }
-        if (!Object.keys(patch).length) return
+        if (!Object.keys(patch).length) {
+          await alignAmbiguousIngredientsWithRation(prisma, {
+            batchId: activeBatch.id,
+            expectedIngredients: resolvedGroup.ration?.ingredients || [],
+            loadingZones
+          })
+          return
+        }
 
         activeBatch = await prisma.batch.update({
           where: { id: activeBatch.id },
           data: patch
         })
+        await alignAmbiguousIngredientsWithRation(prisma, {
+          batchId: activeBatch.id,
+          expectedIngredients: resolvedGroup.ration?.ingredients || [],
+          loadingZones
+        })
+        activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
         activeBatchByDevice.set(deviceId, activeBatch)
         batchIdsToRecalculate.add(activeBatch.id)
       }
@@ -403,6 +527,7 @@ async function main() {
                 }
               })
               activeBatchByDevice.set(deviceId, activeBatch)
+              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               stats.starts += 1
             }
             break
@@ -423,6 +548,7 @@ async function main() {
                 }
               })
               activeBatchByDevice.set(deviceId, activeBatch)
+              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               stats.starts += 1
             }
 
@@ -484,6 +610,7 @@ async function main() {
                 where: { id: activeBatch.id },
                 data: { endWeight: Number(action.startUnloadWeight ?? packet.weight) }
               })
+              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               activeBatchByDevice.set(deviceId, activeBatch)
             }
             break
@@ -497,6 +624,7 @@ async function main() {
                 where: { id: activeBatch.id },
                 data: { endWeight: action.endWeight }
               })
+              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               activeBatchByDevice.set(deviceId, activeBatch)
             }
             break
@@ -569,6 +697,7 @@ async function main() {
                 } : {})
               }
             })
+            activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
             activeBatchByDevice.set(deviceId, activeBatch)
             stats.starts += 1
             break

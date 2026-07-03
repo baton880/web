@@ -7,6 +7,7 @@ import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
 
 const router = Router();
+const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
 
 function round1(value) {
     return Math.round(Number(value || 0) * 10) / 10;
@@ -211,7 +212,11 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
                 include: { ingredients: true }
             },
             actualIngredients: {
-                orderBy: { addedAt: 'asc' }
+                orderBy: [
+                    { startedAt: 'asc' },
+                    { addedAt: 'asc' },
+                    { id: 'asc' }
+                ]
             }
         }
     });
@@ -369,6 +374,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                     ration: { include: { ingredients: true } }, // Связка с "Планом"
                     actualIngredients: true, // Тут лежат компоненты и их нарушения
                     violations: {
+                        where: { status: { in: ACTIVE_VIOLATION_STATUSES } },
                         select: {
                             id: true
                         }

@@ -35,8 +35,8 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   deviationMinKgThreshold: 10,
   rtkTrackResetTime: '03:00',
   rtkHeadingOffsetDeg: 0,
-  loaderMaxDistanceMeters: 150,
-  loaderOfflineTimeoutMinutes: 15
+  loaderMaxDistanceMeters: 4,
+  loaderOfflineTimeoutMinutes: 4
 }
 
 function toPositiveInteger(value, fallback) {

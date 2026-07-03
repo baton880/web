@@ -9,6 +9,7 @@ import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../..
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
+import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -39,6 +40,19 @@ function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
   const zoneType = normalizeZoneType(zone.zoneType)
   if (!zoneType) return true
   return zoneType === 'STORAGE' || zoneType === 'FEED' || zoneType === 'LOADING'
+}
+
+function resolveExpectedIngredientsFromBatch(batch) {
+  const ingredients = batch?.ration?.ingredients?.length
+    ? batch.ration.ingredients
+    : batch?.group?.ration?.ingredients
+
+  return Array.isArray(ingredients)
+    ? ingredients.map((ingredient) => ({
+      name: ingredient.name,
+      sortOrder: Number(ingredient.sortOrder || 0)
+    }))
+    : []
 }
 
 function parseBoolean(value) {
@@ -235,13 +249,21 @@ router.post('/', async (req, res) => {
     const deviceId = packet.deviceId;
 
     // 1. Достаем геозоны из базы
-    const [activeZones, groupsWithZones, telemetrySettings] = await Promise.all([
+    const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints] = await Promise.all([
       prisma.storageZone.findMany({ where: { active: true } }),
       prisma.livestockGroup.findMany({
         where: { storageZoneId: { not: null } },
         select: { storageZoneId: true }
       }),
-      getTelemetrySettings(prisma)
+      getTelemetrySettings(prisma),
+      prisma.batch.findFirst({
+        where: { deviceId, endTime: null },
+        orderBy: { startTime: 'desc' },
+        include: {
+          ration: { include: { ingredients: true } },
+          group: { include: { ration: { include: { ingredients: true } } } }
+        }
+      })
     ]);
     const linkedBarnZoneIds = new Set(
       groupsWithZones
@@ -281,7 +303,9 @@ router.post('/', async (req, res) => {
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
       suppressLoading,
-      skipZoneVisit: effectivePosition.source === 'rtk'
+      skipZoneVisit: effectivePosition.source === 'rtk',
+      allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
+      expectedIngredients: resolveExpectedIngredientsFromBatch(activeBatchForHints)
     });
 
     if (!result.isValid) {
@@ -335,12 +359,22 @@ router.post('/', async (req, res) => {
         }
 
         if (!Object.keys(patch).length) {
+          await alignAmbiguousIngredientsWithRation(tx, {
+            batchId: activeBatch.id,
+            expectedIngredients: resolvedGroup.ration?.ingredients || [],
+            loadingZones
+          })
           return
         }
 
         activeBatch = await tx.batch.update({
           where: { id: activeBatch.id },
           data: patch
+        })
+        await alignAmbiguousIngredientsWithRation(tx, {
+          batchId: activeBatch.id,
+          expectedIngredients: resolvedGroup.ration?.ingredients || [],
+          loadingZones
         })
         batchIdsToRecalculate.add(activeBatch.id)
       }

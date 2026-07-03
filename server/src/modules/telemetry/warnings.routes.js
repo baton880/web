@@ -2,7 +2,7 @@ import { Router } from 'express';
 import prisma from '../../database.js';
 import { authenticate, requireAdmin, requireWriteAccess } from '../../middleware/auth.js';
 import { getZoneByCoordinates, isFreshTimestamp, resolveEffectiveCoordinates } from './telemetry-helpers.js';
-import { getTelemetrySettings } from './telemetry-settings.js';
+import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js';
 import { syncTechnicalWarnings } from './technical-warning-service.js';
 
 const router = Router();
@@ -119,7 +119,10 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             trackedWarnings.push(toTrackedWarning(warning, latestHost.deviceId, latestHost.deviceId));
         }
 
-        const loaderFreshnessMs = Number(telemetrySettings.loaderOfflineTimeoutMinutes || 15) * 60 * 1000;
+        const loaderFreshnessMs = Number(
+            telemetrySettings.loaderOfflineTimeoutMinutes ||
+            DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes
+        ) * 60 * 1000;
         if (!latestRtk || !isFreshTimestamp(latestRtk.timestamp, loaderFreshnessMs)) {
             const warning = {
                 code: 'no_rtk',

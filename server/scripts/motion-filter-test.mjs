@@ -101,7 +101,7 @@ runCase('zero-speed packet immediately leaves moving state', () => {
   assert.equal(processor.getState(deviceId).isMoving, false)
 })
 
-runCase('real loading in a confirmed zone is still recorded on departure', () => {
+runCase('real loading in a confirmed zone is recorded after motion settles', () => {
   const processor = new TelemetryProcessor()
   const actions = collectActions(processor, [
     packet('2026-07-02T00:03:00.000Z', inside, 100, 0),
@@ -110,7 +110,8 @@ runCase('real loading in a confirmed zone is still recorded on departure', () =>
     packet('2026-07-02T00:03:12.000Z', inside, 165, 0),
     packet('2026-07-02T00:03:15.000Z', outside, 164, 6),
     packet('2026-07-02T00:03:18.000Z', outside, 164, 6),
-    packet('2026-07-02T00:03:21.000Z', outside, 164, 6)
+    packet('2026-07-02T00:03:21.000Z', outside, 164, 6),
+    packet('2026-07-02T00:03:24.000Z', outside, 170, 0)
   ], [loadingZone])
 
   assert.deepEqual(
@@ -118,7 +119,43 @@ runCase('real loading in a confirmed zone is still recorded on departure', () =>
     ['START_BATCH', 'ADD_INGREDIENT']
   )
   assert.equal(actions[1].ingredientName, 'Silage')
+  assert.equal(actions[1].actualWeight, 70)
+})
+
+runCase('single in-zone weight spike is only a candidate and does not create a component', () => {
+  const processor = new TelemetryProcessor()
+  const actions = collectActions(processor, [
+    packet('2026-07-02T00:04:00.000Z', inside, 100, 0),
+    packet('2026-07-02T00:04:04.000Z', inside, 100, 0),
+    packet('2026-07-02T00:04:08.000Z', inside, 165, 0),
+    packet('2026-07-02T00:04:12.000Z', inside, 101, 0),
+    packet('2026-07-02T00:04:15.000Z', outside, 101, 6),
+    packet('2026-07-02T00:04:18.000Z', outside, 101, 6),
+    packet('2026-07-02T00:04:21.000Z', outside, 101, 6)
+  ], [loadingZone])
+
+  assert.deepEqual(actions, [])
+})
+
+runCase('two stable in-zone growth packets confirm loading start', () => {
+  const processor = new TelemetryProcessor()
+  const actions = collectActions(processor, [
+    packet('2026-07-02T00:05:00.000Z', inside, 100, 0),
+    packet('2026-07-02T00:05:04.000Z', inside, 100, 0),
+    packet('2026-07-02T00:05:08.000Z', inside, 160, 0),
+    packet('2026-07-02T00:05:12.000Z', inside, 165, 0),
+    packet('2026-07-02T00:05:15.000Z', outside, 165, 6),
+    packet('2026-07-02T00:05:18.000Z', outside, 165, 6),
+    packet('2026-07-02T00:05:21.000Z', outside, 165, 6),
+    packet('2026-07-02T00:05:24.000Z', outside, 165, 0)
+  ], [loadingZone])
+
+  assert.deepEqual(
+    actions.map((action) => action.type),
+    ['START_BATCH', 'ADD_INGREDIENT']
+  )
   assert.equal(actions[1].actualWeight, 65)
+  assert.equal(actions[1].startTime, '2026-07-02T00:05:08.000Z')
 })
 
 console.log('PASS motion filter suite')

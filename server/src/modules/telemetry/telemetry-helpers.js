@@ -189,6 +189,7 @@ export async function resolveGroupByCoordinates(prisma, lat, lon) {
   const groups = await prisma.livestockGroup.findMany({
     include: {
       storageZone: true,
+      ration: { include: { ingredients: true } },
     },
     orderBy: { id: 'asc' },
   })
@@ -204,6 +205,7 @@ export async function resolveGroupByCoordinates(prisma, lat, lon) {
       id: group.id,
       name: group.name,
       rationId: group.rationId ?? null,
+      ration: group.ration || null,
       storageZoneId: group.storageZoneId ?? null,
       matchedZoneId: group.storageZone?.id ?? null,
     }
