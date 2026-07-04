@@ -5,6 +5,7 @@ import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.j
 import { getTelemetrySettings } from './telemetry-settings.js'
 import { getHostTrackClearSince } from './track-state-store.js'
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
+import { scheduleReplayAfterRtkBuffer } from './replay-scheduler.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -17,10 +18,10 @@ const MAX_BULK_RTK_PACKETS = 1000
 const CURRENT_RTK_SCAN_LIMIT = 200
 const STALE_BUFFERED_RTK_MAX_LAG_MS = 10 * 60 * 1000
 
-function parseTimestamp(value, fallback = new Date()) {
-  if (!value) return fallback
+function parseTimestamp(value) {
+  if (!value) return null
   const parsed = new Date(value)
-  return Number.isNaN(parsed.getTime()) ? fallback : parsed
+  return Number.isNaN(parsed.getTime()) ? null : parsed
 }
 
 function parseNumber(value) {
@@ -457,7 +458,7 @@ function sanitizeRawGga(value) {
 }
 
 function normalizeRtkPacket(raw, settings = {}, receivedAt = new Date()) {
-  const timestamp = parseTimestamp(readRawValue(raw, ['timestamp', 'time', 'datetime'], PVT_SECTION_KEYS), receivedAt)
+  const timestamp = parseTimestamp(readRawValue(raw, ['timestamp', 'time', 'datetime'], PVT_SECTION_KEYS))
   const lat = parseRawNumber(raw, ['lat', 'latitude'], PVT_SECTION_KEYS)
   const lon = parseRawNumber(raw, ['lon', 'lng', 'longitude'], PVT_SECTION_KEYS)
   const qualityNumberRaw = readRawValue(raw, ['quality', 'fixQuality', 'fix_quality', 'solution'], PVT_SECTION_KEYS)
@@ -713,14 +714,11 @@ function isStaleBufferedRtkRow(row) {
     || (queueLen !== null && queueLen > 0)
 }
 
-function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
+function serializeRtkTelemetry(row, zones = [], settings = {}) {
   if (!row) return null
 
   const raw = parseRawPayload(row.rawPayload) || {}
   const zone = detectZoneObject(row.lat, row.lon, zones)
-  const responseTimestamp = options.useReceivedAtAsTimestamp && row.createdAt
-    ? row.createdAt
-    : row.timestamp
   const quality = parseRawInteger(raw, ['quality', 'fixQuality', 'fix_quality', 'solution'], PVT_SECTION_KEYS)
   const qualityLabel = resolveQualityLabel(
     readRawValue(raw, ['quality_label', 'rtkQuality', 'rtk_quality'], PVT_SECTION_KEYS) ?? row.rtkQuality,
@@ -740,7 +738,7 @@ function serializeRtkTelemetry(row, zones = [], settings = {}, options = {}) {
 
   return {
     ...row,
-    timestamp: responseTimestamp,
+    timestamp: row.timestamp,
     sourceTimestamp: row.timestamp,
     receivedAt: row.createdAt ?? null,
     bufferedStale: isStaleBufferedRtkRow(row),
@@ -788,7 +786,7 @@ async function getLatestRtkPoint(deviceId) {
   const rows = await prisma.rtkTelemetry.findMany({
     where: deviceId ? { deviceId } : undefined,
     orderBy: [
-      { createdAt: 'desc' },
+      { timestamp: 'desc' },
       { id: 'desc' }
     ],
     take: CURRENT_RTK_SCAN_LIMIT
@@ -807,7 +805,7 @@ async function buildLatestResponse(deviceId) {
     loadActiveZones(),
     getTelemetrySettings(prisma)
   ])
-  return serializeRtkTelemetry(latest, zones, settings, { useReceivedAtAsTimestamp: true })
+  return serializeRtkTelemetry(latest, zones, settings)
 }
 
 async function buildVisibleRtkTrackWhere(deviceId) {
@@ -815,13 +813,13 @@ async function buildVisibleRtkTrackWhere(deviceId) {
 
   return {
     ...(deviceId ? { deviceId } : {}),
-    ...(clearSince ? { createdAt: { gt: clearSince } } : {})
+    ...(clearSince ? { timestamp: { gt: clearSince } } : {})
   }
 }
 
-function orderByReceivedDesc() {
+function orderBySourceTimestampDesc() {
   return [
-    { createdAt: 'desc' },
+    { timestamp: 'desc' },
     { id: 'desc' }
   ]
 }
@@ -904,10 +902,16 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
   }
 
   if (validEntries.length > 0) {
+    const scoreboardEntries = payloads.length > 1
+      ? []
+      : validEntries.filter((entry) => !isStaleBufferedRtkRow({
+        ...entry.packet,
+        createdAt: receivedAt
+      }))
     try {
       await updateLoaderZoneScoreboard(
-        validEntries.map((entry) => entry.payload),
-        validEntries.map((entry) => entry.packet),
+        scoreboardEntries.map((entry) => entry.payload),
+        scoreboardEntries.map((entry) => entry.packet),
         settings
       )
     } catch (scoreboardError) {
@@ -930,6 +934,31 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
       data: packets
     })
     createdCount = created.count
+  }
+
+  if (createdCount > 0 && packets.length > 1) {
+    const timestamps = packets
+      .map((packet) => packet.timestamp)
+      .filter(Boolean)
+      .map((timestamp) => new Date(timestamp))
+      .filter((date) => Number.isFinite(date.getTime()))
+    const from = timestamps.length ? new Date(Math.min(...timestamps.map((date) => date.getTime()))) : null
+    const to = timestamps.length ? new Date(Math.max(...timestamps.map((date) => date.getTime()))) : null
+    const replay = scheduleReplayAfterRtkBuffer('rtk-buffer', {
+      receivedAt,
+      received: payloads.length,
+      accepted: createdCount,
+      from,
+      to
+    })
+    if (replay.scheduled) {
+      console.log('[RTK ingest background]: scheduled replay after buffered RTK', {
+        delayMs: replay.delayMs,
+        accepted: createdCount,
+        from: from?.toISOString() || null,
+        to: to?.toISOString() || null
+      })
+    }
   }
 
   return {
@@ -1003,7 +1032,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: orderByReceivedDesc(),
+      orderBy: orderBySourceTimestampDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))
@@ -1024,7 +1053,7 @@ router.get('/history', authenticate, requireReadAccess, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: orderByReceivedDesc(),
+      orderBy: orderBySourceTimestampDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))
@@ -1120,7 +1149,7 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
     const where = await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: orderByReceivedDesc(),
+      orderBy: orderBySourceTimestampDesc(),
       take: limit
     })
     res.json(rows.map((row) => serializeRtkTelemetry(row, zones, settings)))

@@ -28,7 +28,7 @@ function asBoolean(value) {
 }
 
 function buildUpdatedAt(hostRow, rtkRow) {
-    const timestamps = [hostRow?.timestamp, rtkRow?.createdAt ?? rtkRow?.timestamp]
+    const timestamps = [hostRow?.timestamp, rtkRow?.timestamp]
         .map((value) => value ? new Date(value).getTime() : NaN)
         .filter((value) => !Number.isNaN(value));
 
@@ -103,7 +103,7 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             }),
             prisma.rtkTelemetry.findMany({
                 orderBy: [
-                    { createdAt: 'desc' },
+                    { timestamp: 'desc' },
                     { id: 'desc' }
                 ],
                 select: {
@@ -165,7 +165,7 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
             trackedWarnings.push(toTrackedWarning(warning, latestHost.deviceId, latestHost.deviceId));
         }
 
-        const latestRtkReceivedAt = latestRtk?.createdAt ?? latestRtk?.timestamp;
+        const latestRtkReceivedAt = latestRtk?.timestamp;
         const loaderFreshnessMs = Number(
             telemetrySettings.loaderOfflineTimeoutMinutes ||
             DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes

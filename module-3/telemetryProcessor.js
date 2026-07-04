@@ -29,11 +29,17 @@ import {
 
 const LOADING_START_CONFIRM_PACKETS = 2;
 const MIN_LOADING_IDLE_CLOSE_MS = 15000;
+const SMALL_LOADING_SEGMENT_MAX_KG = 120;
+const SMALL_LOADING_IDLE_CLOSE_MS = 25000;
+const SMALL_LOADING_STABLE_DROP_KG = 10;
+const SMALL_LOADING_NOISE_MIN_AGE_MS = 15000;
+const SMALL_LOADING_NOISE_CONFIRM_PACKETS = 2;
 const FIRST_BATCH_START_MARGIN_MIN_KG = 5;
 const FIRST_BATCH_START_MARGIN_RATIO = 0.15;
 const LOADING_SCORE_FREEZE_LOOKBACK_MS = 3000;
 const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
 const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
+const UNKNOWN_INGREDIENT_NAME = 'Неопределено';
 const FORCE_CURRENT_ZONE_INGREDIENT_KEYS = new Set([
   normalizeIngredientName('Комбикорм')
 ]);
@@ -195,6 +201,7 @@ export class TelemetryProcessor {
       loadingCandidateLat: null,
       loadingCandidateLon: null,
       loadingCandidateWeight: null,
+      smallLoadingNoiseCandidateCount: 0,
       peakWeight: weight,
       isMixing: false,
       isUnloading: false,
@@ -254,6 +261,7 @@ export class TelemetryProcessor {
     state.loadingStartLat = null;
     state.loadingStartLon = null;
     state.loadingForcedIngredientName = null;
+    state.smallLoadingNoiseCandidateCount = 0;
     this._clearLoadingCandidate(state);
   }
 
@@ -279,6 +287,7 @@ export class TelemetryProcessor {
       state.segmentPeakTimeMs = Number.isFinite(Number(packetTimeMs)) ? Number(packetTimeMs) : null;
       state.segmentPeakLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
       state.segmentPeakLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
+      state.smallLoadingNoiseCandidateCount = 0;
     }
   }
 
@@ -304,6 +313,100 @@ export class TelemetryProcessor {
     }
 
     return baseThreshold + Math.max(FIRST_BATCH_START_MARGIN_MIN_KG, baseThreshold * FIRST_BATCH_START_MARGIN_RATIO);
+  }
+
+  _getSmallLoadingSegmentMaxKg(thresholds) {
+    return Math.max(
+      SMALL_LOADING_SEGMENT_MAX_KG,
+      Number(thresholds.batchStartThresholdKg || 0) * 4
+    );
+  }
+
+  _getCurrentSegmentDelta(state) {
+    const segmentPeakWeight = Number(state.segmentPeakWeight);
+    const zoneStartWeight = Number(state.zoneStartWeight || 0);
+    if (!Number.isFinite(segmentPeakWeight) || !Number.isFinite(zoneStartWeight)) {
+      return null;
+    }
+    return segmentPeakWeight - zoneStartWeight;
+  }
+
+  _isPreBatchSmallLoadingSegment(state, thresholds) {
+    if (state.isBatchStarted || state.isMixing || state.isUnloading) {
+      return false;
+    }
+
+    if (!Number.isFinite(Number(state.loadingStartTimeMs))) {
+      return false;
+    }
+
+    const delta = this._getCurrentSegmentDelta(state);
+    return (
+      Number.isFinite(delta) &&
+      delta > this._getEffectiveBatchStartThreshold(state, thresholds) &&
+      delta <= this._getSmallLoadingSegmentMaxKg(thresholds)
+    );
+  }
+
+  _getLoadingIdleCloseMs(state, thresholds) {
+    return this._isPreBatchSmallLoadingSegment(state, thresholds)
+      ? SMALL_LOADING_IDLE_CLOSE_MS
+      : MIN_LOADING_IDLE_CLOSE_MS;
+  }
+
+  _getLoadingIdleCloseDropKg(state, thresholds) {
+    if (!this._isPreBatchSmallLoadingSegment(state, thresholds)) {
+      return Number(thresholds.batchStartThresholdKg || 0);
+    }
+    return Math.max(10, Math.min(SMALL_LOADING_STABLE_DROP_KG, Number(thresholds.batchStartThresholdKg || 0)));
+  }
+
+  _rollbackSmallLoadingNoiseIfNeeded(state, currentWeight, thresholds, packetTimeMs = null, lat = null, lon = null) {
+    if (!this._isPreBatchSmallLoadingSegment(state, thresholds)) {
+      state.smallLoadingNoiseCandidateCount = 0;
+      return false;
+    }
+
+    const peakTimeMs = Number(state.segmentPeakTimeMs);
+    const currentTimeMs = Number(packetTimeMs);
+    if (
+      !Number.isFinite(peakTimeMs) ||
+      !Number.isFinite(currentTimeMs) ||
+      currentTimeMs - peakTimeMs < SMALL_LOADING_NOISE_MIN_AGE_MS
+    ) {
+      return false;
+    }
+
+    const currentGain = Number(currentWeight) - Number(state.zoneStartWeight || 0);
+    if (currentGain > this._getEffectiveBatchStartThreshold(state, thresholds)) {
+      state.smallLoadingNoiseCandidateCount = 0;
+      return false;
+    }
+
+    state.smallLoadingNoiseCandidateCount = Number(state.smallLoadingNoiseCandidateCount || 0) + 1;
+    if (state.smallLoadingNoiseCandidateCount < SMALL_LOADING_NOISE_CONFIRM_PACKETS) {
+      return false;
+    }
+
+    this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
+    this._resetVisitedZones(state, packetTimeMs);
+    state.isMixing = false;
+    state.isUnloading = false;
+    state.isBatchStarted = false;
+    state.peakWeight = currentWeight;
+    state.lastUnloadWeight = null;
+    state.lastAcceptedWeight = currentWeight;
+    state.lastStationaryWeight = currentWeight;
+    this._rememberNormalWeight(state, currentWeight);
+    if (Number.isFinite(Number(packetTimeMs))) {
+      state.lastKnownNormalTimeMs = Number(packetTimeMs);
+    }
+    if (Number.isFinite(Number(lat)) && Number.isFinite(Number(lon))) {
+      state.lastKnownNormalLat = Number(lat);
+      state.lastKnownNormalLon = Number(lon);
+    }
+
+    return true;
   }
 
   _updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs = null, lat = null, lon = null) {
@@ -951,7 +1054,7 @@ export class TelemetryProcessor {
     const visitedIngredient = options.allowVisitedZoneIngredient === false
       ? null
       : this._pickVisitedZoneIngredient(state, expectedIngredients);
-    return visitedIngredient || state.currentZone?.ingredient || state.lastIngredientName || 'Unknown';
+    return visitedIngredient || state.currentZone?.ingredient || state.lastIngredientName || UNKNOWN_INGREDIENT_NAME;
   }
 
   _hasLoadingContext(state, options = {}) {
@@ -969,6 +1072,10 @@ export class TelemetryProcessor {
   }
 
   _flushCurrentSegment(state, currentWeight, thresholds, result, options = {}) {
+    if (state.isUnloading) {
+      return false;
+    }
+
     if (options.suppressLoading && !state.currentZone) {
       return false;
     }
@@ -1452,7 +1559,7 @@ export class TelemetryProcessor {
       !isMotionSuppressed &&
       !suppressLoading &&
       !state.isUnloading &&
-      isInCurrentLoadingZone &&
+      (isInCurrentLoadingZone || (!activeZoneName && state.loadingStartTimeMs !== null)) &&
       hasConfirmedLoadingStart
     ) {
       this._rememberSegmentPeak(state, currentWeight, packetTimeMs, lat, lon);
@@ -1462,10 +1569,19 @@ export class TelemetryProcessor {
       !isMotionSuppressed &&
       !suppressLoading &&
       !state.isUnloading &&
+      this._rollbackSmallLoadingNoiseIfNeeded(state, currentWeight, thresholds, packetTimeMs, lat, lon)
+    ) {
+      return this._buildSkippedResult(deviceId);
+    }
+
+    if (
+      !isMotionSuppressed &&
+      !suppressLoading &&
+      !state.isUnloading &&
       state.loadingStartTimeMs !== null &&
       Number.isFinite(Number(state.segmentPeakTimeMs)) &&
-      packetTimeMs - Number(state.segmentPeakTimeMs) >= Math.max(MIN_LOADING_IDLE_CLOSE_MS, thresholds.zoneChangeDebounceMs * 3) &&
-      currentWeight >= Number(state.segmentPeakWeight || 0) - thresholds.batchStartThresholdKg
+      packetTimeMs - Number(state.segmentPeakTimeMs) >= Math.max(this._getLoadingIdleCloseMs(state, thresholds), thresholds.zoneChangeDebounceMs * 3) &&
+      currentWeight >= Number(state.segmentPeakWeight || 0) - this._getLoadingIdleCloseDropKg(state, thresholds)
     ) {
       const segmentEndWeight = Number(state.segmentPeakWeight);
       const segmentEndTimeMs = Number(state.segmentPeakTimeMs);

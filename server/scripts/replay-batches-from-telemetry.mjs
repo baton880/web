@@ -11,6 +11,9 @@ import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/lo
 
 const prisma = new PrismaClient()
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
+const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
+  String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
+)
 
 function parseBoolean(value) {
   if (typeof value === 'boolean') return value
@@ -458,7 +461,9 @@ async function main() {
     if (!rows.length) break
 
     for (const row of rows) {
-      const packet = applyWeightCalibration(normalizeTelemetryRow(row), telemetrySettings)
+      const packet = APPLY_WEIGHT_CALIBRATION_ON_REPLAY
+        ? applyWeightCalibration(normalizeTelemetryRow(row), telemetrySettings)
+        : normalizeTelemetryRow(row)
       const deviceId = packet.deviceId
       const packetTimeMs = new Date(packet.timestamp).getTime()
       rtkReplayCursor = replayRtkScoreboardUntil({
