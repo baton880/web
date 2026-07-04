@@ -5,7 +5,7 @@ import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.j
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
 import { getHostTrackClearSince } from './track-state-store.js'
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
-import { scheduleReplayAfterRtkBuffer } from './replay-scheduler.js'
+import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -971,7 +971,7 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
       .filter((date) => Number.isFinite(date.getTime()))
     const from = timestamps.length ? new Date(Math.min(...timestamps.map((date) => date.getTime()))) : null
     const to = timestamps.length ? new Date(Math.max(...timestamps.map((date) => date.getTime()))) : null
-    const replay = scheduleReplayAfterRtkBuffer('rtk-buffer', {
+    const replay = scheduleReplayAfterBufferedTelemetry('rtk-buffer', {
       receivedAt,
       received: payloads.length,
       accepted: createdCount,

@@ -8,7 +8,8 @@ const SERVER_ROOT = resolve(__dirname, '../../..')
 const REPLAY_SCRIPT = resolve(SERVER_ROOT, 'scripts/replay-batches-from-telemetry.mjs')
 
 const DEFAULT_REPLAY_DEBOUNCE_MS = 90 * 1000
-const MIN_REPLAY_DEBOUNCE_MS = 10 * 1000
+const DEFAULT_FAST_REPLAY_DEBOUNCE_MS = 5 * 1000
+const MIN_REPLAY_DEBOUNCE_MS = 1 * 1000
 const MAX_REPLAY_DEBOUNCE_MS = 30 * 60 * 1000
 
 function normalizeDebounceMs(value) {
@@ -21,6 +22,7 @@ function normalizeDebounceMs(value) {
 }
 
 const REPLAY_DEBOUNCE_MS = normalizeDebounceMs(process.env.RTK_BUFFER_REPLAY_DEBOUNCE_MS)
+const FAST_REPLAY_DEBOUNCE_MS = normalizeDebounceMs(process.env.TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS || DEFAULT_FAST_REPLAY_DEBOUNCE_MS)
 const REPLAY_ENABLED = String(process.env.RTK_BUFFER_REPLAY_ENABLED || '1').trim() !== '0'
 
 let replayTimer = null
@@ -118,4 +120,8 @@ function scheduleQueuedReplay(reason, meta, delayMs) {
 
 export function scheduleReplayAfterRtkBuffer(reason = 'rtk-buffer', meta = {}) {
   return scheduleQueuedReplay(reason, meta, REPLAY_DEBOUNCE_MS)
+}
+
+export function scheduleReplayAfterBufferedTelemetry(reason = 'telemetry-buffer', meta = {}) {
+  return scheduleQueuedReplay(reason, meta, FAST_REPLAY_DEBOUNCE_MS)
 }
