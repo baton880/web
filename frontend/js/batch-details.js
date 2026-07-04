@@ -44,8 +44,22 @@ $(document).ready(function () {
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
     const groupsUrl = window.AppAuth?.getApiUrl?.("/api/groups") || "/api/groups";
     const zonesUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/zones") || "/api/telemetry/zones";
+    const FARM_TIME_ZONE = "Asia/Novosibirsk";
+    const INGREDIENT_CHART_COLORS = [
+        "#4e73df",
+        "#1cc88a",
+        "#f6c23e",
+        "#e74a3b",
+        "#36b9cc",
+        "#858796",
+        "#fd7e14",
+        "#6f42c1",
+        "#20c997",
+        "#2f855a",
+    ];
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
@@ -55,6 +69,7 @@ $(document).ready(function () {
     });
 
     const timeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
@@ -1443,6 +1458,7 @@ $(document).ready(function () {
         }
 
         const rows = Array.isArray(points) ? points : [];
+        const actualRows = Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : [];
 
         if (!rows.length) {
             destroyTelemetryChart();
@@ -1455,6 +1471,8 @@ $(document).ready(function () {
         telemetryEmpty.classList.add("d-none");
         destroyTelemetryChart();
 
+        const componentDatasets = buildComponentTelemetryDatasets(rows, actualRows);
+        const componentZonePlugin = buildComponentZonePlugin();
         const context = telemetryCanvas.getContext("2d");
         telemetryChart = new Chart(context, {
             type: "line",
@@ -1471,9 +1489,12 @@ $(document).ready(function () {
                         pointHoverRadius: 4,
                         lineTension: 0.18,
                         fill: true,
+                        order: 1,
                     },
+                    ...componentDatasets,
                 ],
             },
+            plugins: [componentZonePlugin],
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
@@ -1481,8 +1502,15 @@ $(document).ready(function () {
                     display: false,
                 },
                 tooltips: {
+                    mode: "nearest",
+                    intersect: false,
                     callbacks: {
-                        label: function (tooltipItem) {
+                        label: function (tooltipItem, data) {
+                            const dataset = data.datasets?.[tooltipItem.datasetIndex] || {};
+                            if (dataset.ingredientName) {
+                                return `${dataset.ingredientName}: ${weightFormatter.format(tooltipItem.yLabel)} \u043a\u0433`;
+                            }
+
                             return `Вес: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
                         },
                     },
@@ -1510,6 +1538,153 @@ $(document).ready(function () {
                 },
             },
         });
+    }
+
+    function buildComponentTelemetryDatasets(points, ingredientRows) {
+        const rows = Array.isArray(points) ? points : [];
+        const ingredients = (Array.isArray(ingredientRows) ? ingredientRows : [])
+            .map((row, index) => {
+                const windowRange = buildIngredientTrackWindow(row, ingredientRows);
+                if (!windowRange) {
+                    return null;
+                }
+
+                return {
+                    name: getIngredientDisplayName(row?.ingredientName || row?.name),
+                    startMs: windowRange.startMs,
+                    endMs: windowRange.ingredientEndMs || windowRange.endMs,
+                    color: INGREDIENT_CHART_COLORS[index % INGREDIENT_CHART_COLORS.length],
+                };
+            })
+            .filter(Boolean);
+
+        if (!rows.length || !ingredients.length) {
+            return [];
+        }
+
+        return ingredients
+            .map((ingredient) => ({
+                label: ingredient.name,
+                ingredientName: ingredient.name,
+                data: rows.map((point) => {
+                    const timestampMs = parseTimestampMs(point?.timestamp);
+                    if (!Number.isFinite(timestampMs) || timestampMs < ingredient.startMs || timestampMs > ingredient.endMs) {
+                        return null;
+                    }
+
+                    return toNumber(point?.weight);
+                }),
+                backgroundColor: ingredient.color,
+                borderColor: "rgba(0, 0, 0, 0)",
+                borderWidth: 0,
+                showLine: false,
+                pointRadius: 0,
+                pointHoverRadius: 0,
+                pointHitRadius: 18,
+                lineTension: 0.18,
+                fill: false,
+                spanGaps: false,
+                order: 0,
+            }))
+            .filter((dataset) => dataset.data.some((value) => value !== null));
+    }
+
+    function buildComponentZonePlugin() {
+        return {
+            beforeDatasetsDraw: function (chart) {
+                const xScale = chart.scales?.["x-axis-0"];
+                const chartArea = chart.chartArea;
+                const context = chart.chart?.ctx;
+                const datasets = chart.data?.datasets || [];
+
+                if (!xScale || !chartArea || !context) {
+                    return;
+                }
+
+                datasets.forEach((dataset) => {
+                    if (!dataset?.ingredientName || !Array.isArray(dataset.data)) {
+                        return;
+                    }
+
+                    const ranges = getDatasetValueRanges(dataset.data);
+                    context.save();
+                    context.fillStyle = toRgba(dataset.backgroundColor || dataset.borderColor, 0.18);
+
+                    ranges.forEach((range) => {
+                        const bounds = getCategoryRangeBounds(xScale, range.start, range.end, dataset.data.length);
+                        context.fillRect(
+                            bounds.left,
+                            chartArea.top,
+                            Math.max(bounds.right - bounds.left, 1),
+                            chartArea.bottom - chartArea.top
+                        );
+                    });
+
+                    context.restore();
+                });
+            },
+        };
+    }
+
+    function getDatasetValueRanges(values) {
+        const ranges = [];
+        let currentRange = null;
+
+        values.forEach((value, index) => {
+            if (value === null || value === undefined || Number.isNaN(Number(value))) {
+                if (currentRange) {
+                    ranges.push(currentRange);
+                    currentRange = null;
+                }
+                return;
+            }
+
+            if (!currentRange) {
+                currentRange = { start: index, end: index };
+            } else {
+                currentRange.end = index;
+            }
+        });
+
+        if (currentRange) {
+            ranges.push(currentRange);
+        }
+
+        return ranges;
+    }
+
+    function getCategoryRangeBounds(xScale, startIndex, endIndex, count) {
+        const centerAt = (index) => xScale.getPixelForTick
+            ? xScale.getPixelForTick(index)
+            : xScale.getPixelForValue(null, index);
+        const startCenter = centerAt(startIndex);
+        const endCenter = centerAt(endIndex);
+        const prevCenter = startIndex > 0 ? centerAt(startIndex - 1) : startCenter;
+        const nextCenter = endIndex < count - 1 ? centerAt(endIndex + 1) : endCenter;
+        const leftPadding = startIndex > 0 ? (startCenter - prevCenter) / 2 : 0;
+        const rightPadding = endIndex < count - 1 ? (nextCenter - endCenter) / 2 : leftPadding;
+
+        return {
+            left: startCenter - Math.max(leftPadding, 0),
+            right: endCenter + Math.max(rightPadding, 0),
+        };
+    }
+
+    function toRgba(color, alpha) {
+        const text = String(color || "").trim();
+        const hexMatch = text.match(/^#([0-9a-f]{6})$/i);
+
+        if (hexMatch) {
+            const value = Number.parseInt(hexMatch[1], 16);
+            const red = (value >> 16) & 255;
+            const green = (value >> 8) & 255;
+            const blue = value & 255;
+            return `rgba(${red}, ${green}, ${blue}, ${alpha})`;
+        }
+
+        return text.startsWith("rgba(") || text.startsWith("rgb(")
+            ? text
+            : `rgba(78, 115, 223, ${alpha})`;
     }
 
     function setEditCardVisible(visible) {

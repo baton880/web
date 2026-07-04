@@ -271,10 +271,9 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
 export function buildUnloadProgress(batch, currentWeight, machineState = {}) {
     if (!batch) return null;
 
-    const plan = getBatchPlan(batch);
     const factLoaded = aggregateFacts(batch.actualIngredients || []).reduce((sum, item) => sum + item.actualWeight, 0);
     const peakWeight = Math.max(Number(machineState.peakWeight || 0), Number(batch.startWeight || 0) + factLoaded);
-    const targetWeight = plan.totalBatchWeight > 0 ? plan.totalBatchWeight : Math.max(0, peakWeight - Number(batch.startWeight || 0));
+    const targetWeight = factLoaded > 0 ? factLoaded : Math.max(0, peakWeight - Number(batch.startWeight || 0));
     const unloadedFact = Math.max(0, peakWeight - Number(currentWeight || 0));
 
     return {

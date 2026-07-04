@@ -79,7 +79,7 @@ function getHeaders() {
 function formatDateTime(value) {
     if (!value) return "--";
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU");
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Novosibirsk" });
 }
 
 function hasTelemetryTimestamp(value) {
@@ -738,7 +738,7 @@ function bindTabs() {
 }
 
 function updateSyncTime() {
-    setText("telemetryLastSync", `Последняя синхронизация: ${new Date().toLocaleTimeString("ru-RU")}`);
+    setText("telemetryLastSync", `Последняя синхронизация: ${new Date().toLocaleTimeString("ru-RU", { timeZone: "Asia/Novosibirsk" })}`);
 }
 
 async function refreshTelemetry() {

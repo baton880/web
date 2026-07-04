@@ -166,7 +166,7 @@ function resolveEffectivePosition(packet, rtkIndex, settings = {}) {
   const referenceMs = new Date(packet.timestamp).getTime()
   const loaderOfflineTimeoutMinutes = Number(settings.loaderOfflineTimeoutMinutes) > 0
     ? Number(settings.loaderOfflineTimeoutMinutes)
-    : 15
+    : DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes
   const loaderMaxDistanceMeters = Number(settings.loaderMaxDistanceMeters) > 0
     ? Number(settings.loaderMaxDistanceMeters)
     : 150

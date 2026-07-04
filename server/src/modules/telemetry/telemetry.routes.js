@@ -135,6 +135,14 @@ function normalizeTelemetryPacket(packet) {
   }
 }
 
+function stringifyRawPayload(payload) {
+  try {
+    return JSON.stringify(payload ?? {})
+  } catch {
+    return JSON.stringify({})
+  }
+}
+
 function applyWeightCalibration(packet, telemetrySettings = {}) {
   const factor = Number(telemetrySettings.weightCalibrationFactor)
   if (!Number.isFinite(factor) || factor <= 0 || factor === 1) {
@@ -150,7 +158,7 @@ function applyWeightCalibration(packet, telemetrySettings = {}) {
 // Хелпер для пустых ответов
 function buildEmptyLatestResponse(deviceId = null) {
   return {
-    id: null, deviceId, timestamp: null, lat: null, lon: null,
+    id: null, deviceId, timestamp: null, receivedAt: null, lat: null, lon: null,
     speedKmh: null, weight: null, rawWeight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
     gpsQuality: 0, wifiClients: null, cpuTempC: null, lteRssiDbm: null,
     lteAccessTech: null, eventsReaderOk: false, banner: null,
@@ -259,8 +267,10 @@ async function inferMachineStateFromDatabase(
 // ============================================================================
 router.post('/', async (req, res) => {
   try {
+    const receivedAt = new Date()
     let packet = normalizeTelemetryPacket(req.body);
     const deviceId = packet.deviceId;
+    const rawPayload = stringifyRawPayload(req.body)
 
     // 1. Достаем геозоны из базы
     const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints] = await Promise.all([
@@ -339,6 +349,7 @@ router.post('/', async (req, res) => {
         data: {
           deviceId: deviceId,
           timestamp: packet.timestamp,
+          receivedAt,
           lat: packet.lat,
           lon: packet.lon,
           gpsValid: packet.gpsValid,
@@ -346,6 +357,7 @@ router.post('/', async (req, res) => {
           speedKmh: packet.speedKmh,
           weight: packet.weight,
           rawWeight: packet.rawWeight,
+          rawPayload,
           weightValid: packet.weightValid,
           gpsQuality: packet.gpsQuality,
           wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
@@ -877,7 +889,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
       orderBy: { timestamp: 'desc' }, take: limit,
-      select: { id: true, timestamp: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, deviceId: true }
+      select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, deviceId: true }
     });
     res.json(data);
   } catch (error) {
@@ -927,7 +939,9 @@ router.post('/admin/seed', authenticate, requireAdmin, async (req, res) => {
       points.push({
         deviceId: 'test_seeder_01', timestamp: new Date(Date.now() - (20 - i) * 10000), 
         lat: startLat + (i * 0.0005), lon: startLon + (i * 0.0005), gpsValid: true, gpsSatellites: 15,
-        weight: 2450.5 + (i * 10), weightValid: true, gpsQuality: 4, wifiClients: '[]', eventsReaderOk: true
+        weight: 2450.5 + (i * 10), weightValid: true, gpsQuality: 4, wifiClients: '[]', eventsReaderOk: true,
+        rawPayload: JSON.stringify({ seeded: true, index: i }),
+        receivedAt: new Date()
       });
     }
     const created = await prisma.telemetry.createMany({ data: points });

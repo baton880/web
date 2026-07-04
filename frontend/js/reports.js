@@ -48,12 +48,14 @@
     };
 
     const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Novosibirsk",
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
     });
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Novosibirsk",
         day: "2-digit",
         month: "2-digit",
         year: "numeric",

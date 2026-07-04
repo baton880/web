@@ -2,7 +2,7 @@ import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.j
 
 export const TELEMETRY_FRESHNESS_MS = 15000
 export const DEFAULT_LOADER_MAX_DISTANCE_METERS = 150
-export const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 15
+export const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4
 
 export function isFreshTimestamp(value, thresholdMs = TELEMETRY_FRESHNESS_MS) {
   if (!value) return false

@@ -2,7 +2,7 @@ import { Router } from 'express'
 import prisma from '../../database.js'
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from '../../middleware/auth.js'
 import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
-import { getTelemetrySettings } from './telemetry-settings.js'
+import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
 import { getHostTrackClearSince } from './track-state-store.js'
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { scheduleReplayAfterRtkBuffer } from './replay-scheduler.js'
@@ -17,6 +17,7 @@ const MAX_ZONE_SCAN_ROWS = 5000
 const MAX_BULK_RTK_PACKETS = 1000
 const CURRENT_RTK_SCAN_LIMIT = 200
 const STALE_BUFFERED_RTK_MAX_LAG_MS = 10 * 60 * 1000
+const CURRENT_RTK_CLOCK_SKEW_MS = 60 * 1000
 
 function parseTimestamp(value) {
   if (!value) return null
@@ -714,6 +715,25 @@ function isStaleBufferedRtkRow(row) {
     || (queueLen !== null && queueLen > 0)
 }
 
+function resolveLoaderOfflineTimeoutMs(settings = {}) {
+  const minutes = Number(settings.loaderOfflineTimeoutMinutes) > 0
+    ? Number(settings.loaderOfflineTimeoutMinutes)
+    : DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes
+
+  return minutes * 60 * 1000
+}
+
+function isFreshCurrentRtkRow(row, freshnessMs) {
+  const timestampMs = parseTimestampMs(row?.timestamp)
+  const nowMs = Date.now()
+  if (!Number.isFinite(timestampMs) || !Number.isFinite(nowMs)) {
+    return false
+  }
+
+  const ageMs = nowMs - timestampMs
+  return ageMs >= -CURRENT_RTK_CLOCK_SKEW_MS && ageMs <= freshnessMs
+}
+
 function serializeRtkTelemetry(row, zones = [], settings = {}) {
   if (!row) return null
 
@@ -742,6 +762,9 @@ function serializeRtkTelemetry(row, zones = [], settings = {}) {
     sourceTimestamp: row.timestamp,
     receivedAt: row.createdAt ?? null,
     bufferedStale: isStaleBufferedRtkRow(row),
+    loaderOfflineTimeoutMinutes: Number(settings.loaderOfflineTimeoutMinutes) > 0
+      ? Number(settings.loaderOfflineTimeoutMinutes)
+      : DEFAULT_TELEMETRY_SETTINGS.loaderOfflineTimeoutMinutes,
     packetType: resolvePacketType(raw),
     valid,
     quality,
@@ -782,7 +805,7 @@ function serializeRtkTelemetry(row, zones = [], settings = {}) {
   }
 }
 
-async function getLatestRtkPoint(deviceId) {
+async function getLatestRtkPoint(deviceId, freshnessMs = null) {
   const rows = await prisma.rtkTelemetry.findMany({
     where: deviceId ? { deviceId } : undefined,
     orderBy: [
@@ -792,19 +815,23 @@ async function getLatestRtkPoint(deviceId) {
     take: CURRENT_RTK_SCAN_LIMIT
   })
 
-  return rows.find((row) => !isStaleBufferedRtkRow(row)) || null
+  return rows.find((row) => (
+    !isStaleBufferedRtkRow(row) &&
+    (
+      !Number.isFinite(Number(freshnessMs)) ||
+      isFreshCurrentRtkRow(row, Number(freshnessMs))
+    )
+  )) || null
 }
 
 async function buildLatestResponse(deviceId) {
-  const latest = await getLatestRtkPoint(deviceId)
+  const settings = await getTelemetrySettings(prisma)
+  const latest = await getLatestRtkPoint(deviceId, resolveLoaderOfflineTimeoutMs(settings))
   if (!latest) {
     return buildEmptyRtkResponse(deviceId)
   }
 
-  const [zones, settings] = await Promise.all([
-    loadActiveZones(),
-    getTelemetrySettings(prisma)
-  ])
+  const zones = await loadActiveZones()
   return serializeRtkTelemetry(latest, zones, settings)
 }
 

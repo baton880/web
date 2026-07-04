@@ -7,12 +7,14 @@ $(document).ready(function () {
     const CAN_WRITE = window.AppAuth?.hasWriteAccess?.() === true;
 
     const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Novosibirsk",
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
     });
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Novosibirsk",
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
@@ -22,6 +24,7 @@ $(document).ready(function () {
     });
 
     const timeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: "Asia/Novosibirsk",
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",

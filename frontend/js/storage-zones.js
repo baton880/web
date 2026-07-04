@@ -430,12 +430,23 @@ function hasTelemetryTimestamp(value) {
     return !Number.isNaN(timestamp);
 }
 
-function isFreshTelemetry(value) {
+function isFreshTelemetry(value, thresholdMs = TELEMETRY_FRESHNESS_MS) {
     if (!hasTelemetryTimestamp(value)) {
         return false;
     }
 
-    return (Date.now() - new Date(value).getTime()) < TELEMETRY_FRESHNESS_MS;
+    return (Date.now() - new Date(value).getTime()) < thresholdMs;
+}
+
+function getRtkFreshnessMs(data) {
+    const timeoutMinutes = Number(data?.loaderOfflineTimeoutMinutes);
+    return Number.isFinite(timeoutMinutes) && timeoutMinutes > 0
+        ? timeoutMinutes * 60 * 1000
+        : TELEMETRY_FRESHNESS_MS;
+}
+
+function isFreshRtkTelemetry(data) {
+    return isFreshTelemetry(data?.timestamp, getRtkFreshnessMs(data));
 }
 
 function getSelectedZone() {
@@ -1796,7 +1807,7 @@ function getRtkQualityLabel(data) {
 }
 
 function updateRtkMarker(data) {
-    if (!data || data.lat == null || data.lon == null) {
+    if (!data || data.lat == null || data.lon == null || !isFreshRtkTelemetry(data)) {
         if (rtkMarker) {
             map.geoObjects.remove(rtkMarker);
             rtkMarker = null;
@@ -1807,7 +1818,8 @@ function updateRtkMarker(data) {
     const coords = [Number(data.lat), Number(data.lon)];
     const qualityLabel = getRtkQualityLabel(data);
     const zoneName = data?.zone?.name || "Вне зоны";
-    const packetState = isFreshTelemetry(data?.timestamp) ? "свежий" : "устаревший";
+    const isFresh = isFreshRtkTelemetry(data);
+    const packetState = isFresh ? "свежий" : "устаревший";
     const heading = getRtkHeading(data);
     const balloonContent = `
         <strong>Погрузчик</strong><br>
@@ -1827,7 +1839,7 @@ function updateRtkMarker(data) {
                 hintContent: `Погрузчик • ${qualityLabel} • ${packetState}`,
             },
             {
-                ...getMarkerOptions("rtk", isFreshTelemetry(data.timestamp), data),
+                ...getMarkerOptions("rtk", isFresh, data),
             }
         );
 
@@ -1838,7 +1850,7 @@ function updateRtkMarker(data) {
             balloonContent,
             hintContent: `Погрузчик • ${qualityLabel} • ${packetState}`,
         });
-        rtkMarker.options.set(getMarkerOptions("rtk", isFreshTelemetry(data.timestamp), data));
+        rtkMarker.options.set(getMarkerOptions("rtk", isFresh, data));
     }
 
     if (!hasTelemetryAutoFocus) {
@@ -1861,7 +1873,7 @@ function updateHostSummary(data) {
         return;
     }
 
-    const isFresh = isFreshTelemetry(data.timestamp);
+    const isFresh = isFreshRtkTelemetry(data);
     statusElement.textContent = isFresh ? "Онлайн" : "Нет свежих пакетов";
     metaElement.textContent = `${data.mode || "Ожидание"} • ${Number(data.lat).toFixed(6)}, ${Number(data.lon).toFixed(6)}`;
 }
@@ -1903,7 +1915,7 @@ function formatDateTime(value) {
     }
 
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU");
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Novosibirsk" });
 }
 
 function goToCurrentPoint() {
