@@ -14,7 +14,7 @@ const MAX_RTK_HISTORY_LIMIT = 5000
 const DEFAULT_ZONE_SECONDS = 30
 const MAX_ZONE_SECONDS = 3600
 const MAX_ZONE_SCAN_ROWS = 5000
-const MAX_BULK_RTK_PACKETS = 1000
+const RTK_BULK_INSERT_CHUNK_SIZE = 500
 const CURRENT_RTK_SCAN_LIMIT = 200
 const STALE_BUFFERED_RTK_MAX_LAG_MS = 10 * 60 * 1000
 const CURRENT_RTK_CLOCK_SKEW_MS = 60 * 1000
@@ -523,6 +523,29 @@ function extractRtkPayloads(body) {
   return [body || {}]
 }
 
+function comparePacketTimestampAsc(left, right) {
+  const leftMs = left?.packet?.timestamp instanceof Date ? left.packet.timestamp.getTime() : NaN
+  const rightMs = right?.packet?.timestamp instanceof Date ? right.packet.timestamp.getTime() : NaN
+
+  if (Number.isFinite(leftMs) && Number.isFinite(rightMs) && leftMs !== rightMs) {
+    return leftMs - rightMs
+  }
+
+  return Number(left?.index || 0) - Number(right?.index || 0)
+}
+
+async function createManyRtkTelemetryInChunks(packets) {
+  let createdCount = 0
+
+  for (let index = 0; index < packets.length; index += RTK_BULK_INSERT_CHUNK_SIZE) {
+    const chunk = packets.slice(index, index + RTK_BULK_INSERT_CHUNK_SIZE)
+    const created = await prisma.rtkTelemetry.createMany({ data: chunk })
+    createdCount += created.count
+  }
+
+  return createdCount
+}
+
 function buildEmptyRtkResponse(deviceId = null) {
   return {
     id: null,
@@ -895,18 +918,8 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     }
   }
 
-  const processPayloads = payloads.slice(0, MAX_BULK_RTK_PACKETS)
-  const overLimitDropped = Math.max(0, payloads.length - processPayloads.length)
-  if (overLimitDropped > 0) {
-    console.warn('[RTK ingest warning]: oversized buffer acknowledged, dropping tail', {
-      received: payloads.length,
-      processed: processPayloads.length,
-      dropped: overLimitDropped
-    })
-  }
-
   const settings = await getTelemetrySettings(prisma)
-  const entries = processPayloads.map((payload, index) => {
+  const entries = payloads.map((payload, index) => {
     const packet = normalizeRtkPacket(payload || {}, settings, receivedAt)
     return {
       index,
@@ -948,7 +961,10 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
 
   let createdCount = 0
   let createdId = null
-  const packets = validEntries.map((entry) => entry.packet)
+  const packets = validEntries
+    .slice()
+    .sort(comparePacketTimestampAsc)
+    .map((entry) => entry.packet)
 
   if (packets.length === 1) {
     const created = await prisma.rtkTelemetry.create({
@@ -957,10 +973,7 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     createdCount = 1
     createdId = created.id
   } else if (packets.length > 1) {
-    const created = await prisma.rtkTelemetry.createMany({
-      data: packets
-    })
-    createdCount = created.count
+    createdCount = await createManyRtkTelemetryInChunks(packets)
   }
 
   if (createdCount > 0 && packets.length > 1) {
@@ -994,7 +1007,7 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     count: createdCount,
     received: payloads.length,
     accepted: createdCount,
-    dropped: invalidEntries.length + overLimitDropped,
+    dropped: invalidEntries.length,
     validationErrors: invalidEntries.slice(0, 5).map((entry) => ({
       index: entry.index,
       error: entry.error

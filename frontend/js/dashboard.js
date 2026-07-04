@@ -1495,14 +1495,14 @@ function buildRoutePoints(historyRows) {
 
     return historyRows
         .filter((row) => hasValidCoordinates(row?.lat, row?.lon))
-        .slice()
-        .reverse()
         .map((row) => ({
             lat: Number(row.lat),
             lon: Number(row.lon),
             timestampMs: parseRouteTimestampMs(row.timestamp),
             source: row,
-        }));
+        }))
+        .filter((point) => point.timestampMs !== null)
+        .sort((left, right) => left.timestampMs - right.timestampMs);
 }
 
 function calculateDistanceMeters(pointA, pointB) {
