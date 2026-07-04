@@ -10,6 +10,7 @@ import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
+import { scheduleReplayAfterRtkBuffer } from './replay-scheduler.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -84,6 +85,13 @@ function parseOptionalNumber(value) {
   if (value === undefined || value === null || value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function orderBySourceTimestampDesc() {
+  return [
+    { timestamp: 'desc' },
+    { id: 'desc' }
+  ]
 }
 
 function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryState = {}) {
@@ -219,7 +227,7 @@ async function inferMachineStateFromDatabase(
   const [recentPoints, peakTelemetry] = await Promise.all([
     prisma.telemetry.findMany({
       where: telemetryWhere,
-      orderBy: { timestamp: 'desc' },
+      orderBy: orderBySourceTimestampDesc(),
       take: 8,
       select: { weight: true, speedKmh: true, timestamp: true }
     }),
@@ -273,7 +281,7 @@ router.post('/', async (req, res) => {
     const rawPayload = stringifyRawPayload(req.body)
 
     // 1. Достаем геозоны из базы
-    const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints] = await Promise.all([
+    const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints, latestStoredTelemetry] = await Promise.all([
       prisma.storageZone.findMany({ where: { active: true } }),
       prisma.livestockGroup.findMany({
         where: { storageZoneId: { not: null } },
@@ -287,6 +295,11 @@ router.post('/', async (req, res) => {
           ration: { include: { ingredients: true } },
           group: { include: { ration: { include: { ingredients: true } } } }
         }
+      }),
+      prisma.telemetry.findFirst({
+        where: { deviceId },
+        orderBy: orderBySourceTimestampDesc(),
+        select: { id: true, timestamp: true }
       })
     ]);
     const linkedBarnZoneIds = new Set(
@@ -344,6 +357,16 @@ router.post('/', async (req, res) => {
 
     let telemetry = null
     let shouldClearDeviceState = false
+    let shouldScheduleReplay = false
+    const latestStoredTimestampMs = latestStoredTelemetry?.timestamp instanceof Date
+      ? latestStoredTelemetry.timestamp.getTime()
+      : Number.NaN
+    const currentPacketTimestampMs = packet.timestamp instanceof Date
+      ? packet.timestamp.getTime()
+      : Number.NaN
+    const isOutOfOrderPacket = Number.isFinite(latestStoredTimestampMs) &&
+      Number.isFinite(currentPacketTimestampMs) &&
+      currentPacketTimestampMs < latestStoredTimestampMs
     await prisma.$transaction(async (tx) => {
       telemetry = await tx.telemetry.create({
         data: {
@@ -367,6 +390,11 @@ router.post('/', async (req, res) => {
           eventsReaderOk: packet.eventsReaderOk
         }
       })
+
+      if (isOutOfOrderPacket) {
+        shouldScheduleReplay = true
+        return
+      }
 
       let activeBatch = await tx.batch.findFirst({
         where: { deviceId, endTime: null },
@@ -625,7 +653,7 @@ router.post('/', async (req, res) => {
                   lte: telemetry.timestamp
                 }
               },
-              orderBy: { timestamp: 'desc' },
+              orderBy: orderBySourceTimestampDesc(),
               take: autoCloseEmptyStreak,
               select: { weight: true }
             }),
@@ -680,6 +708,26 @@ router.post('/', async (req, res) => {
       telemetryProcessor.clearDeviceState(deviceId)
     }
 
+    if (shouldScheduleReplay) {
+      const replay = scheduleReplayAfterRtkBuffer('host-buffer-out-of-order', {
+        deviceId,
+        telemetryId: telemetry?.id || null,
+        packetTimestamp: packet.timestamp,
+        latestKnownTimestamp: latestStoredTelemetry?.timestamp || null,
+        receivedAt
+      })
+
+      if (replay.scheduled) {
+        console.log('[Host ingest background]: scheduled replay after out-of-order buffered telemetry', {
+          deviceId,
+          telemetryId: telemetry?.id || null,
+          packetTimestamp: packet.timestamp?.toISOString?.() || null,
+          latestKnownTimestamp: latestStoredTelemetry?.timestamp?.toISOString?.() || null,
+          delayMs: replay.delayMs
+        })
+      }
+    }
+
     // Возвращаем ответ контроллеру трактора
     res.status(201).json({ status: 'ok', id: telemetry.id, banner: result.banner });
 
@@ -722,7 +770,7 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
 
     const latestTelemetry = await prisma.telemetry.findFirst({
       where: { deviceId: activeBatch.deviceId },
-      orderBy: { timestamp: 'desc' },
+      orderBy: orderBySourceTimestampDesc(),
       select: { weight: true }
     });
 
@@ -768,7 +816,7 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     const requestedDeviceId = getRequestedDeviceId(req)
     const data = await prisma.telemetry.findFirst({
       where: requestedDeviceId ? { deviceId: requestedDeviceId } : undefined,
-      orderBy: { timestamp: 'desc' } 
+      orderBy: orderBySourceTimestampDesc()
     });
     
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
@@ -888,7 +936,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     }
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
-      orderBy: { timestamp: 'desc' }, take: limit,
+      orderBy: orderBySourceTimestampDesc(), take: limit,
       select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, deviceId: true }
     });
     res.json(data);
@@ -903,7 +951,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
 // ============================================================================
 router.get('/admin/latest', authenticate, requireAdmin, async (req, res) => {
   try {
-    const data = await prisma.telemetry.findFirst({ orderBy: { timestamp: 'desc' } });
+    const data = await prisma.telemetry.findFirst({ orderBy: orderBySourceTimestampDesc() });
     if (!data) return res.json(buildEmptyLatestResponse());
     res.json({ ...data, banner: null });
   } catch (error) {
@@ -922,7 +970,7 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
     }
     const data = await prisma.telemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
-      orderBy: { timestamp: 'desc' },
+      orderBy: orderBySourceTimestampDesc(),
       take: limit
     });
     res.json(data);
