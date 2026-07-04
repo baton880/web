@@ -49,6 +49,22 @@ function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
   return zoneType === 'STORAGE' || zoneType === 'FEED' || zoneType === 'LOADING'
 }
 
+function hasBarnZoneAt(lat, lon, zones = [], linkedBarnZoneIds = new Set()) {
+  return zones.some((zone) => {
+    if (!isBarnZone(zone, linkedBarnZoneIds)) return false
+    if (detectZoneObject(lat, lon, [zone])) return true
+
+    const zoneLat = Number(zone.lat)
+    const zoneLon = Number(zone.lon)
+    const radius = Number(zone.radius)
+    return Number.isFinite(zoneLat) &&
+      Number.isFinite(zoneLon) &&
+      Number.isFinite(radius) &&
+      radius > 0 &&
+      calculateHaversine(Number(lat), Number(lon), zoneLat, zoneLon) <= radius
+  })
+}
+
 function buildGroupZoneShape(group) {
   if (group?.storageZone) {
     return {
@@ -482,9 +498,10 @@ async function main() {
       const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
       const expectedIngredients = activeBatchForHints?.expectedIngredients || resolveExpectedIngredientsFromGroup(resolvedGroup)
       const currentZone = detectZoneObject(effectivePosition.lat, effectivePosition.lon, activeZones)
+      const isInsideBarnZone = hasBarnZoneAt(effectivePosition.lat, effectivePosition.lon, activeZones, linkedBarnZoneIds)
       const hostLoadingZone = detectZoneObject(packet.lat, packet.lon, loadingZones)
       const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
-      const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
+      const suppressLoading = isInsideBarnZone || isBarnZone(currentZone, linkedBarnZoneIds)
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
         skipZoneVisit: effectivePosition.source === 'rtk',
@@ -715,23 +732,9 @@ async function main() {
               })
               batchIdsToRecalculate.add(closedBatchId)
               stats.forceCloses += 1
+              activeBatch = null
+              activeBatchByDevice.delete(deviceId)
             }
-
-            activeBatch = await prisma.batch.create({
-              data: {
-                deviceId,
-                startTime: packet.timestamp,
-                startWeight: Number(action.nextStartWeight ?? packet.weight),
-                hasViolations: false,
-                ...(resolvedGroup ? {
-                  groupId: resolvedGroup.id,
-                  ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
-                } : {})
-              }
-            })
-            activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
-            activeBatchByDevice.set(deviceId, activeBatch)
-            stats.starts += 1
             break
         }
       }

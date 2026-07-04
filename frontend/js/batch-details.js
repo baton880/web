@@ -44,8 +44,10 @@ $(document).ready(function () {
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
     const groupsUrl = window.AppAuth?.getApiUrl?.("/api/groups") || "/api/groups";
     const zonesUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/zones") || "/api/telemetry/zones";
+    const FARM_TIME_ZONE = "Asia/Novosibirsk";
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
@@ -55,6 +57,7 @@ $(document).ready(function () {
     });
 
     const timeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         hour: "2-digit",
         minute: "2-digit",
         second: "2-digit",
@@ -1456,6 +1459,12 @@ $(document).ready(function () {
         destroyTelemetryChart();
 
         const context = telemetryCanvas.getContext("2d");
+        const ingredientBands = buildIngredientBands(rows, state.batch?.actualIngredients);
+        const ingredientBandsPlugin = {
+            beforeDatasetsDraw(chart) {
+                drawIngredientBands(chart, ingredientBands);
+            },
+        };
         telemetryChart = new Chart(context, {
             type: "line",
             data: {
@@ -1474,6 +1483,7 @@ $(document).ready(function () {
                     },
                 ],
             },
+            plugins: [ingredientBandsPlugin],
             options: {
                 responsive: true,
                 maintainAspectRatio: false,
@@ -1484,6 +1494,13 @@ $(document).ready(function () {
                     callbacks: {
                         label: function (tooltipItem) {
                             return `Вес: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                        },
+                        afterLabel: function (tooltipItem) {
+                            const row = rows[tooltipItem.index];
+                            const rawWeight = Number(row?.rawWeight);
+                            return Number.isFinite(rawWeight)
+                                ? `Raw: ${weightFormatter.format(rawWeight)} kg`
+                                : "";
                         },
                     },
                 },
@@ -1510,6 +1527,98 @@ $(document).ready(function () {
                 },
             },
         });
+    }
+
+    function getIngredientBandColor(name, index) {
+        const key = String(name || "").trim().toLowerCase();
+        const colors = {
+            "солома": "rgba(219, 176, 78, 0.18)",
+            "люцерна": "rgba(70, 150, 96, 0.18)",
+            "комбикорм": "rgba(91, 126, 191, 0.18)",
+            "зерносенаж": "rgba(132, 103, 184, 0.18)",
+            "силос": "rgba(92, 150, 158, 0.18)",
+            "восстановление терминала": "rgba(173, 89, 81, 0.16)",
+        };
+        const fallback = [
+            "rgba(219, 176, 78, 0.16)",
+            "rgba(70, 150, 96, 0.16)",
+            "rgba(91, 126, 191, 0.16)",
+            "rgba(132, 103, 184, 0.16)",
+            "rgba(92, 150, 158, 0.16)",
+        ];
+        return colors[key] || fallback[index % fallback.length];
+    }
+
+    function buildIngredientBands(rows, ingredients) {
+        const telemetryRows = Array.isArray(rows) ? rows : [];
+        const actualRows = Array.isArray(ingredients) ? ingredients : [];
+        if (!telemetryRows.length || !actualRows.length) {
+            return [];
+        }
+
+        const telemetryTimes = telemetryRows.map((row) => parseTimestampMs(row?.timestamp));
+        return actualRows
+            .map((ingredient, index) => {
+                const startMs = parseTimestampMs(ingredient?.startTime || ingredient?.time);
+                const endMs = parseTimestampMs(ingredient?.endTime || ingredient?.time);
+                if (startMs === null) {
+                    return null;
+                }
+
+                const effectiveEndMs = endMs === null ? startMs : Math.max(startMs, endMs);
+                let startIndex = telemetryTimes.findIndex((time) => time !== null && time >= startMs);
+                if (startIndex < 0) {
+                    startIndex = telemetryRows.length - 1;
+                }
+
+                let endIndex = telemetryTimes.findIndex((time) => time !== null && time > effectiveEndMs);
+                endIndex = endIndex < 0 ? telemetryRows.length - 1 : Math.max(startIndex, endIndex - 1);
+
+                return {
+                    startIndex,
+                    endIndex,
+                    label: getIngredientDisplayName(ingredient?.name) || "Компонент",
+                    color: getIngredientBandColor(ingredient?.name, index),
+                };
+            })
+            .filter(Boolean);
+    }
+
+    function drawIngredientBands(chart, bands) {
+        if (!chart || !Array.isArray(bands) || !bands.length) {
+            return;
+        }
+
+        const xScale = chart.scales["x-axis-0"];
+        const area = chart.chartArea;
+        const context = chart.chart.ctx;
+        if (!xScale || !area || !context) {
+            return;
+        }
+
+        context.save();
+        context.textBaseline = "top";
+        context.font = "11px sans-serif";
+
+        bands.forEach((band) => {
+            const startTick = xScale.getPixelForTick(Math.max(0, band.startIndex));
+            const endTick = xScale.getPixelForTick(Math.max(0, band.endIndex));
+            const previousTick = band.startIndex > 0 ? xScale.getPixelForTick(band.startIndex - 1) : area.left;
+            const nextTick = band.endIndex < xScale.ticks.length - 1 ? xScale.getPixelForTick(band.endIndex + 1) : area.right;
+            const left = Math.max(area.left, band.startIndex > 0 ? (previousTick + startTick) / 2 : area.left);
+            const right = Math.min(area.right, band.endIndex < xScale.ticks.length - 1 ? (endTick + nextTick) / 2 : area.right);
+            const width = Math.max(1, right - left);
+
+            context.fillStyle = band.color;
+            context.fillRect(left, area.top, width, area.bottom - area.top);
+
+            if (width >= 48) {
+                context.fillStyle = "rgba(38, 48, 64, 0.72)";
+                context.fillText(band.label, left + 6, area.top + 6);
+            }
+        });
+
+        context.restore();
     }
 
     function setEditCardVisible(visible) {

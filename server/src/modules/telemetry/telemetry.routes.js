@@ -7,6 +7,7 @@ import { getZoneByCoordinates, resolveEffectiveCoordinates, resolveGroupByCoordi
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
 import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../../../module-3/config.js'
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
+import { calculateHaversine } from '../../../../module-1/geo.js'
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
@@ -41,6 +42,22 @@ function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
   const zoneType = normalizeZoneType(zone.zoneType)
   if (!zoneType) return true
   return zoneType === 'STORAGE' || zoneType === 'FEED' || zoneType === 'LOADING'
+}
+
+function hasBarnZoneAt(lat, lon, zones = [], linkedBarnZoneIds = new Set()) {
+  return zones.some((zone) => {
+    if (!isBarnZone(zone, linkedBarnZoneIds)) return false
+    if (getZoneByCoordinates(lat, lon, [zone])) return true
+
+    const zoneLat = Number(zone.lat)
+    const zoneLon = Number(zone.lon)
+    const radius = Number(zone.radius)
+    return Number.isFinite(zoneLat) &&
+      Number.isFinite(zoneLon) &&
+      Number.isFinite(radius) &&
+      radius > 0 &&
+      calculateHaversine(Number(lat), Number(lon), zoneLat, zoneLon) <= radius
+  })
 }
 
 function resolveExpectedIngredientsFromBatch(batch) {
@@ -313,9 +330,10 @@ router.post('/', async (req, res) => {
     };
     const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
     const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones)
+    const isInsideBarnZone = hasBarnZoneAt(effectivePosition.lat, effectivePosition.lon, activeZones, linkedBarnZoneIds)
     const hostLoadingZone = getZoneByCoordinates(packet.lat, packet.lon, loadingZones)
     const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
-    const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
+    const suppressLoading = isInsideBarnZone || isBarnZone(currentZone, linkedBarnZoneIds)
 
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
@@ -576,21 +594,10 @@ router.post('/', async (req, res) => {
                 }
               })
               batchIdsToRecalculate.add(closedBatchId)
-              console.log(`Замес ${activeBatch.id} принудительно закрыт (недовыгрузка)!`)
+              console.log(`Замес ${closedBatchId} принудительно закрыт (недовыгрузка)!`)
             }
 
-            activeBatch = await tx.batch.create({
-              data: {
-                deviceId,
-                startTime: telemetry.timestamp,
-                startWeight: Number(action.nextStartWeight ?? telemetry.weight),
-                hasViolations: false,
-                ...(resolvedGroup ? {
-                  groupId: resolvedGroup.id,
-                  ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
-                } : {})
-              }
-            })
+            activeBatch = null
             break
         }
       }

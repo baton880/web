@@ -18,6 +18,7 @@ const TELEMETRY_FRESHNESS_MS = 15000;
 const ZONE_TYPE_STORAGE = "STORAGE";
 const ZONE_TYPE_BARN = "BARN";
 const HOST_TRACK_COLOR = "#3F6FAE";
+const FARM_TIME_ZONE = "Asia/Novosibirsk";
 const RTK_GPS_FIX_COLOR = "#B65F55";
 const RTK_FIX_COLOR = "#5F8A6B";
 const OFFLINE_MARKER_COLOR = "#8A8F93";
@@ -1903,7 +1904,7 @@ function formatDateTime(value) {
     }
 
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU");
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: FARM_TIME_ZONE });
 }
 
 function goToCurrentPoint() {

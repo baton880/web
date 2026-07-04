@@ -1,6 +1,7 @@
 const POLL_INTERVAL_MS = 5000;
 const HISTORY_LIMIT = 20;
 const OFFLINE_THRESHOLD_MS = 15000;
+const FARM_TIME_ZONE = "Asia/Novosibirsk";
 const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "batchStartThresholdKg",
     "leftoverThresholdKg",
@@ -79,7 +80,7 @@ function getHeaders() {
 function formatDateTime(value) {
     if (!value) return "--";
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU");
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: FARM_TIME_ZONE });
 }
 
 function hasTelemetryTimestamp(value) {

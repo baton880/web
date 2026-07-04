@@ -3,6 +3,7 @@
     const BATCHES_RESET_API_URL = window.AppAuth?.getApiUrl?.("/api/batches/admin/truncate") || "/api/batches/admin/truncate";
     const CAN_ADMIN_RESET = window.AppAuth?.isAdmin?.() === true;
     const DEFAULT_LIMIT = 1000;
+    const FARM_TIME_ZONE = "Asia/Novosibirsk";
 
     const state = {
         batches: [],
@@ -48,12 +49,14 @@
     };
 
     const dateFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         day: "2-digit",
         month: "2-digit",
         year: "numeric",
     });
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
+        timeZone: FARM_TIME_ZONE,
         day: "2-digit",
         month: "2-digit",
         year: "numeric",

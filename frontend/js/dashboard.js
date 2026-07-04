@@ -27,6 +27,7 @@ const RTK_FIX_COLOR = "#5F8A6B";
 const OFFLINE_MARKER_COLOR = "#8A8F93";
 const HOST_MARKER_IMAGE_URL = "img/host.svg";
 const RTK_MARKER_IMAGE_URL = "img/rtk.svg";
+const FARM_TIME_ZONE = "Asia/Novosibirsk";
 
 let map;
 let placemark;
@@ -144,7 +145,7 @@ function formatDateTime(value) {
     if (!value) return "--";
 
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU");
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: FARM_TIME_ZONE });
 }
 
 function formatMetric(value, digits = 1) {

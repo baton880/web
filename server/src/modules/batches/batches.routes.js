@@ -327,7 +327,7 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
         return {
             ...point,
             weight: Math.max(0, rawWeight - weightOffset),
-            rawWeight
+            processedRawWeight: rawWeight
         };
     });
 }
@@ -466,6 +466,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             select: {
                 timestamp: true,
                 weight: true,
+                rawWeight: true,
                 lat: true,
                 lon: true
             },
@@ -490,6 +491,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
                 select: {
                     timestamp: true,
                     weight: true,
+                    rawWeight: true,
                     lat: true,
                     lon: true
                 },

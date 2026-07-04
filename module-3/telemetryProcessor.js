@@ -31,6 +31,9 @@ const LOADING_START_CONFIRM_PACKETS = 2;
 const MIN_LOADING_IDLE_CLOSE_MS = 15000;
 const FIRST_BATCH_START_MARGIN_MIN_KG = 5;
 const FIRST_BATCH_START_MARGIN_RATIO = 0.15;
+const RAW_TERMINAL_INVALID_WEIGHT_KG = -500;
+const TERMINAL_RECOVERY_GRACE_MS = 20 * 60 * 1000;
+const TERMINAL_RECOVERY_INGREDIENT_NAME = '\u0412\u043e\u0441\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u0438\u0435 \u0442\u0435\u0440\u043c\u0438\u043d\u0430\u043b\u0430';
 const LOADING_SCORE_FREEZE_LOOKBACK_MS = 3000;
 const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
 const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
@@ -189,6 +192,7 @@ export class TelemetryProcessor {
       loadingStartTimeMs: null,
       loadingStartLat: null,
       loadingStartLon: null,
+      loadingStartFromRecovery: false,
       loadingForcedIngredientName: null,
       loadingCandidateCount: 0,
       loadingCandidateTimeMs: null,
@@ -206,7 +210,7 @@ export class TelemetryProcessor {
       anomalyCandidateWeight: null,
       anomalyCandidateCount: 0,
       lastStationaryWeight: weight,
-      lastKnownNormalWeight: Math.max(0, Number(weight || 0)),
+      lastKnownNormalWeight: Number.isFinite(Number(weight)) ? Number(weight) : 0,
       lastKnownNormalTimeMs: null,
       lastKnownNormalLat: null,
       lastKnownNormalLon: null,
@@ -215,6 +219,7 @@ export class TelemetryProcessor {
       recoveryBaselineLat: null,
       recoveryBaselineLon: null,
       recoveryMassRecorded: false,
+      lastTerminalInvalidAtMs: null,
       recoveringFromInvalidWeight: false,
       recoveredOutsideLoadingContext: false,
       isMoving: false,
@@ -253,6 +258,7 @@ export class TelemetryProcessor {
     state.loadingStartTimeMs = null;
     state.loadingStartLat = null;
     state.loadingStartLon = null;
+    state.loadingStartFromRecovery = false;
     state.loadingForcedIngredientName = null;
     this._clearLoadingCandidate(state);
   }
@@ -263,6 +269,23 @@ export class TelemetryProcessor {
     state.loadingCandidateLat = null;
     state.loadingCandidateLon = null;
     state.loadingCandidateWeight = null;
+  }
+
+  _clearUnconfirmedLoadingStart(state) {
+    if (state.isBatchStarted) {
+      return;
+    }
+
+    state.loadingStartTimeMs = null;
+    state.loadingStartLat = null;
+    state.loadingStartLon = null;
+    state.loadingStartFromRecovery = false;
+    state.loadingForcedIngredientName = null;
+    state.segmentPeakWeight = state.zoneStartWeight;
+    state.segmentPeakTimeMs = null;
+    state.segmentPeakLat = null;
+    state.segmentPeakLon = null;
+    this._clearLoadingCandidate(state);
   }
 
   _rememberSegmentPeak(state, weight, packetTimeMs = null, lat = null, lon = null) {
@@ -360,7 +383,7 @@ export class TelemetryProcessor {
     const normalWeight = Number(weight);
     if (
       !Number.isFinite(normalWeight) ||
-      normalWeight < 0 ||
+      normalWeight < RAW_TERMINAL_INVALID_WEIGHT_KG ||
       state.recoveringFromInvalidWeight ||
       state.recoveredOutsideLoadingContext
     ) {
@@ -379,27 +402,40 @@ export class TelemetryProcessor {
     const recoveryDelta = recoveredWeight - recoveryBaselineWeight;
 
     if (!(recoveryDelta > thresholds.batchStartThresholdKg)) {
-      state.recoveryMassRecorded = true;
       return false;
     }
 
+    const recoveryTimeMs = Number.isFinite(Number(state.loadingStartTimeMs))
+      ? Number(state.loadingStartTimeMs)
+      : Number(state.zoneStartTimeMs);
+    const recoveryLat = state.loadingStartLat !== null && Number.isFinite(Number(state.loadingStartLat))
+      ? Number(state.loadingStartLat)
+      : state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat))
+        ? Number(state.zoneStartLat)
+        : null;
+    const recoveryLon = state.loadingStartLon !== null && Number.isFinite(Number(state.loadingStartLon))
+      ? Number(state.loadingStartLon)
+      : state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon))
+        ? Number(state.zoneStartLon)
+        : null;
+
     result.dbActions.push({
       type: 'ADD_INGREDIENT',
-      ingredientName: 'Восстановление терминала',
+      ingredientName: TERMINAL_RECOVERY_INGREDIENT_NAME,
       actualWeight: Math.round(recoveryDelta),
-      startTime: Number.isFinite(Number(state.zoneStartTimeMs))
-        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+      startTime: Number.isFinite(recoveryTimeMs)
+        ? new Date(recoveryTimeMs).toISOString()
         : null,
-      startLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
-      startLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null,
-      endTime: Number.isFinite(Number(state.zoneStartTimeMs))
-        ? new Date(Number(state.zoneStartTimeMs)).toISOString()
+      startLat: recoveryLat,
+      startLon: recoveryLon,
+      endTime: Number.isFinite(recoveryTimeMs)
+        ? new Date(recoveryTimeMs).toISOString()
         : null,
-      endLat: state.zoneStartLat !== null && Number.isFinite(Number(state.zoneStartLat)) ? Number(state.zoneStartLat) : null,
-      endLon: state.zoneStartLon !== null && Number.isFinite(Number(state.zoneStartLon)) ? Number(state.zoneStartLon) : null
+      endLat: recoveryLat,
+      endLon: recoveryLon
     });
     state.recoveryMassRecorded = true;
-    state.lastIngredientName = 'Восстановление терминала';
+    state.lastIngredientName = TERMINAL_RECOVERY_INGREDIENT_NAME;
     return true;
   }
 
@@ -407,6 +443,16 @@ export class TelemetryProcessor {
     if (state.isUnloading) return 'unloading';
     if (state.isMixing) return 'loading';
     return 'idle';
+  }
+
+  _isRawTerminalInvalid(packet) {
+    const rawWeight = Number(packet?.rawWeight ?? packet?.raw_weight ?? packet?.raw);
+    return Number.isFinite(rawWeight) && rawWeight < RAW_TERMINAL_INVALID_WEIGHT_KG;
+  }
+
+  _parseRawWeight(packet) {
+    const rawWeight = Number(packet?.rawWeight ?? packet?.raw_weight ?? packet?.raw);
+    return Number.isFinite(rawWeight) ? rawWeight : null;
   }
 
   _resolveThresholds(settings = {}) {
@@ -962,9 +1008,29 @@ export class TelemetryProcessor {
   }
 
   _isTerminalRecoveryContext(state, options = {}) {
+    const recoveryReferenceTimeMs = Number.isFinite(Number(state.loadingStartTimeMs))
+      ? Number(state.loadingStartTimeMs)
+      : Number(options.packetTimeMs);
+    const recentlyRecoveredTerminal = Number.isFinite(Number(state.lastTerminalInvalidAtMs)) &&
+      Number.isFinite(recoveryReferenceTimeMs) &&
+      recoveryReferenceTimeMs - Number(state.lastTerminalInvalidAtMs) <= TERMINAL_RECOVERY_GRACE_MS;
+    const isFirstRecoverySegment = !state.recoveryMassRecorded &&
+      (!Array.isArray(state.loadedIngredientKeys) || state.loadedIngredientKeys.length === 0);
+    if (isFirstRecoverySegment && recentlyRecoveredTerminal) {
+      return true;
+    }
+
+    const hasPendingRecoveryMass = !state.recoveryMassRecorded && (
+      state.recoveredOutsideLoadingContext ||
+      state.loadingStartFromRecovery
+    );
+    if (hasPendingRecoveryMass) {
+      return true;
+    }
+
     return !this._hasLoadingContext(state, options) && (
       state.recoveredOutsideLoadingContext ||
-      normalizeIngredientName(state.lastIngredientName) === normalizeIngredientName('Восстановление терминала')
+      normalizeIngredientName(state.lastIngredientName) === normalizeIngredientName(TERMINAL_RECOVERY_INGREDIENT_NAME)
     );
   }
 
@@ -994,6 +1060,8 @@ export class TelemetryProcessor {
     }
 
     if (!state.isBatchStarted) {
+      state.loadedIngredientKeys = [];
+      state.recoveryMassRecorded = false;
       state.isBatchStarted = true;
       result.dbActions.push({
         type: 'START_BATCH',
@@ -1009,7 +1077,7 @@ export class TelemetryProcessor {
     }
 
     const ingredientName = this._isTerminalRecoveryContext(state, options)
-      ? 'Восстановление терминала'
+      ? TERMINAL_RECOVERY_INGREDIENT_NAME
       : this._resolveSegmentIngredient(state, options.expectedIngredients, {
         allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
         preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
@@ -1021,6 +1089,9 @@ export class TelemetryProcessor {
     state.isMixing = true;
     state.lastIngredientName = ingredientName;
     const ingredientKey = normalizeIngredientName(ingredientName);
+    if (ingredientKey === normalizeIngredientName(TERMINAL_RECOVERY_INGREDIENT_NAME)) {
+      state.recoveryMassRecorded = true;
+    }
     if (ingredientKey) {
       if (!Array.isArray(state.loadedIngredientKeys)) {
         state.loadedIngredientKeys = [];
@@ -1122,10 +1193,15 @@ export class TelemetryProcessor {
     const deviceId = packet.deviceId || packet.device_id || 'host_01';
     const lat = Number(packet.lat);
     const lon = Number(packet.lon);
-    const currentWeightRaw = Number(packet.weight || 0);
-    const currentWeight = Number.isFinite(currentWeightRaw)
-      ? Math.max(0, currentWeightRaw)
-      : 0;
+    const processedWeightRaw = Number(packet.weight);
+    const rawWeight = this._parseRawWeight(packet);
+    const hasProcessedWeight = Number.isFinite(processedWeightRaw);
+    const rawTerminalInvalid = this._isRawTerminalInvalid(packet);
+    const processedTerminalInvalid = hasProcessedWeight && processedWeightRaw < RAW_TERMINAL_INVALID_WEIGHT_KG;
+    const hasUsableRawWeight = Number.isFinite(rawWeight) && !rawTerminalInvalid;
+    let currentWeight = hasProcessedWeight
+      ? processedWeightRaw
+      : (hasUsableRawWeight ? rawWeight : 0);
     const thresholds = this._resolveThresholds(settings);
     const requestedSuppressLoading = Boolean(options.suppressLoading);
     const packetTimeMs = this._parsePacketTimestampMs(packet);
@@ -1141,28 +1217,28 @@ export class TelemetryProcessor {
       state = this.getInitialState(currentWeight);
       this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       this.deviceStates.set(deviceId, state);
-    } else if (state.hasWeightBaseline === false) {
-      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
-      state.peakWeight = currentWeight;
-      state.lastStationaryWeight = currentWeight;
-      state.lastAcceptedWeight = null;
-      state.hasWeightBaseline = true;
     }
 
-    let suppressLoading = requestedSuppressLoading && (
-      state.isMixing ||
-      state.isUnloading ||
-      state.isBatchStarted
-    );
+    let suppressLoading = requestedSuppressLoading;
     const expectedIngredients = Array.isArray(options.expectedIngredients) ? options.expectedIngredients : [];
     const allowVisitedZoneIngredient = options.allowVisitedZoneIngredient !== false;
     const preferCurrentZoneIngredient = Boolean(options.preferCurrentZoneIngredient);
 
-    if (!Number.isFinite(currentWeightRaw) || currentWeightRaw < 0) {
+    const shouldUseRawRecoveryWeight = hasUsableRawWeight && (
+      state.recoveringFromInvalidWeight ||
+      state.hasWeightBaseline === false ||
+      processedTerminalInvalid ||
+      !hasProcessedWeight
+    );
+    if (shouldUseRawRecoveryWeight) {
+      currentWeight = rawWeight;
+    }
+
+    if (!Number.isFinite(currentWeight) || rawTerminalInvalid || (processedTerminalInvalid && !hasUsableRawWeight)) {
       if (!state.recoveringFromInvalidWeight) {
         state.recoveryBaselineWeight = Number.isFinite(Number(state.lastKnownNormalWeight))
           ? Number(state.lastKnownNormalWeight)
-          : Math.max(0, Number(state.lastAcceptedWeight ?? state.lastStationaryWeight ?? 0));
+          : Number(state.lastAcceptedWeight ?? state.lastStationaryWeight ?? 0);
         state.recoveryBaselineTimeMs = state.lastKnownNormalTimeMs;
         state.recoveryBaselineLat = state.lastKnownNormalLat;
         state.recoveryBaselineLon = state.lastKnownNormalLon;
@@ -1170,10 +1246,21 @@ export class TelemetryProcessor {
       state.hasWeightBaseline = false;
       state.recoveringFromInvalidWeight = true;
       state.recoveredOutsideLoadingContext = false;
+      if (Number.isFinite(Number(packetTimeMs))) {
+        state.lastTerminalInvalidAtMs = Number(packetTimeMs);
+      }
       state.lastAcceptedWeight = null;
       state.anomalyCandidateWeight = null;
       state.anomalyCandidateCount = 0;
       return this._buildSkippedResult(deviceId);
+    }
+
+    if (state.hasWeightBaseline === false) {
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
+      state.peakWeight = currentWeight;
+      state.lastStationaryWeight = currentWeight;
+      state.lastAcceptedWeight = null;
+      state.hasWeightBaseline = true;
     }
 
     const movement = this._updateMovementState(state, packet.speedKmh, thresholds);
@@ -1188,6 +1275,9 @@ export class TelemetryProcessor {
       state.pendingZoneName = null;
       state.pendingZoneEnteredAtMs = null;
       state.pendingZoneCount = 0;
+      if (state.loadingStartFromRecovery || !Number.isFinite(Number(state.segmentPeakTimeMs))) {
+        this._clearUnconfirmedLoadingStart(state);
+      }
     }
 
     if (movement.exitedMoving && state.loadingStartTimeMs !== null && !state.isUnloading) {
@@ -1271,10 +1361,6 @@ export class TelemetryProcessor {
     }
 
     const nearbyLoadingZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
-    if (suppressLoading && nearbyLoadingZone && !state.isUnloading) {
-      suppressLoading = false;
-    }
-
     const activeZone = (suppressLoading || state.isUnloading)
       ? null
       : nearbyLoadingZone;
@@ -1414,12 +1500,29 @@ export class TelemetryProcessor {
       state.pendingZoneCount = 0;
     }
 
+    const hasLoadingContextForStart = Boolean(
+      activeZoneName ||
+      state.currentZone?.ingredient ||
+      forcedHostIngredientName ||
+      this._pickVisitedZoneIngredient(state, expectedIngredients)
+    );
     const hasConfirmedLoadingStart = (
       !isMotionSuppressed &&
+      !suppressLoading &&
       !state.isUnloading &&
+      hasLoadingContextForStart &&
       this._updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs, lat, lon)
     );
     if (hasConfirmedLoadingStart) {
+      const recentlyRecoveredTerminal = Number.isFinite(Number(state.lastTerminalInvalidAtMs)) &&
+        Number.isFinite(Number(packetTimeMs)) &&
+        Number(packetTimeMs) - Number(state.lastTerminalInvalidAtMs) <= TERMINAL_RECOVERY_GRACE_MS;
+      state.loadingStartFromRecovery = Boolean(
+        state.loadingStartFromRecovery ||
+        state.recoveringFromInvalidWeight ||
+        state.recoveredOutsideLoadingContext ||
+        recentlyRecoveredTerminal
+      );
       const loadingStartForcedIngredientName = this._resolveForcedLoadingStartIngredient(state, zonesConfig);
       if (loadingStartForcedIngredientName) {
         state.loadingForcedIngredientName = loadingStartForcedIngredientName;
@@ -1499,6 +1602,7 @@ export class TelemetryProcessor {
     // Защита от недовыгрузки
     if (
       !isMotionSuppressed &&
+      !suppressLoading &&
       state.isUnloading &&
       Number.isFinite(state.lastUnloadWeight) &&
       currentWeight > state.lastUnloadWeight + thresholds.unloadWeightBufferKg
@@ -1518,10 +1622,11 @@ export class TelemetryProcessor {
         nextStartWeight: Math.round(currentWeight)
       });
 
-      this._setZoneBaseline(state, state.lastUnloadWeight, packetTimeMs, lat, lon);
+      this._setZoneBaseline(state, currentWeight, packetTimeMs, lat, lon);
       state.isMixing = false;
       state.isUnloading = false;
       state.isBatchStarted = false;
+      state.loadedIngredientKeys = [];
       state.peakWeight = currentWeight;
       state.lastUnloadWeight = null;
     }
