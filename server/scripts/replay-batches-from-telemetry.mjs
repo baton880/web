@@ -3,7 +3,7 @@ import { PrismaClient } from '@prisma/client'
 import telemetryProcessor from '../../module-3/telemetryProcessor.js'
 import { calculateHaversine, detectZoneObject } from '../../module-1/geo.js'
 import { normalizeIngredientName } from '../../module-2/rationManager.js'
-import { roundNonNegativeWeight, roundOptionalWeight, roundWeight } from '../../module-2/weightRounding.js'
+import { roundNonNegativeWeight, roundWeight } from '../../module-2/weightRounding.js'
 import { DEFAULT_TELEMETRY_SETTINGS } from '../src/modules/telemetry/telemetry-settings.js'
 import { TELEMETRY_FRESHNESS_MS } from '../src/modules/telemetry/telemetry-helpers.js'
 import { recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
@@ -237,8 +237,8 @@ function normalizeTelemetryRow(row) {
     gpsValid: parseBoolean(row.gpsValid),
     gpsSatellites: Number(row.gpsSatellites || 0),
     speedKmh: row.speedKmh === null || row.speedKmh === undefined ? null : Number(row.speedKmh),
-    weight: roundWeight(row.weight || 0),
-    rawWeight: roundOptionalWeight(row.rawWeight),
+    weight: Number(row.weight || 0),
+    rawWeight: row.rawWeight === null || row.rawWeight === undefined ? null : Number(row.rawWeight),
     weightValid: parseBoolean(row.weightValid),
     gpsQuality: Number(row.gpsQuality || 0),
     wifiClients: row.wifiClients ?? [],
@@ -257,7 +257,7 @@ function applyWeightCalibration(packet, telemetrySettings = {}) {
 
   return {
     ...packet,
-    weight: roundWeight(Number(packet.weight || 0) * factor)
+    weight: Number(packet.weight || 0) * factor
   }
 }
 
@@ -361,6 +361,101 @@ async function resetCalculatedTables() {
       `INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('Batch', ${batchIdSequenceStart})`
     )
   }
+}
+
+async function mergeEmptyCarryoverBatches(batchIdsToRecalculate) {
+  const batches = await prisma.batch.findMany({
+    orderBy: [
+      { deviceId: 'asc' },
+      { startTime: 'asc' },
+      { id: 'asc' }
+    ],
+    include: {
+      actualIngredients: {
+        select: { id: true }
+      }
+    }
+  })
+
+  let merged = 0
+  let previous = null
+
+  for (const batch of batches) {
+    const hasIngredients = (batch.actualIngredients?.length || 0) > 0
+    const previousEndMs = previous?.endTime ? new Date(previous.endTime).getTime() : Number.NaN
+    const batchStartMs = batch.startTime ? new Date(batch.startTime).getTime() : Number.NaN
+    const isAdjacentCarryover = previous &&
+      previous.deviceId === batch.deviceId &&
+      Number.isFinite(previousEndMs) &&
+      Number.isFinite(batchStartMs) &&
+      Math.abs(previousEndMs - batchStartMs) <= 1000
+
+    if (hasIngredients && isAdjacentCarryover && !previous.groupId && batch.groupId) {
+      await prisma.violation.deleteMany({ where: { batchId: batch.id } })
+      await prisma.batchIngredient.updateMany({
+        where: { batchId: batch.id },
+        data: { batchId: previous.id }
+      })
+
+      const data = {
+        endTime: batch.endTime,
+        endWeight: roundWeight(batch.endWeight ?? previous.endWeight ?? 0),
+        groupId: batch.groupId
+      }
+      if (batch.rationId) {
+        data.rationId = batch.rationId
+      }
+
+      previous = await prisma.batch.update({
+        where: { id: previous.id },
+        data,
+        include: {
+          actualIngredients: {
+            select: { id: true }
+          }
+        }
+      })
+      await prisma.batch.delete({ where: { id: batch.id } })
+      batchIdsToRecalculate.delete(batch.id)
+      batchIdsToRecalculate.add(previous.id)
+      merged += 1
+      continue
+    }
+
+    if (!hasIngredients && batch.endTime && isAdjacentCarryover) {
+      await prisma.violation.deleteMany({ where: { batchId: batch.id } })
+
+      const data = {
+        endTime: batch.endTime,
+        endWeight: roundWeight(batch.endWeight ?? previous.endWeight ?? 0)
+      }
+      if (batch.groupId) {
+        data.groupId = batch.groupId
+      }
+      if (batch.rationId) {
+        data.rationId = batch.rationId
+      }
+
+      previous = await prisma.batch.update({
+        where: { id: previous.id },
+        data,
+        include: {
+          actualIngredients: {
+            select: { id: true }
+          }
+        }
+      })
+      await prisma.batch.delete({ where: { id: batch.id } })
+      batchIdsToRecalculate.delete(batch.id)
+      batchIdsToRecalculate.add(previous.id)
+      merged += 1
+      continue
+    }
+
+    previous = batch
+  }
+
+  return merged
 }
 
 async function main() {
@@ -508,13 +603,13 @@ async function main() {
 
       let activeBatch = activeBatchByDevice.get(deviceId) || null
 
-      async function bindBatchToResolvedGroup() {
+      async function bindBatchToResolvedGroup({ overwriteExisting = false } = {}) {
         if (!activeBatch || !resolvedGroup) return
         const patch = {}
-        if (resolvedGroup.id && activeBatch.groupId !== resolvedGroup.id) {
+        if (resolvedGroup.id && (overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== resolvedGroup.id) {
           patch.groupId = resolvedGroup.id
         }
-        if (resolvedGroup.rationId && activeBatch.rationId !== resolvedGroup.rationId) {
+        if (resolvedGroup.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== resolvedGroup.rationId) {
           patch.rationId = resolvedGroup.rationId
         }
         if (!Object.keys(patch).length) {
@@ -648,7 +743,7 @@ async function main() {
 
           case 'START_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
+              await bindBatchToResolvedGroup({ overwriteExisting: true })
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: roundWeight(action.startUnloadWeight ?? packet.weight) }
@@ -794,9 +889,17 @@ async function main() {
     }
   }
 
+  const mergedCarryovers = await mergeEmptyCarryoverBatches(batchIdsToRecalculate)
+  if (mergedCarryovers > 0) {
+    console.log(`Merged empty carryover batches: ${mergedCarryovers}`)
+  }
+
   console.log(`Recalculating violations for ${batchIdsToRecalculate.size} batches...`)
   for (const batchId of batchIdsToRecalculate) {
-    await recalculateBatchViolations(prisma, batchId, telemetrySettings)
+    const recalculation = await recalculateBatchViolations(prisma, batchId, telemetrySettings)
+    if (recalculation?.status === 'missing') {
+      continue
+    }
     if (stickyViolationBatchIds.has(batchId)) {
       await prisma.batch.update({
         where: { id: batchId },

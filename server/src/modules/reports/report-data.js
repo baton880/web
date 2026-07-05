@@ -250,9 +250,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         feedingsPerDay,
                         parentComponent: componentRow.name,
                         component: child.name,
-                        plan: roundWeight(child.plan || 0),
-                        fact: roundWeight(child.fact || 0),
-                        deviation: roundWeight((child.fact || 0) - (child.plan || 0)),
+                        plan: Number(child.plan || 0),
+                        fact: Number(child.fact || 0),
+                        deviation: Number(child.fact || 0) - Number(child.plan || 0),
                         deviationPercent: child.deviation_percent ?? 0,
                         isViolation: Boolean(child.isViolation ?? child.is_violation)
                     });

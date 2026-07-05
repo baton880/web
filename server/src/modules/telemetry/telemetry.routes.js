@@ -132,8 +132,8 @@ function normalizeTelemetryPacket(packet) {
     gpsValid: parseBoolean(packet.gpsValid ?? packet.gps_valid),
     gpsSatellites: Number(packet.gpsSatellites ?? packet.gps_satellites ?? 0),
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
-    weight: roundWeight(packet.weight || 0),
-    rawWeight: roundOptionalWeight(parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight)),
+    weight: Number(packet.weight || 0),
+    rawWeight: parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight),
     weightValid: parseBoolean(packet.weightValid ?? packet.weight_valid),
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
@@ -160,7 +160,7 @@ function applyWeightCalibration(packet, telemetrySettings = {}) {
 
   return {
     ...packet,
-    weight: roundWeight(Number(packet.weight || 0) * factor)
+    weight: Number(packet.weight || 0) * factor
   }
 }
 
@@ -413,18 +413,18 @@ router.post('/', async (req, res) => {
       const batchIdsToRecalculate = new Set()
       const stickyViolationBatchIds = new Set()
 
-      async function bindBatchToResolvedGroup() {
+      async function bindBatchToResolvedGroup({ overwriteExisting = false } = {}) {
         if (!activeBatch || !resolvedGroup) {
           return
         }
 
         const patch = {}
 
-        if (activeBatch.groupId !== resolvedGroup.id) {
+        if ((overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== resolvedGroup.id) {
           patch.groupId = resolvedGroup.id
         }
 
-        if (resolvedGroup.rationId && activeBatch.rationId !== resolvedGroup.rationId) {
+        if (resolvedGroup.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== resolvedGroup.rationId) {
           patch.rationId = resolvedGroup.rationId
         }
 
@@ -559,7 +559,7 @@ router.post('/', async (req, res) => {
 
           case 'START_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
+              await bindBatchToResolvedGroup({ overwriteExisting: true })
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: roundWeight(action.startUnloadWeight ?? telemetry.weight) }

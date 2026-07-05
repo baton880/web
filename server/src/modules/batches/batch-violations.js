@@ -112,21 +112,24 @@ function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactW
 
     const componentPlanTotal = components.reduce((sum, component) => sum + component.plannedWeight, 0);
     const sourceTotal = componentPlanTotal > 0 ? componentPlanTotal : Number(planItem.plannedWeight || 0);
-    const ratio = parentPlanWeight > 0 ? parentFactWeight / parentPlanWeight : 0;
+    const roundedParentPlanWeight = roundWeight(parentPlanWeight);
+    const roundedParentFactWeight = roundWeight(parentFactWeight);
 
     return components.map((component) => {
         const componentPlanWeight = sourceTotal > 0
-            ? parentPlanWeight * (component.plannedWeight / sourceTotal)
+            ? roundedParentPlanWeight * (component.plannedWeight / sourceTotal)
             : 0;
-        const componentFactWeight = componentPlanWeight * ratio;
+        const componentFactWeight = sourceTotal > 0
+            ? roundedParentFactWeight * (component.plannedWeight / sourceTotal)
+            : 0;
         const deviationPercent = componentPlanWeight > 0
             ? Math.round(((componentFactWeight - componentPlanWeight) / componentPlanWeight) * 1000) / 10
             : 0;
 
         return {
             name: component.name,
-            plan: roundWeight(componentPlanWeight),
-            fact: roundWeight(componentFactWeight),
+            plan: componentPlanWeight,
+            fact: componentFactWeight,
             deviation_percent: deviationPercent,
             is_violation: Boolean(parentIsViolation),
             isViolation: Boolean(parentIsViolation)

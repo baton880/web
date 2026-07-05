@@ -317,7 +317,7 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
     const batchStartWeight = Number(batch?.startWeight || 0);
     const firstRawWeight = Number(hostTrack[0]?.weight);
     if (!Number.isFinite(firstRawWeight)) {
-        return hostTrack;
+        return hostTrack.map((point) => serializePoint(point, point?.weight));
     }
 
     const weightOffset = firstRawWeight - batchStartWeight;

@@ -226,6 +226,9 @@ export class TelemetryProcessor {
       isMixing: false,
       isUnloading: false,
       lastUnloadWeight: null,
+      lastUnloadTimeMs: null,
+      lastUnloadLat: null,
+      lastUnloadLon: null,
       lastIngredientName: null,
       isBatchStarted: false,
       hasWeightBaseline: true,
@@ -1997,7 +2000,21 @@ export class TelemetryProcessor {
       currentWeight > state.lastUnloadWeight + thresholds.unloadWeightBufferKg
     ) {
       const leftoverWeight = state.lastUnloadWeight;
-  
+      const leftoverTimeMs = resolveTimestampMs(state.lastUnloadTimeMs) ?? packetTimeMs;
+      const leftoverLat = Number.isFinite(Number(state.lastUnloadLat)) ? Number(state.lastUnloadLat) : null;
+      const leftoverLon = Number.isFinite(Number(state.lastUnloadLon)) ? Number(state.lastUnloadLon) : null;
+      const recoveredLoadingWeight = Number(currentWeight) - Number(leftoverWeight);
+      const recoveredLoadingIngredientName = forcedHostIngredientName
+        || nearbyLoadingZone?.ingredient
+        || nearbyLoadingZone?.name
+        || null;
+      const shouldRecordRecoveredLoading = Boolean(
+        recoveredLoadingIngredientName &&
+        normalizeIngredientName(recoveredLoadingIngredientName) !== 'unknown' &&
+        Number.isFinite(recoveredLoadingWeight) &&
+        recoveredLoadingWeight > thresholds.batchStartThresholdKg
+      );
+
       if (leftoverWeight > thresholds.leftoverThresholdKg) {
         result.dbActions.push({
           type: 'LEFTOVER_VIOLATION',
@@ -2008,15 +2025,46 @@ export class TelemetryProcessor {
       result.dbActions.push({
         type: 'FORCE_CLOSE_BATCH',
         closeWeight: roundWeight(leftoverWeight),
-        nextStartWeight: roundWeight(currentWeight)
+        nextStartWeight: roundWeight(leftoverWeight)
       });
 
-      this._setZoneBaseline(state, state.lastUnloadWeight, packetTimeMs, lat, lon);
-      state.isMixing = false;
+      if (shouldRecordRecoveredLoading) {
+        result.dbActions.push({
+          type: 'ADD_INGREDIENT',
+          ingredientName: recoveredLoadingIngredientName,
+          actualWeight: roundWeight(recoveredLoadingWeight),
+          startTime: leftoverTimeMs !== null ? new Date(leftoverTimeMs).toISOString() : null,
+          startLat: leftoverLat,
+          startLon: leftoverLon,
+          endTime: packetTimeMs !== null ? new Date(packetTimeMs).toISOString() : null,
+          endLat: Number.isFinite(Number(lat)) ? Number(lat) : null,
+          endLon: Number.isFinite(Number(lon)) ? Number(lon) : null
+        });
+      }
+
+      this._setZoneBaseline(
+        state,
+        shouldRecordRecoveredLoading ? currentWeight : leftoverWeight,
+        packetTimeMs,
+        lat,
+        lon
+      );
       state.isUnloading = false;
-      state.isBatchStarted = false;
+      state.isMixing = true;
+      state.isBatchStarted = true;
       state.peakWeight = currentWeight;
+      state.loadedIngredientKeys = [];
+      if (shouldRecordRecoveredLoading) {
+        state.lastIngredientName = recoveredLoadingIngredientName;
+        const recoveredIngredientKey = normalizeIngredientName(recoveredLoadingIngredientName);
+        if (recoveredIngredientKey) {
+          state.loadedIngredientKeys.push(recoveredIngredientKey);
+        }
+      }
       state.lastUnloadWeight = null;
+      state.lastUnloadTimeMs = null;
+      state.lastUnloadLat = null;
+      state.lastUnloadLon = null;
     }
 
     // Детекция выгрузки
@@ -2039,6 +2087,9 @@ export class TelemetryProcessor {
       });
       state.isUnloading = true;
       state.lastUnloadWeight = currentWeight;
+      state.lastUnloadTimeMs = packetTimeMs;
+      state.lastUnloadLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+      state.lastUnloadLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
 
       result.dbActions.push({
         type: 'START_UNLOAD',
@@ -2057,6 +2108,9 @@ export class TelemetryProcessor {
       Math.abs(currentWeight - state.lastUnloadWeight) >= thresholds.unloadUpdateDeltaKg
     ) {
       state.lastUnloadWeight = currentWeight;
+      state.lastUnloadTimeMs = packetTimeMs;
+      state.lastUnloadLat = Number.isFinite(Number(lat)) ? Number(lat) : null;
+      state.lastUnloadLon = Number.isFinite(Number(lon)) ? Number(lon) : null;
       result.dbActions.push({
         type: 'UPDATE_UNLOAD',
         endWeight: roundWeight(currentWeight)
