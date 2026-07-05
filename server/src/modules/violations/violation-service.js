@@ -1,8 +1,5 @@
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
-
-function round1(value) {
-  return Math.round(Number(value || 0) * 10) / 10
-}
+import { roundWeight } from '../../../../module-2/weightRounding.js'
 
 function toViolationDescriptor(violation) {
   const plan = Number(violation?.plan || 0)
@@ -109,9 +106,9 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         componentName: violation.ingredient || null,
         message: descriptor.message,
         category: 'BUSINESS',
-        planWeight: round1(violation.plan),
-        actualWeight: round1(violation.fact),
-        deviation: round1(descriptor.deviation),
+        planWeight: roundWeight(violation.plan),
+        actualWeight: roundWeight(violation.fact),
+        deviation: roundWeight(descriptor.deviation),
         deviationPercent: descriptor.deviationPercent,
         detectedAt,
         resolvedAt: null,
@@ -129,9 +126,9 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         message: descriptor.message,
         category: 'BUSINESS',
         status: 'OPEN',
-        planWeight: round1(violation.plan),
-        actualWeight: round1(violation.fact),
-        deviation: round1(descriptor.deviation),
+        planWeight: roundWeight(violation.plan),
+        actualWeight: roundWeight(violation.fact),
+        deviation: roundWeight(descriptor.deviation),
         deviationPercent: descriptor.deviationPercent,
         detectedAt
       }
@@ -174,9 +171,9 @@ export async function recordLeftoverViolation(db, { batchId, deviceId, leftoverW
       deviceId,
       title: 'Остаток после выгрузки',
       componentName: 'Остаток',
-      message: `После выгрузки осталось ${round1(leftoverWeight)} кг`,
+      message: `После выгрузки осталось ${roundWeight(leftoverWeight)} кг`,
       category: 'LEFTOVER',
-      actualWeight: round1(leftoverWeight),
+      actualWeight: roundWeight(leftoverWeight),
       detectedAt,
       resolvedAt: null,
       status: 'OPEN'
@@ -188,10 +185,10 @@ export async function recordLeftoverViolation(db, { batchId, deviceId, leftoverW
       title: 'Остаток после выгрузки',
       componentKey: '__leftover__',
       componentName: 'Остаток',
-      message: `После выгрузки осталось ${round1(leftoverWeight)} кг`,
+      message: `После выгрузки осталось ${roundWeight(leftoverWeight)} кг`,
       category: 'LEFTOVER',
       status: 'OPEN',
-      actualWeight: round1(leftoverWeight),
+      actualWeight: roundWeight(leftoverWeight),
       detectedAt
     }
   })

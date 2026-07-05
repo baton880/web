@@ -1,10 +1,7 @@
 import { calculatePlan, checkViolations, normalizeIngredientName } from '../../../../module-2/rationManager.js';
+import { roundWeight } from '../../../../module-2/weightRounding.js';
 import { syncBatchViolationLog } from '../violations/violation-service.js';
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
-
-function round1(value) {
-    return Math.round(Number(value || 0) * 10) / 10;
-}
 
 function parseCompoundComponents(value) {
     if (Array.isArray(value)) {
@@ -72,7 +69,7 @@ export function buildOrderViolations(planIngredients, actualIngredients) {
         .map((ingredient) => ({
             key: normalizeIngredientName(ingredient?.ingredientName),
             name: toDisplayIngredientName(ingredient?.ingredientName),
-            weight: Number(ingredient?.actualWeight || 0)
+            weight: roundWeight(ingredient?.actualWeight || 0)
         }))
         .filter((ingredient) => ingredient.weight > 0 && expectedByKey.has(ingredient.key));
 
@@ -128,8 +125,8 @@ function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactW
 
         return {
             name: component.name,
-            plan: round1(componentPlanWeight),
-            fact: round1(componentFactWeight),
+            plan: roundWeight(componentPlanWeight),
+            fact: roundWeight(componentFactWeight),
             deviation_percent: deviationPercent,
             is_violation: Boolean(parentIsViolation),
             isViolation: Boolean(parentIsViolation)
@@ -183,7 +180,10 @@ export function aggregateFacts(ingredients) {
         facts.set(key, current);
     }
 
-    return Array.from(facts.values());
+    return Array.from(facts.values()).map((item) => ({
+        ...item,
+        actualWeight: roundWeight(item.actualWeight)
+    }));
 }
 
 function resolvePlanContext(batch) {
@@ -258,8 +258,8 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
 
         return {
             name,
-            plan: round1(planWeight),
-            fact: round1(factWeight),
+            plan: roundWeight(planWeight),
+            fact: roundWeight(factWeight),
             deviation_percent: deviationPercent,
             is_violation: isViolation,
             isCompound: Boolean(planItem?.isCompound),
@@ -277,8 +277,8 @@ export function buildUnloadProgress(batch, currentWeight, machineState = {}) {
     const unloadedFact = Math.max(0, peakWeight - Number(currentWeight || 0));
 
     return {
-        target_weight: round1(targetWeight),
-        unloaded_fact: round1(unloadedFact)
+        target_weight: roundWeight(targetWeight),
+        unloaded_fact: roundWeight(unloadedFact)
     };
 }
 
@@ -312,7 +312,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
             .map((item) => ({
                 ingredient: toDisplayIngredientName(item.name || 'Unknown'),
                 plan: 0,
-                fact: Number(item.actualWeight || 0),
+                fact: roundWeight(item.actualWeight || 0),
                 deviationPercent: 100,
                 message: 'Загружен компонент вне плана (рацион/группа не назначены)'
             }));
@@ -359,7 +359,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         await prisma.batchIngredient.update({
             where: { id: ingredient.id },
             data: {
-                plannedWeight: planByName.get(normalizeIngredientName(ingredient.ingredientName)) ?? 0,
+                plannedWeight: roundWeight(planByName.get(normalizeIngredientName(ingredient.ingredientName)) ?? 0),
                 isViolation: weightViolationNames.has(normalizeIngredientName(ingredient.ingredientName))
             }
         });

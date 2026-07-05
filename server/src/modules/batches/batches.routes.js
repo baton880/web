@@ -3,15 +3,13 @@ import prisma from "../../database.js";
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from "../../middleware/auth.js";
 import { buildIngredientSummary, buildUnloadProgress, recalculateBatchViolations, toDisplayIngredientName } from './batch-violations.js';
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js';
+import { roundNonNegativeWeight, roundWeight } from '../../../../module-2/weightRounding.js';
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
+import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js';
 
 const router = Router();
 const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
-
-function round1(value) {
-    return Math.round(Number(value || 0) * 10) / 10;
-}
 
 // ============================================================================
 // ADMIN: очистка замесов и связанных ошибок (без удаления рационов и групп)
@@ -64,19 +62,19 @@ async function getBatchWeightContext(batch, prismaClient = prisma) {
         })
     ]);
 
-    const currentWeight = batch.endTime
-        ? Number(batch.endWeight ?? latestTelemetry?.weight ?? 0)
-        : Number(latestTelemetry?.weight ?? batch.endWeight ?? batch.startWeight ?? 0);
+    const currentWeight = roundWeight(batch.endTime
+        ? batch.endWeight ?? latestTelemetry?.weight ?? 0
+        : latestTelemetry?.weight ?? batch.endWeight ?? batch.startWeight ?? 0);
     const peakWeight = Math.max(
-        Number(peakTelemetry._max.weight || 0),
-        Number(batch.startWeight || 0),
+        roundWeight(peakTelemetry._max.weight || 0),
+        roundWeight(batch.startWeight || 0),
         currentWeight
     );
 
     return {
         currentWeight,
         peakWeight,
-        remainingWeight: round1(Math.max(0, currentWeight)),
+        remainingWeight: roundNonNegativeWeight(currentWeight),
         latestTelemetryAt: latestTelemetry?.timestamp || null
     };
 }
@@ -289,9 +287,9 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
             startTime: ing.startedAt || null,
             time: ing.addedAt,
             endTime: ing.addedAt,
-            plan: ing.plannedWeight || 0,
-            fact: ing.actualWeight,
-            deviation: ing.plannedWeight ? (ing.actualWeight - ing.plannedWeight) : 0,
+            plan: roundWeight(ing.plannedWeight || 0),
+            fact: roundWeight(ing.actualWeight || 0),
+            deviation: ing.plannedWeight ? roundWeight(Number(ing.actualWeight || 0) - Number(ing.plannedWeight || 0)) : 0,
             isViolation: ing.isViolation,
             startLat: ing.startLat,
             startLon: ing.startLon,
@@ -307,6 +305,15 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
         return [];
     }
 
+    const serializePoint = (point, weightValue) => {
+        const rawWeight = Number(point?.weight);
+        return {
+            ...point,
+            weight: roundNonNegativeWeight(weightValue),
+            rawWeight: Number.isFinite(rawWeight) ? rawWeight : point?.rawWeight
+        };
+    };
+
     const batchStartWeight = Number(batch?.startWeight || 0);
     const firstRawWeight = Number(hostTrack[0]?.weight);
     if (!Number.isFinite(firstRawWeight)) {
@@ -315,7 +322,7 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
 
     const weightOffset = firstRawWeight - batchStartWeight;
     if (!Number.isFinite(weightOffset) || Math.abs(weightOffset) < 1) {
-        return hostTrack;
+        return hostTrack.map((point) => serializePoint(point, point?.weight));
     }
 
     return hostTrack.map((point) => {
@@ -325,8 +332,7 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
         }
 
         return {
-            ...point,
-            weight: Math.max(0, rawWeight - weightOffset),
+            ...serializePoint(point, rawWeight - weightOffset),
             rawWeight
         };
     });
@@ -338,10 +344,9 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
 router.get('/', authenticate, requireReadAccess, async (req, res) => {
     try {
         // Логика фильтрации по датам (По умолчанию - сегодня)
-        let startDate = new Date();
-        startDate.setHours(0, 0, 0, 0);
-        let endDate = new Date();
-        endDate.setHours(23, 59, 59, 999);
+        let selectedDate = getFarmDateString();
+        let startDate;
+        let endDate;
 
         if (req.query.date) {
             if (Number.isNaN(Date.parse(req.query.date))) {
@@ -352,6 +357,17 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
             endDate = new Date(req.query.date);
             endDate.setHours(23, 59, 59, 999);
         }
+
+        if (req.query.date) {
+            selectedDate = String(req.query.date);
+        }
+
+        const dateRange = farmDateRange(selectedDate);
+        if (!dateRange) {
+            return res.status(400).json({ error: 'РќРµРєРѕСЂСЂРµРєС‚РЅР°СЏ РґР°С‚Р° С„РёР»СЊС‚СЂР°' });
+        }
+        startDate = dateRange.start;
+        endDate = dateRange.end;
 
         const [batches, telemetrySettings] = await Promise.all([
             prisma.batch.findMany({
@@ -398,8 +414,8 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 rationName: b.ration?.name || 'Неизвестный рацион',
                 groupName: b.group?.name || 'Без группы',
                 hasViolations: hasLoggedViolations, // Единый источник статуса: журнал нарушений (все зафиксированные кейсы)
-                startWeight: b.startWeight,
-                endWeight: b.endWeight,
+                startWeight: roundWeight(b.startWeight || 0),
+                endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
                 ingredients
             };
         });

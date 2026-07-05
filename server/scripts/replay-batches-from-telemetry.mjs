@@ -3,6 +3,7 @@ import { PrismaClient } from '@prisma/client'
 import telemetryProcessor from '../../module-3/telemetryProcessor.js'
 import { calculateHaversine, detectZoneObject } from '../../module-1/geo.js'
 import { normalizeIngredientName } from '../../module-2/rationManager.js'
+import { roundNonNegativeWeight, roundOptionalWeight, roundWeight } from '../../module-2/weightRounding.js'
 import { DEFAULT_TELEMETRY_SETTINGS } from '../src/modules/telemetry/telemetry-settings.js'
 import { TELEMETRY_FRESHNESS_MS } from '../src/modules/telemetry/telemetry-helpers.js'
 import { recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
@@ -236,8 +237,8 @@ function normalizeTelemetryRow(row) {
     gpsValid: parseBoolean(row.gpsValid),
     gpsSatellites: Number(row.gpsSatellites || 0),
     speedKmh: row.speedKmh === null || row.speedKmh === undefined ? null : Number(row.speedKmh),
-    weight: Number(row.weight || 0),
-    rawWeight: row.rawWeight === null || row.rawWeight === undefined ? null : Number(row.rawWeight),
+    weight: roundWeight(row.weight || 0),
+    rawWeight: roundOptionalWeight(row.rawWeight),
     weightValid: parseBoolean(row.weightValid),
     gpsQuality: Number(row.gpsQuality || 0),
     wifiClients: row.wifiClients ?? [],
@@ -256,7 +257,7 @@ function applyWeightCalibration(packet, telemetrySettings = {}) {
 
   return {
     ...packet,
-    weight: Number(packet.weight || 0) * factor
+    weight: roundWeight(Number(packet.weight || 0) * factor)
   }
 }
 
@@ -342,7 +343,7 @@ function replayRtkScoreboardUntil({
 
 function rememberRecentWeight(recentWeightsByDevice, deviceId, weight, limit) {
   const list = recentWeightsByDevice.get(deviceId) || []
-  list.unshift(Number(weight || 0))
+  list.unshift(roundWeight(weight || 0))
   if (list.length > limit) list.length = limit
   recentWeightsByDevice.set(deviceId, list)
   return list
@@ -548,7 +549,7 @@ async function main() {
                 data: {
                   deviceId,
                   startTime: Number.isNaN(actionStartTime.getTime()) ? packet.timestamp : actionStartTime,
-                  startWeight: Number(action.startWeight ?? packet.weight),
+                  startWeight: roundWeight(action.startWeight ?? packet.weight),
                   hasViolations: false,
                   ...(resolvedGroup ? {
                     groupId: resolvedGroup.id,
@@ -569,7 +570,7 @@ async function main() {
                 data: {
                   deviceId,
                   startTime: Number.isNaN(actionStartTime.getTime()) ? packet.timestamp : actionStartTime,
-                  startWeight: packet.weight,
+                  startWeight: roundWeight(packet.weight),
                   hasViolations: false,
                   ...(resolvedGroup ? {
                     groupId: resolvedGroup.id,
@@ -584,10 +585,15 @@ async function main() {
 
             {
               const ingredientName = String(action.ingredientName || '').trim() || 'Unknown'
-              const actualWeight = Number(action.actualWeight || 0)
+              const actualWeight = roundWeight(action.actualWeight || 0)
               const actionStartedAt = action.startTime ? new Date(action.startTime) : null
               const actionEndedAt = action.endTime ? new Date(action.endTime) : packet.timestamp
-              const effectiveIngredientAddedAt = actionEndedAt && !Number.isNaN(actionEndedAt.getTime())
+              const useStartTimeForIngredient = normalizeIngredientName(ingredientName) === normalizeIngredientName('Неопределено') &&
+                actionStartedAt &&
+                !Number.isNaN(actionStartedAt.getTime())
+              const effectiveIngredientAddedAt = useStartTimeForIngredient
+                ? actionStartedAt
+                : actionEndedAt && !Number.isNaN(actionEndedAt.getTime())
                 ? actionEndedAt
                 : packet.timestamp
               const latestIngredient = await prisma.batchIngredient.findFirst({
@@ -611,7 +617,7 @@ async function main() {
                 await prisma.batchIngredient.update({
                   where: { id: latestIngredient.id },
                   data: {
-                    actualWeight: Number(latestIngredient.actualWeight || 0) + actualWeight,
+                    actualWeight: roundWeight(Number(latestIngredient.actualWeight || 0) + actualWeight),
                     startedAt: latestIngredient.startedAt || (actionStartedAt && !Number.isNaN(actionStartedAt.getTime()) ? actionStartedAt : null),
                     startLat: latestIngredient.startLat ?? finiteNumberOrNull(action.startLat),
                     startLon: latestIngredient.startLon ?? finiteNumberOrNull(action.startLon),
@@ -645,7 +651,7 @@ async function main() {
               await bindBatchToResolvedGroup()
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
-                data: { endWeight: Number(action.startUnloadWeight ?? packet.weight) }
+                data: { endWeight: roundWeight(action.startUnloadWeight ?? packet.weight) }
               })
               activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               activeBatchByDevice.set(deviceId, activeBatch)
@@ -659,7 +665,7 @@ async function main() {
               }
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
-                data: { endWeight: action.endWeight }
+                data: { endWeight: roundWeight(action.endWeight ?? packet.weight) }
               })
               activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               activeBatchByDevice.set(deviceId, activeBatch)
@@ -668,20 +674,19 @@ async function main() {
 
           case 'LEFTOVER_VIOLATION':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
               stickyViolationBatchIds.add(activeBatch.id)
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: {
                   hasViolations: true,
-                  endWeight: Number(action.leftoverWeight ?? activeBatch.endWeight ?? packet.weight)
+                  endWeight: roundWeight(action.leftoverWeight ?? activeBatch.endWeight ?? packet.weight)
                 }
               })
               activeBatchByDevice.set(deviceId, activeBatch)
               await recordLeftoverViolation(prisma, {
                 batchId: activeBatch.id,
                 deviceId,
-                leftoverWeight: Number(action.leftoverWeight ?? packet.weight),
+                leftoverWeight: roundWeight(action.leftoverWeight ?? packet.weight),
                 detectedAt: packet.timestamp
               })
               stats.leftovers += 1
@@ -695,7 +700,7 @@ async function main() {
                 where: { id: activeBatch.id },
                 data: {
                   endTime: packet.timestamp,
-                  endWeight: Number(action.endWeight ?? packet.weight)
+                  endWeight: roundWeight(action.endWeight ?? packet.weight)
                 }
               })
               batchIdsToRecalculate.add(completedBatchId)
@@ -707,14 +712,13 @@ async function main() {
 
           case 'FORCE_CLOSE_BATCH':
             if (activeBatch) {
-              await bindBatchToResolvedGroup()
               const closedBatchId = activeBatch.id
               stickyViolationBatchIds.add(closedBatchId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: {
                   endTime: packet.timestamp,
-                  endWeight: Number(action.closeWeight ?? packet.weight),
+                  endWeight: roundWeight(action.closeWeight ?? packet.weight),
                   hasViolations: true
                 }
               })
@@ -726,7 +730,7 @@ async function main() {
               data: {
                 deviceId,
                 startTime: packet.timestamp,
-                startWeight: Number(action.nextStartWeight ?? packet.weight),
+                startWeight: roundWeight(action.nextStartWeight ?? packet.weight),
                 hasViolations: false,
                 ...(resolvedGroup ? {
                   groupId: resolvedGroup.id,
@@ -757,7 +761,7 @@ async function main() {
             const nearZeroCount = recentWeights.filter((weight) => Math.max(0, Number(weight || 0)) <= autoCloseZeroWeightKg).length
             const shouldAutoCloseByNegative = recentWeights.length >= autoCloseNegativeStreak && negativeCount >= autoCloseNegativeStreak
             const shouldAutoCloseByEmpty = recentWeights.length >= autoCloseEmptyStreak && nearZeroCount >= autoCloseEmptyStreak
-            const currentWeight = Number(packet.weight || 0)
+            const currentWeight = roundWeight(packet.weight || 0)
             const currentPacketIsNegative = currentWeight < 0
             const currentPacketIsEmpty = Math.max(0, currentWeight) <= autoCloseZeroWeightKg
 
@@ -770,7 +774,7 @@ async function main() {
                 where: { id: closedBatchId },
                 data: {
                   endTime: packet.timestamp,
-                  endWeight: Math.max(0, Number(packet.weight || 0))
+                  endWeight: roundNonNegativeWeight(packet.weight || 0)
                 }
               })
               batchIdsToRecalculate.add(closedBatchId)

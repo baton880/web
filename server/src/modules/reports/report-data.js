@@ -1,6 +1,8 @@
 import prisma from '../../database.js';
 import { aggregateFacts, buildIngredientSummary, getBatchPlan } from '../batches/batch-violations.js';
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
+import { farmDateBoundary, parseFarmDateOnly } from '../../utils/farm-date.js';
+import { roundWeight } from '../../../../module-2/weightRounding.js';
 
 export const DEFAULT_LIMIT = 500;
 export const MAX_LIMIT = 1000;
@@ -8,10 +10,6 @@ export const VIOLATION_THRESHOLD = 10;
 export const WORKFLOW_STATUSES_ALL = ['OPEN', 'IN_PROGRESS', 'CLOSED', 'RESOLVED'];
 export const WORKFLOW_STATUSES_ACTIVE = new Set(['OPEN', 'IN_PROGRESS']);
 export const WORKFLOW_STATUSES_RESOLVED = new Set(['CLOSED', 'RESOLVED']);
-
-function round1(value) {
-    return Math.round(Number(value || 0) * 10) / 10;
-}
 
 const REPORT_NO_RATION = '\u0411\u0435\u0437 \u0440\u0430\u0446\u0438\u043e\u043d\u0430';
 const REPORT_NO_GROUP = '\u0411\u0435\u0437 \u0433\u0440\u0443\u043f\u043f\u044b';
@@ -28,6 +26,10 @@ export function parsePositiveInt(value, fallback) {
 
 export function parseDateBoundary(value, kind) {
     if (!value) return null;
+
+    if (parseFarmDateOnly(value)) {
+        return farmDateBoundary(value, kind);
+    }
 
     const parsed = new Date(value);
     if (Number.isNaN(parsed.getTime())) {
@@ -227,8 +229,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             rationName: getBatchRationName(batch),
             groupName: batch.group?.name || REPORT_NO_GROUP,
             feedingsPerDay,
-            planTotal: round1(plan.totalBatchWeight || 0),
-            factTotal: round1(factTotal),
+            planTotal: roundWeight(plan.totalBatchWeight || 0),
+            factTotal: roundWeight(factTotal),
             violationsCount,
             openViolationsCount,
             resolvedViolationsCount: resolvedForBatchCount,
@@ -248,9 +250,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         feedingsPerDay,
                         parentComponent: componentRow.name,
                         component: child.name,
-                        plan: round1(child.plan || 0),
-                        fact: round1(child.fact || 0),
-                        deviation: round1((child.fact || 0) - (child.plan || 0)),
+                        plan: roundWeight(child.plan || 0),
+                        fact: roundWeight(child.fact || 0),
+                        deviation: roundWeight((child.fact || 0) - (child.plan || 0)),
                         deviationPercent: child.deviation_percent ?? 0,
                         isViolation: Boolean(child.isViolation ?? child.is_violation)
                     });
@@ -267,9 +269,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         feedingsPerDay,
                 parentComponent: '',
                 component: componentRow.name,
-                plan: round1(componentRow.plan || 0),
-                fact: round1(componentRow.fact || 0),
-                deviation: round1((componentRow.fact || 0) - (componentRow.plan || 0)),
+                plan: roundWeight(componentRow.plan || 0),
+                fact: roundWeight(componentRow.fact || 0),
+                deviation: roundWeight((componentRow.fact || 0) - (componentRow.plan || 0)),
                 deviationPercent: componentRow.deviation_percent ?? 0,
                 isViolation: Boolean(componentRow.isViolation ?? componentRow.is_violation)
             });
@@ -308,9 +310,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             component: componentName,
             type: violation.title,
             violationType: violation.title,
-            plan: round1(violation.planWeight || 0),
-            fact: round1(violation.actualWeight || 0),
-            deviation: round1(violation.deviation || 0),
+            plan: roundWeight(violation.planWeight || 0),
+            fact: roundWeight(violation.actualWeight || 0),
+            deviation: roundWeight(violation.deviation || 0),
             status: severityStatus,
             workflowStatus,
             code: violation.code,

@@ -53,7 +53,7 @@ async function main() {
       id: 1,
       batchStartThresholdKg: 30,
       leftoverThresholdKg: 50,
-      unloadDropThresholdKg: 200,
+      unloadDropThresholdKg: 500,
       unloadMinPeakKg: 400,
       unloadUpdateDeltaKg: 1,
       anomalyThresholdKg: 200,

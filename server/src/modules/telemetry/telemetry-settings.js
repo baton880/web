@@ -5,7 +5,7 @@ export const TELEMETRY_SETTINGS_SINGLETON_ID = 1
 export const DEFAULT_TELEMETRY_SETTINGS = {
   batchStartThresholdKg: 30,
   leftoverThresholdKg: 50,
-  unloadDropThresholdKg: 200,
+  unloadDropThresholdKg: 500,
   unloadMinPeakKg: 400,
   unloadUpdateDeltaKg: 1,
   unloadWeightBufferKg: 50,
