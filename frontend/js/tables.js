@@ -100,24 +100,29 @@ $(document).ready(function () {
             {
                 data: "hasViolations",
                 className: "align-middle text-center",
-                render: function (data, type) {
+                render: function (data, type, row) {
                     if (type !== "display") {
                         return data ? "1" : "0";
                     }
 
-                    return renderBooleanBadge(asBoolean(data));
+                    const statusMarkup = renderPostprocessStatus(row);
+                    if (statusMarkup) {
+                        return statusMarkup;
+                    }
+
+                    return renderBatchViolationBadge(row, data);
                 },
             },
             {
                 data: "ingredients",
-                render: function (data, type) {
+                render: function (data, type, row) {
                     const ingredients = Array.isArray(data) ? data : [];
 
                     if (type !== "display") {
                         return ingredients.length;
                     }
 
-                    return renderIngredients(ingredients);
+                    return renderIngredients(ingredients, row);
                 },
             },
             {
@@ -243,7 +248,43 @@ $(document).ready(function () {
         return `<span class="${badgeClass}">${label}</span>`;
     }
 
-    function renderIngredients(ingredients) {
+    function renderBatchViolationBadge(row, value) {
+        const warningLabel = row?.violationLabel || null;
+        if (String(row?.violationStatus || "").toLowerCase() === "warning") {
+            return `<span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel || "Сол.+Люц.")}</span>`;
+        }
+
+        if (warningLabel && asBoolean(value)) {
+            return [
+                `<span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel)}</span>`,
+                renderBooleanBadge(true)
+            ].join(" ");
+        }
+
+        return renderBooleanBadge(asBoolean(value));
+    }
+
+    function getPostprocessStatus(row) {
+        return String(row?.postprocess?.status || (row?.endTime ? "complete" : "in_progress")).toLowerCase();
+    }
+
+    function renderPostprocessStatus(row) {
+        const status = getPostprocessStatus(row);
+        if (status === "in_progress") {
+            return '<span class="dashboard-bool-badge is-no">В процессе</span>';
+        }
+        if (status === "processing" || status === "pending") {
+            return '<span class="dashboard-bool-badge is-no">Обрабатывается</span>';
+        }
+        return null;
+    }
+
+    function renderIngredients(ingredients, row) {
+        const statusMarkup = renderPostprocessStatus(row);
+        if (statusMarkup) {
+            return statusMarkup;
+        }
+
         if (!ingredients.length) {
             return '<span class="text-muted">Нет компонентов</span>';
         }

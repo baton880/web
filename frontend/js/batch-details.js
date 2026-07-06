@@ -384,6 +384,23 @@ $(document).ready(function () {
         `;
     }
 
+    function getPostprocessStatus(batch) {
+        return String(batch?.postprocess?.status || (batch?.endTime ? "complete" : "in_progress")).toLowerCase();
+    }
+
+    function isPostprocessProcessing(batch) {
+        const status = getPostprocessStatus(batch);
+        return status === "processing" || status === "pending";
+    }
+
+    function isPostprocessInProgress(batch) {
+        return getPostprocessStatus(batch) === "in_progress";
+    }
+
+    function renderStatusBadge(label) {
+        return `<span class="dashboard-bool-badge is-no">${escapeHtml(label)}</span>`;
+    }
+
     function isUnknownIngredientName(value) {
         const normalized = String(value ?? "").trim().toLowerCase();
         return !normalized || normalized === "unknown" || normalized === "неизвестный";
@@ -478,7 +495,7 @@ $(document).ready(function () {
         setText(detailsPageTitle, title);
         setText(rationName, batch?.rationName || "Без рациона");
         setText(startTime, formatDateTime(batch?.startTime));
-        setText(endTime, batch?.endTime ? formatDateTime(batch.endTime) : "В процессе");
+        setText(endTime, isPostprocessProcessing(batch) ? "Обрабатывается" : (batch?.endTime ? formatDateTime(batch.endTime) : "В процессе"));
         setText(barnName, batch?.unloadingInfo?.barnName || "Коровник не выбран");
         setText(remainingWeight, formatWeight(batch?.unloadingInfo?.remainingWeight));
         renderUnloadProgress(batch?.unloadingInfo?.progress || null);
@@ -519,6 +536,11 @@ $(document).ready(function () {
 
     function renderIngredientList(rows) {
         if (!ingredientListBody) {
+            return;
+        }
+
+        if (isPostprocessProcessing(state.batch)) {
+            ingredientListBody.innerHTML = '<tr><td colspan="5" class="batch-detail-empty">Обрабатывается postprocess по rawWeight</td></tr>';
             return;
         }
 
@@ -592,6 +614,14 @@ $(document).ready(function () {
     }
 
     function renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge) {
+        if (isPostprocessProcessing(state.batch)) {
+            return renderStatusBadge("Обрабатывается");
+        }
+
+        if (isPostprocessInProgress(state.batch)) {
+            return renderStatusBadge("В процессе");
+        }
+
         const key = normalizeIngredientKey(row?.name);
         const isComponentViolation = asBoolean(componentViolationByKey.get(key));
 
@@ -702,6 +732,22 @@ $(document).ready(function () {
             return;
         }
 
+        if (isPostprocessProcessing(state.batch)) {
+            planFactBody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Обрабатывается postprocess по rawWeight</td></tr>';
+            setText(planTotal, "--");
+            setText(factTotal, "Обрабатывается");
+            setText(deviationTotal, "--");
+            return;
+        }
+
+        if (isPostprocessInProgress(state.batch)) {
+            planFactBody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Замес в процессе</td></tr>';
+            setText(planTotal, "--");
+            setText(factTotal, "В процессе");
+            setText(deviationTotal, "--");
+            return;
+        }
+
         if (!rows.length) {
             planFactBody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Нет данных по плану и факту</td></tr>';
             setText(planTotal, "--");
@@ -786,6 +832,9 @@ $(document).ready(function () {
                 hostTrack: payload,
                 hostContextTrack: payload,
                 loaderTrack: [],
+                events: [],
+                plateaus: [],
+                postprocess: null,
                 meta: null,
             };
         }
@@ -794,6 +843,9 @@ $(document).ready(function () {
             hostTrack: Array.isArray(payload?.hostTrack) ? payload.hostTrack : [],
             hostContextTrack: Array.isArray(payload?.hostContextTrack) ? payload.hostContextTrack : [],
             loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
+            events: Array.isArray(payload?.events) ? payload.events : [],
+            plateaus: Array.isArray(payload?.plateaus) ? payload.plateaus : [],
+            postprocess: payload?.postprocess || payload?.meta?.postprocess || null,
             meta: payload?.meta || null,
         };
     }
@@ -2422,6 +2474,9 @@ $(document).ready(function () {
 
             const batch = batchResult.value;
             const telemetryPayload = normalizeTelemetryPayload(telemetryResult.value);
+            if (batch && telemetryPayload.postprocess && !batch.postprocess) {
+                batch.postprocess = telemetryPayload.postprocess;
+            }
             state.storageZones = zonesResult.status === "fulfilled"
                 ? (Array.isArray(zonesResult.value) ? zonesResult.value : []).map(normalizeZone)
                 : [];

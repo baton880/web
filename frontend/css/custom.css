@@ -683,6 +683,11 @@
     background: #d9f7ea;
 }
 
+.dashboard-bool-badge.is-warning {
+    color: #7a5200;
+    background: #fff1cc;
+}
+
 .batch-table-row {
     cursor: pointer;
     transition: background-color 0.18s ease, box-shadow 0.18s ease;
@@ -2960,6 +2965,11 @@ h6.text-primary {
     background-color: #E5F4DD !important;
 }
 
+.dashboard-bool-badge.is-warning {
+    color: #7A5200 !important;
+    background-color: #FFF1CC !important;
+}
+
 .violations-status--progress {
     color: var(--korovki-sidebar) !important;
     background-color: #EAF3E5 !important;
@@ -3567,6 +3577,7 @@ textarea.form-control,
 .dashboard-mode-badge--unloading,
 .violations-status--open,
 .violations-status--progress,
+.dashboard-bool-badge.is-warning,
 .telemetry-badge.warn,
 .reports-source-badge--mock,
 .violations-source-badge--mock,

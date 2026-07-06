@@ -122,6 +122,11 @@
         return item?.code === "ORDER_MISMATCH";
     }
 
+    function isStrawAlfalfaViolation(item) {
+        return item?.code === "STRAW_ALFALFA_RATIO_MISMATCH"
+            || item?.code === "STRAW_ALFALFA_TOTAL_MISMATCH";
+    }
+
     function formatOrderPosition(value) {
         const numericValue = Number(value);
         if (!Number.isFinite(numericValue) || numericValue <= 0) {
@@ -270,8 +275,15 @@
         };
     }
 
-    function getStatusMeta(status) {
-        return STATUS_META[status] || STATUS_META.open;
+    function getStatusMeta(item) {
+        if (isStrawAlfalfaViolation(item)) {
+            return {
+                label: "Сол.+Люц.",
+                className: "violations-status violations-status--open"
+            };
+        }
+
+        return STATUS_META[item?.status] || STATUS_META.open;
     }
 
     function buildUniqueValues(items, fieldName) {
@@ -363,7 +375,7 @@
         }
 
         elements.tableBody.innerHTML = state.filteredItems.map((item) => {
-            const statusMeta = getStatusMeta(item.status);
+            const statusMeta = getStatusMeta(item);
             return `
                 <tr>
                     <td>

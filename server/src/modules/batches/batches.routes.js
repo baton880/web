@@ -7,9 +7,20 @@ import { roundNonNegativeWeight, roundWeight } from '../../../../module-2/weight
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
 import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js';
+import { buildPostprocessMeta, postprocessCompletedBatch } from './batch-postprocess-service.js';
 
 const router = Router();
 const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
+const STRAW_ALFALFA_VIOLATION_CODES = new Set([
+    'STRAW_ALFALFA_RATIO_MISMATCH',
+    'STRAW_ALFALFA_TOTAL_MISMATCH'
+]);
+const RECOVERED_INGREDIENT_GRAPH_LOOKBACK_SECONDS = 10 * 60;
+const INSTANT_START_INGREDIENT_TOLERANCE_MS = 5000;
+
+function isStrawAlfalfaViolationCode(code) {
+    return STRAW_ALFALFA_VIOLATION_CODES.has(String(code || ''));
+}
 
 // ============================================================================
 // ADMIN: очистка замесов и связанных ошибок (без удаления рационов и групп)
@@ -82,6 +93,49 @@ async function getBatchWeightContext(batch, prismaClient = prisma) {
 function parsePositiveInteger(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function findInstantStartIngredient(batch) {
+    const batchStartMs = new Date(batch?.startTime || 0).getTime();
+    if (!Number.isFinite(batchStartMs)) {
+        return null;
+    }
+
+    const ingredients = Array.isArray(batch?.actualIngredients) ? batch.actualIngredients : [];
+    return ingredients.find((ingredient) => {
+        const addedAtMs = new Date(ingredient?.addedAt || 0).getTime();
+        const startedAtMs = new Date(ingredient?.startedAt || ingredient?.addedAt || 0).getTime();
+        const actualWeight = Number(ingredient?.actualWeight || 0);
+        return Number.isFinite(addedAtMs) &&
+            Number.isFinite(startedAtMs) &&
+            actualWeight > 0 &&
+            Math.abs(addedAtMs - batchStartMs) <= INSTANT_START_INGREDIENT_TOLERANCE_MS &&
+            Math.abs(startedAtMs - addedAtMs) <= INSTANT_START_INGREDIENT_TOLERANCE_MS;
+    }) || null;
+}
+
+function findRecoveredGraphAnchorPoint(batch, hostTrack = []) {
+    if (!findInstantStartIngredient(batch)) {
+        return null;
+    }
+
+    const batchStartMs = new Date(batch?.startTime || 0).getTime();
+    if (!Number.isFinite(batchStartMs)) {
+        return null;
+    }
+
+    return (Array.isArray(hostTrack) ? hostTrack : [])
+        .filter((point) => {
+            const pointTimeMs = new Date(point?.timestamp || 0).getTime();
+            return Number.isFinite(pointTimeMs) &&
+                pointTimeMs < batchStartMs &&
+                batchStartMs - pointTimeMs <= RECOVERED_INGREDIENT_GRAPH_LOOKBACK_SECONDS * 1000 &&
+                Number.isFinite(Number(point?.weight));
+        })
+        .reduce((best, point) => {
+            if (!best) return point;
+            return Number(point.weight) < Number(best.weight) ? point : best;
+        }, null);
 }
 
 function parseRtkRawPayload(value) {
@@ -193,7 +247,7 @@ async function getBatchLoaderTrack(batch, prismaClient = prisma, options = {}) {
     return deviceIds.size === 1 ? rows.map(serializeRtkTrackPoint) : [];
 }
 
-async function getDetailedBatchById(batchId, prismaClient = prisma) {
+async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}) {
     const batch = await prismaClient.batch.findUnique({
         where: { id: batchId },
         include: {
@@ -232,8 +286,18 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
 
     const [weightContext, telemetrySettings] = await Promise.all([
         getBatchWeightContext(batch, prismaClient),
-        getTelemetrySettings(prismaClient)
+        options.telemetrySettings ? Promise.resolve(options.telemetrySettings) : getTelemetrySettings(prismaClient)
     ]);
+    const postprocess = options.postprocess || (
+        batch.endTime
+            ? { status: 'processing', reason: 'not_checked' }
+            : { status: 'in_progress', reason: 'batch_in_progress' }
+    );
+    const ingredientSummary = buildIngredientSummary(batch, telemetrySettings);
+    const summaryViolationByKey = new Map(ingredientSummary.map((item) => [
+        normalizeIngredientName(item.name),
+        Boolean(item.isViolation ?? item.is_violation)
+    ]));
 
     return {
         id: batch.id,
@@ -290,13 +354,16 @@ async function getDetailedBatchById(batchId, prismaClient = prisma) {
             plan: roundWeight(ing.plannedWeight || 0),
             fact: roundWeight(ing.actualWeight || 0),
             deviation: ing.plannedWeight ? roundWeight(Number(ing.actualWeight || 0) - Number(ing.plannedWeight || 0)) : 0,
-            isViolation: ing.isViolation,
+            isViolation: summaryViolationByKey.has(normalizeIngredientName(ing.ingredientName))
+                ? summaryViolationByKey.get(normalizeIngredientName(ing.ingredientName))
+                : ing.isViolation,
             startLat: ing.startLat,
             startLon: ing.startLon,
             endLat: ing.endLat,
             endLon: ing.endLon
         })),
-        ingredients: buildIngredientSummary(batch, telemetrySettings)
+        ingredients: ingredientSummary,
+        postprocess: buildPostprocessMeta(postprocess)
     };
 }
 
@@ -314,8 +381,13 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
         };
     };
 
+    const batchStartTimeMs = new Date(batch?.startTime || 0).getTime();
+    const anchorPoint = hostTrack.find((point) => {
+        const pointTimeMs = new Date(point?.timestamp || 0).getTime();
+        return Number.isFinite(pointTimeMs) && pointTimeMs >= batchStartTimeMs;
+    }) || hostTrack[0];
     const batchStartWeight = Number(batch?.startWeight || 0);
-    const firstRawWeight = Number(hostTrack[0]?.weight);
+    const firstRawWeight = Number(anchorPoint?.weight);
     if (!Number.isFinite(firstRawWeight)) {
         return hostTrack.map((point) => serializePoint(point, point?.weight));
     }
@@ -392,7 +464,8 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                     violations: {
                         where: { status: { in: ACTIVE_VIOLATION_STATUSES } },
                         select: {
-                            id: true
+                            id: true,
+                            code: true
                         }
                     }
                 },
@@ -405,6 +478,13 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
         const formattedBatches = batches.map(b => {
             const ingredients = buildIngredientSummary(b, telemetrySettings);
             const hasLoggedViolations = (b.violations?.length || 0) > 0;
+            const activeViolationCodes = (b.violations || []).map((violation) => String(violation.code || ''));
+            const hasStrawAlfalfaWarning = activeViolationCodes.some(isStrawAlfalfaViolationCode);
+            const hasOnlyStrawAlfalfaWarning = activeViolationCodes.length > 0 &&
+                activeViolationCodes.every(isStrawAlfalfaViolationCode);
+            const violationStatus = hasOnlyStrawAlfalfaWarning
+                ? 'warning'
+                : (hasLoggedViolations ? 'critical' : 'none');
 
             return {
                 id: b.id,
@@ -414,9 +494,15 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 rationName: b.ration?.name || 'Неизвестный рацион',
                 groupName: b.group?.name || 'Без группы',
                 hasViolations: hasLoggedViolations, // Единый источник статуса: журнал нарушений (все зафиксированные кейсы)
+                violationStatus,
+                violationLabel: hasStrawAlfalfaWarning ? 'Сол.+Люц.' : null,
                 startWeight: roundWeight(b.startWeight || 0),
                 endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
-                ingredients
+                ingredients,
+                postprocess: {
+                    status: b.endTime ? 'complete' : 'in_progress',
+                    reason: b.endTime ? null : 'batch_in_progress'
+                }
             };
         });
 
@@ -437,7 +523,19 @@ router.get('/:id', authenticate, requireReadAccess, async (req, res) => {
             return res.status(400).json({ error: 'Некорректный ID замеса' });
         }
 
-        const detailedBatch = await getDetailedBatchById(batchId);
+        const existingBatch = await prisma.batch.findUnique({
+            where: { id: batchId },
+            select: { id: true, endTime: true }
+        });
+        if (!existingBatch) {
+            return res.status(404).json({ error: 'Р—Р°РјРµСЃ РЅРµ РЅР°Р№РґРµРЅ' });
+        }
+
+        const telemetrySettings = await getTelemetrySettings(prisma);
+        const postprocess = existingBatch.endTime
+            ? await postprocessCompletedBatch(prisma, batchId, telemetrySettings, { persist: true })
+            : { status: 'in_progress', reason: 'batch_in_progress' };
+        const detailedBatch = await getDetailedBatchById(batchId, prisma, { telemetrySettings, postprocess });
         if (!detailedBatch) {
             return res.status(404).json({ error: 'Замес не найден' });
         }
@@ -460,23 +558,76 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
         }
 
         const batch = await prisma.batch.findUnique({
-            where: { id: batchId }
+            where: { id: batchId },
+            include: {
+                actualIngredients: {
+                    orderBy: [
+                        { startedAt: 'asc' },
+                        { addedAt: 'asc' },
+                        { id: 'asc' }
+                    ]
+                }
+            }
         });
 
         if (!batch) return res.status(404).json({ error: 'Замес не найден' });
 
         const includeRtk = req.query.includeRtk === 'true' || req.query.includeRtk === '1';
-        const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 60);
-        const hostLookbackSeconds = parsePositiveInteger(req.query.hostLookbackSeconds, 0);
-        const hostWindowStart = new Date(new Date(batch.startTime).getTime() - hostLookbackSeconds * 1000);
+        const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 180);
+        const hostLookbackSeconds = parsePositiveInteger(req.query.hostLookbackSeconds, 180);
+        const hostLookaheadSeconds = parsePositiveInteger(req.query.hostLookaheadSeconds, 180);
+        const telemetrySettings = await getTelemetrySettings(prisma);
+        const postprocess = batch.endTime
+            ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, { persist: true })
+            : { status: 'in_progress', reason: 'batch_in_progress' };
+
+        if (postprocess.status === 'complete') {
+            const normalizedHostTrack = Array.isArray(postprocess.hostTrack) ? postprocess.hostTrack : [];
+            if (!includeRtk) {
+                return res.json(normalizedHostTrack);
+            }
+
+            const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
+                lookbackSeconds: loaderLookbackSeconds
+            });
+            const postprocessMeta = buildPostprocessMeta(postprocess);
+
+            return res.json({
+                hostTrack: normalizedHostTrack,
+                hostContextTrack: normalizedHostTrack,
+                loaderTrack,
+                postprocess: postprocessMeta,
+                events: postprocess.analysis?.includedEvents || [],
+                plateaus: postprocess.analysis?.plateaus || [],
+                meta: {
+                    batchId: batch.id,
+                    deviceId: batch.deviceId,
+                    hostLookbackSeconds,
+                    hostLookaheadSeconds,
+                    loaderLookbackSeconds,
+                    recoveredGraphAnchorAt: null,
+                    hostPoints: normalizedHostTrack.length,
+                    hostContextPoints: normalizedHostTrack.length,
+                    loaderPoints: loaderTrack.length,
+                    postprocess: postprocessMeta
+                }
+            });
+        }
+
+        const hasInstantStartIngredient = Boolean(findInstantStartIngredient(batch));
+        const effectiveHostLookbackSeconds = hasInstantStartIngredient
+            ? Math.max(hostLookbackSeconds, RECOVERED_INGREDIENT_GRAPH_LOOKBACK_SECONDS)
+            : hostLookbackSeconds;
+        const hostWindowStart = new Date(new Date(batch.startTime).getTime() - effectiveHostLookbackSeconds * 1000);
+        const hostWindowEnd = new Date(new Date(batch.endTime || new Date()).getTime() + hostLookaheadSeconds * 1000);
 
         // Ищем все точки телеметрии за время этого замеса
         const hostTrack = await prisma.telemetry.findMany({
             where: {
                 deviceId: batch.deviceId,
                 timestamp: {
-                    gte: batch.startTime,
-                    lte: batch.endTime || new Date() // Если еще не закончен, берем до текущего момента
+                    gte: hostWindowStart,
+                    lte: hostWindowEnd
                 }
             },
             select: {
@@ -488,19 +639,23 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             orderBy: { timestamp: 'asc' }
         });
 
-        const normalizedHostTrack = normalizeBatchTrackWeights(batch, hostTrack);
+        const recoveredGraphAnchorPoint = findRecoveredGraphAnchorPoint(batch, hostTrack);
+        const graphNormalizationBatch = recoveredGraphAnchorPoint
+            ? { ...batch, startTime: recoveredGraphAnchorPoint.timestamp, startWeight: 0 }
+            : batch;
+        const normalizedHostTrack = normalizeBatchTrackWeights(graphNormalizationBatch, hostTrack);
 
         if (!includeRtk) {
             return res.json(normalizedHostTrack);
         }
 
-        const hostContextTrack = hostLookbackSeconds > 0
+        const hostContextTrack = hostLookbackSeconds > 0 || hostLookaheadSeconds > 0
             ? await prisma.telemetry.findMany({
                 where: {
                     deviceId: batch.deviceId,
                     timestamp: {
                         gte: hostWindowStart,
-                        lte: batch.endTime || new Date()
+                        lte: hostWindowEnd
                     }
                 },
                 select: {
@@ -514,7 +669,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             : hostTrack;
         const normalizedHostContextTrack = hostContextTrack === hostTrack
             ? normalizedHostTrack
-            : normalizeBatchTrackWeights(batch, hostContextTrack);
+            : normalizeBatchTrackWeights(graphNormalizationBatch, hostContextTrack);
 
         const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
             lookbackSeconds: loaderLookbackSeconds
@@ -524,14 +679,18 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             hostTrack: normalizedHostTrack,
             hostContextTrack: normalizedHostContextTrack,
             loaderTrack,
+            postprocess: buildPostprocessMeta(postprocess),
             meta: {
                 batchId: batch.id,
                 deviceId: batch.deviceId,
-                hostLookbackSeconds,
+                hostLookbackSeconds: effectiveHostLookbackSeconds,
+                hostLookaheadSeconds,
                 loaderLookbackSeconds,
+                recoveredGraphAnchorAt: recoveredGraphAnchorPoint?.timestamp || null,
                 hostPoints: normalizedHostTrack.length,
                 hostContextPoints: normalizedHostContextTrack.length,
-                loaderPoints: loaderTrack.length
+                loaderPoints: loaderTrack.length,
+                postprocess: buildPostprocessMeta(postprocess)
             }
         });
     } catch (error) {

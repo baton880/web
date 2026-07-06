@@ -42,3 +42,4 @@ __pycache__/
 tools/
 .chrome-headless/
 korovki_page1.png
+server/tmp/

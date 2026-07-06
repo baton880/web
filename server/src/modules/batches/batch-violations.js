@@ -3,6 +3,14 @@ import { roundWeight } from '../../../../module-2/weightRounding.js';
 import { syncBatchViolationLog } from '../violations/violation-service.js';
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 
+const STRAW_KEY = normalizeIngredientName('Солома');
+const ALFALFA_KEY = normalizeIngredientName('Люцерна');
+const STRAW_ALFALFA_LABEL = 'Сол.+Люц.';
+
+function isStrawAlfalfaKey(key) {
+    return key === STRAW_KEY || key === ALFALFA_KEY;
+}
+
 function parseCompoundComponents(value) {
     if (Array.isArray(value)) {
         return value
@@ -236,6 +244,7 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
     const factMap = new Map(facts.map((item) => [normalizeIngredientName(item.name), item.actualWeight]));
     const planMap = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.targetWeight]));
     const planItemMap = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item]));
+    const hasStrawAlfalfaPlan = planMap.has(STRAW_KEY) || planMap.has(ALFALFA_KEY);
     const nameMap = new Map([
         ...facts.map((item) => [normalizeIngredientName(item.name), item.name]),
         ...plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.name])
@@ -253,11 +262,14 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
         const deviationPercent = planWeight > 0
             ? Math.round(((factWeight - planWeight) / planWeight) * 1000) / 10
             : (factWeight > 0 ? 100 : 0);
-        const isViolation = planWeight > 0
+        const rawIsViolation = planWeight > 0
             ? Math.abs(deviationKg) > allowedDeviationKg
             : (hasPlanContext
                 ? factWeight > 0
                 : Boolean(factWeight > 0 || persistedViolationMap.get(key) || key === 'unknown'));
+        const isViolation = hasStrawAlfalfaPlan && isStrawAlfalfaKey(key)
+            ? false
+            : rawIsViolation;
 
         return {
             name,
@@ -283,6 +295,96 @@ export function buildUnloadProgress(batch, currentWeight, machineState = {}) {
         target_weight: roundWeight(targetWeight),
         unloaded_fact: roundWeight(unloadedFact)
     };
+}
+
+function buildStrawAlfalfaViolation(planIngredients, facts, deviationSettings) {
+    const planByKey = new Map(planIngredients.map((item) => [normalizeIngredientName(item.name), item]));
+    const factByKey = new Map(facts.map((item) => [normalizeIngredientName(item.name), item]));
+    const strawPlanItem = planByKey.get(STRAW_KEY);
+    const alfalfaPlanItem = planByKey.get(ALFALFA_KEY);
+    const strawFact = Number(factByKey.get(STRAW_KEY)?.actualWeight || 0);
+    const alfalfaFact = Number(factByKey.get(ALFALFA_KEY)?.actualWeight || 0);
+
+    if (!strawPlanItem && !alfalfaPlanItem && strawFact <= 0 && alfalfaFact <= 0) {
+        return null;
+    }
+
+    const strawPlan = Number(strawPlanItem?.targetWeight || strawPlanItem?.plannedWeight || 0);
+    const alfalfaPlan = Number(alfalfaPlanItem?.targetWeight || alfalfaPlanItem?.plannedWeight || 0);
+
+    if (strawPlan + alfalfaPlan <= 0) {
+        return null;
+    }
+
+    const totalPlan = strawPlan + alfalfaPlan;
+    const totalFact = strawFact + alfalfaFact;
+    const pairAllowedDeviationKg = Math.max(
+        (totalPlan * deviationSettings.percentThreshold) / 100,
+        deviationSettings.minDeviationKg
+    );
+    const deviationPercent = totalPlan > 0
+        ? Math.round(((totalFact - totalPlan) / totalPlan) * 1000) / 10
+        : 0;
+
+    if (Math.abs(totalFact - totalPlan) > pairAllowedDeviationKg) {
+        return {
+            code: 'STRAW_ALFALFA_TOTAL_MISMATCH',
+            ingredient: STRAW_ALFALFA_LABEL,
+            plan: roundWeight(totalPlan),
+            fact: roundWeight(totalFact),
+            deviationPercent,
+            message: [
+                'Нарушена общая масса соломы и люцерны.',
+                `План ${roundWeight(totalPlan)} кг, факт ${roundWeight(totalFact)} кг.`
+            ].join(' ')
+        };
+    }
+
+    const isIngredientOff = (planWeight, factWeight) => {
+        const allowedDeviationKg = Math.max(
+            (planWeight * deviationSettings.percentThreshold) / 100,
+            deviationSettings.minDeviationKg
+        );
+        return Math.abs(factWeight - planWeight) > allowedDeviationKg;
+    };
+
+    if (!isIngredientOff(strawPlan, strawFact) && !isIngredientOff(alfalfaPlan, alfalfaFact)) {
+        return null;
+    }
+
+    return {
+        code: 'STRAW_ALFALFA_RATIO_MISMATCH',
+        ingredient: STRAW_ALFALFA_LABEL,
+        plan: roundWeight(totalPlan),
+        fact: roundWeight(totalFact),
+        deviationPercent,
+        suppressWeightViolationKeys: new Set([STRAW_KEY, ALFALFA_KEY]),
+        message: [
+            'Общая масса соломы и люцерны в допуске, но пропорция между ними нарушена.',
+            `Солома: план ${roundWeight(strawPlan)} кг, факт ${roundWeight(strawFact)} кг.`,
+            `Люцерна: план ${roundWeight(alfalfaPlan)} кг, факт ${roundWeight(alfalfaFact)} кг.`
+        ].join(' ')
+    };
+}
+
+async function resolveSuppressedStrawAlfalfaViolations(prisma, batchId) {
+    if (!batchId) return;
+
+    await prisma.violation.updateMany({
+        where: {
+            batchId,
+            status: { in: ['OPEN', 'IN_PROGRESS'] },
+            code: { notIn: ['STRAW_ALFALFA_RATIO_MISMATCH', 'STRAW_ALFALFA_TOTAL_MISMATCH'] },
+            OR: [
+                { componentKey: { in: [STRAW_KEY, ALFALFA_KEY] } },
+                { componentName: { in: ['Солома', 'Люцерна'] } }
+            ]
+        },
+        data: {
+            status: 'RESOLVED',
+            resolvedAt: new Date()
+        }
+    });
 }
 
 export async function recalculateBatchViolations(prisma, batchId, deviationOptions = null) {
@@ -311,6 +413,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
     if (!plan.ingredients.length) {
         const facts = aggregateFacts(batch.actualIngredients);
         const syntheticViolations = facts
+            .filter((item) => !isStrawAlfalfaKey(normalizeIngredientName(item.name)))
             .filter((item) => Number(item.actualWeight || 0) > 0)
             .map((item) => ({
                 ingredient: toDisplayIngredientName(item.name || 'Unknown'),
@@ -332,6 +435,7 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         }
 
         await syncBatchViolationLog(prisma, batch, { matches: [], violations: syntheticViolations });
+        await resolveSuppressedStrawAlfalfaViolations(prisma, batch.id);
 
         await prisma.batch.update({
             where: { id: batch.id },
@@ -353,9 +457,18 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         percentThreshold: deviationSettings.percentThreshold,
         minDeviationKg: deviationSettings.minDeviationKg
     });
-    const orderViolations = buildOrderViolations(plan.ingredients, batch.actualIngredients);
-    const allViolations = [...check.violations, ...orderViolations];
-    const weightViolationNames = new Set(check.violations.map((item) => normalizeIngredientName(item.ingredient)));
+    const strawAlfalfaViolation = buildStrawAlfalfaViolation(plan.ingredients, facts, deviationSettings);
+    const hasStrawAlfalfaPlan = plan.ingredients.some((item) => isStrawAlfalfaKey(normalizeIngredientName(item.name)));
+    const weightViolations = check.violations.filter((item) => (
+        !(hasStrawAlfalfaPlan && isStrawAlfalfaKey(normalizeIngredientName(item.ingredient)))
+    ));
+    const orderViolations = buildOrderViolations(plan.ingredients, batch.actualIngredients)
+        .filter((item) => !(hasStrawAlfalfaPlan && isStrawAlfalfaKey(normalizeIngredientName(item.ingredient))));
+    const ratioViolations = strawAlfalfaViolation
+        ? [strawAlfalfaViolation]
+        : [];
+    const allViolations = [...weightViolations, ...ratioViolations, ...orderViolations];
+    const weightViolationNames = new Set(weightViolations.map((item) => normalizeIngredientName(item.ingredient)));
     const planByName = new Map(plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.targetWeight]));
 
     for (const ingredient of batch.actualIngredients) {
@@ -373,7 +486,20 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         data: { hasViolations: allViolations.length > 0 }
     });
 
-    await syncBatchViolationLog(prisma, batch, { ...check, violations: allViolations });
+    await syncBatchViolationLog(prisma, batch, {
+        ...check,
+        violations: allViolations,
+        matches: [
+            ...check.matches,
+            ...(strawAlfalfaViolation ? [{
+                ingredient: STRAW_ALFALFA_LABEL,
+                plan: strawAlfalfaViolation.plan,
+                fact: strawAlfalfaViolation.fact,
+                deviationPercent: strawAlfalfaViolation.deviationPercent
+            }] : [])
+        ]
+    });
+    await resolveSuppressedStrawAlfalfaViolations(prisma, batch.id);
 
     return {
         status: 'ok',

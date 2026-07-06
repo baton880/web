@@ -62,6 +62,8 @@ export function toUiViolationStatus(violation) {
     if (violation.status === 'RESOLVED') return 'closed';
     if (violation.status === 'CLOSED') return 'closed';
     if (violation.status === 'IN_PROGRESS') return 'in_progress';
+    if (violation.code === 'STRAW_ALFALFA_TOTAL_MISMATCH') return 'critical';
+    if (violation.code === 'STRAW_ALFALFA_RATIO_MISMATCH') return 'open';
 
     const deviationPercent = Math.abs(Number(violation?.deviationPercent || 0));
     if (violation.code === 'MISSING_COMPONENT' || violation.code === 'EXTRA_COMPONENT' || violation.code === 'LEFTOVER_WEIGHT' || violation.code === 'ORDER_MISMATCH' || deviationPercent >= 20) {

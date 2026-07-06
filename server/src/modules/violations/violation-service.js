@@ -9,6 +9,30 @@ function toViolationDescriptor(violation) {
     ? Math.round(((deviation / plan) * 100) * 10) / 10
     : (fact > 0 ? 100 : 0)
 
+  if (violation?.code === 'STRAW_ALFALFA_RATIO_MISMATCH') {
+    return {
+      code: 'STRAW_ALFALFA_RATIO_MISMATCH',
+      title: 'Сол.+Люц.',
+      message: violation.message || 'Общая масса соломы и люцерны в допуске, но пропорция между ними нарушена',
+      deviation,
+      deviationPercent: Number.isFinite(Number(violation.deviationPercent))
+        ? Number(violation.deviationPercent)
+        : deviationPercent
+    }
+  }
+
+  if (violation?.code === 'STRAW_ALFALFA_TOTAL_MISMATCH') {
+    return {
+      code: 'STRAW_ALFALFA_TOTAL_MISMATCH',
+      title: 'Сол.+Люц.',
+      message: violation.message || 'Нарушена общая масса соломы и люцерны',
+      deviation,
+      deviationPercent: Number.isFinite(Number(violation.deviationPercent))
+        ? Number(violation.deviationPercent)
+        : deviationPercent
+    }
+  }
+
   if (violation?.code === 'ORDER_MISMATCH') {
     return {
       code: 'ORDER_MISMATCH',
@@ -66,6 +90,7 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
   if (!batch?.id) {
     return { activeCount: 0 }
   }
+  const defaultWorkflowStatus = batch.endTime ? 'OPEN' : 'IN_PROGRESS'
 
   const existing = await db.violation.findMany({
     where: {
@@ -112,9 +137,9 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         deviationPercent: descriptor.deviationPercent,
         detectedAt,
         resolvedAt: null,
-        status: existingItem && ['IN_PROGRESS', 'CLOSED'].includes(existingItem.status)
-          ? existingItem.status
-          : 'OPEN'
+        status: existingItem?.status === 'CLOSED'
+          ? 'CLOSED'
+          : defaultWorkflowStatus
       },
       create: {
         batchId: batch.id,
@@ -125,7 +150,7 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         componentName: violation.ingredient || null,
         message: descriptor.message,
         category: 'BUSINESS',
-        status: 'OPEN',
+        status: defaultWorkflowStatus,
         planWeight: roundWeight(violation.plan),
         actualWeight: roundWeight(violation.fact),
         deviation: roundWeight(descriptor.deviation),

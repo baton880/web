@@ -12,6 +12,9 @@ import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/lo
 
 const prisma = new PrismaClient()
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
+const UNLOAD_GROUP_STICKY_MS = 120000
+const UNLOAD_GROUP_CONFIRM_PACKETS = 2
+const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
 const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
 )
@@ -116,6 +119,88 @@ function resolveExpectedIngredientsFromGroup(group) {
       sortOrder: Number(ingredient.sortOrder || 0)
     }))
     : []
+}
+
+function unloadGroupConfirmDropKg(settings = {}) {
+  const configured = Number(settings.unloadDropThresholdKg)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.max(MIN_UNLOAD_GROUP_CONFIRM_DROP_KG, configured)
+    : MIN_UNLOAD_GROUP_CONFIRM_DROP_KG
+}
+
+function createUnloadGroupEvidence(weight, timestamp, group = null) {
+  const timestampMs = new Date(timestamp).getTime()
+  return {
+    lastWeight: Number.isFinite(Number(weight)) ? Number(weight) : null,
+    lastTimeMs: Number.isFinite(timestampMs) ? timestampMs : null,
+    lastGroup: group || null,
+    lastGroupSeenAtMs: group && Number.isFinite(timestampMs) ? timestampMs : null,
+    confirmedGroupId: null,
+    groups: new Map()
+  }
+}
+
+function rememberUnloadGroupEvidence(evidenceMap, batchId, { weight, timestamp, group = null, settings = {} }) {
+  if (!batchId) return null
+  const parsedWeight = Number(weight)
+  const timestampMs = new Date(timestamp).getTime()
+  if (!Number.isFinite(parsedWeight) || !Number.isFinite(timestampMs)) return null
+
+  let evidence = evidenceMap.get(batchId)
+  if (!evidence) {
+    evidence = createUnloadGroupEvidence(parsedWeight, timestamp, group)
+    evidenceMap.set(batchId, evidence)
+    return null
+  }
+
+  let evidenceGroup = group || null
+  if (group) {
+    evidence.lastGroup = group
+    evidence.lastGroupSeenAtMs = timestampMs
+  } else if (
+    evidence.lastGroup &&
+    Number.isFinite(Number(evidence.lastGroupSeenAtMs)) &&
+    timestampMs - Number(evidence.lastGroupSeenAtMs) <= UNLOAD_GROUP_STICKY_MS
+  ) {
+    evidenceGroup = evidence.lastGroup
+  }
+
+  const previousWeight = Number(evidence.lastWeight)
+  const drop = Number.isFinite(previousWeight) ? previousWeight - parsedWeight : 0
+  if (evidenceGroup?.id && Number.isFinite(drop) && drop > 0) {
+    const key = String(evidenceGroup.id)
+    const current = evidence.groups.get(key) || {
+      group: evidenceGroup,
+      dropKg: 0,
+      packets: 0
+    }
+    current.group = evidenceGroup
+    current.dropKg += drop
+    current.packets += 1
+    evidence.groups.set(key, current)
+  }
+
+  evidence.lastWeight = parsedWeight
+  evidence.lastTimeMs = timestampMs
+
+  let best = null
+  for (const item of evidence.groups.values()) {
+    if (!best || item.dropKg > best.dropKg) {
+      best = item
+    }
+  }
+
+  if (
+    best?.group?.id &&
+    best.dropKg >= unloadGroupConfirmDropKg(settings) &&
+    best.packets >= UNLOAD_GROUP_CONFIRM_PACKETS &&
+    evidence.confirmedGroupId !== best.group.id
+  ) {
+    evidence.confirmedGroupId = best.group.id
+    return best.group
+  }
+
+  return null
 }
 
 function indexRtkPoints(points) {
@@ -526,6 +611,7 @@ async function main() {
   }))
 
   const activeBatchByDevice = new Map()
+  const unloadGroupEvidenceByBatch = new Map()
   const recentWeightsByDevice = new Map()
   const batchIdsToRecalculate = new Set()
   const stickyViolationBatchIds = new Set()
@@ -580,6 +666,7 @@ async function main() {
         course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
       }
       const resolvedGroup = resolveGroupFromList(livestockGroups, effectivePosition.lat, effectivePosition.lon)
+      const hostResolvedGroup = resolveGroupFromList(livestockGroups, packet.lat, packet.lon)
       const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
       const expectedIngredients = activeBatchForHints?.expectedIngredients || resolveExpectedIngredientsFromGroup(resolvedGroup)
       const currentZone = detectZoneObject(effectivePosition.lat, effectivePosition.lon, activeZones)
@@ -603,19 +690,22 @@ async function main() {
 
       let activeBatch = activeBatchByDevice.get(deviceId) || null
 
-      async function bindBatchToResolvedGroup({ overwriteExisting = false } = {}) {
-        if (!activeBatch || !resolvedGroup) return
+      async function bindBatchToResolvedGroup({ overwriteExisting = false, group = resolvedGroup, alignIngredients = true } = {}) {
+        if (!activeBatch || !group) return
         const patch = {}
-        if (resolvedGroup.id && (overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== resolvedGroup.id) {
-          patch.groupId = resolvedGroup.id
+        if (group.id && (overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== group.id) {
+          patch.groupId = group.id
         }
-        if (resolvedGroup.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== resolvedGroup.rationId) {
-          patch.rationId = resolvedGroup.rationId
+        if (group.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== group.rationId) {
+          patch.rationId = group.rationId
         }
         if (!Object.keys(patch).length) {
+          if (!alignIngredients) {
+            return
+          }
           await alignAmbiguousIngredientsWithRation(prisma, {
             batchId: activeBatch.id,
-            expectedIngredients: resolvedGroup.ration?.ingredients || [],
+            expectedIngredients: group.ration?.ingredients || [],
             loadingZones
           })
           return
@@ -625,12 +715,14 @@ async function main() {
           where: { id: activeBatch.id },
           data: patch
         })
-        await alignAmbiguousIngredientsWithRation(prisma, {
-          batchId: activeBatch.id,
-          expectedIngredients: resolvedGroup.ration?.ingredients || [],
-          loadingZones
-        })
-        activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
+        if (alignIngredients) {
+          await alignAmbiguousIngredientsWithRation(prisma, {
+            batchId: activeBatch.id,
+            expectedIngredients: group.ration?.ingredients || [],
+            loadingZones
+          })
+        }
+        activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(group)
         activeBatchByDevice.set(deviceId, activeBatch)
         batchIdsToRecalculate.add(activeBatch.id)
       }
@@ -743,12 +835,14 @@ async function main() {
 
           case 'START_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup({ overwriteExisting: true })
+              unloadGroupEvidenceByBatch.set(
+                activeBatch.id,
+                createUnloadGroupEvidence(action.startUnloadWeight ?? packet.weight, packet.timestamp, hostResolvedGroup)
+              )
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: roundWeight(action.startUnloadWeight ?? packet.weight) }
               })
-              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
               activeBatchByDevice.set(deviceId, activeBatch)
             }
             break
@@ -756,7 +850,19 @@ async function main() {
           case 'UPDATE_UNLOAD':
             if (activeBatch) {
               if (Number(action.endWeight ?? packet.weight) >= emptyVehicleThresholdKg) {
-                await bindBatchToResolvedGroup()
+                const confirmedUnloadGroup = rememberUnloadGroupEvidence(unloadGroupEvidenceByBatch, activeBatch.id, {
+                  weight: action.endWeight ?? packet.weight,
+                  timestamp: packet.timestamp,
+                  group: hostResolvedGroup,
+                  settings: telemetrySettings
+                })
+                if (confirmedUnloadGroup) {
+                  await bindBatchToResolvedGroup({
+                    overwriteExisting: true,
+                    group: confirmedUnloadGroup,
+                    alignIngredients: false
+                  })
+                }
               }
               activeBatch = await prisma.batch.update({
                 where: { id: activeBatch.id },
@@ -791,6 +897,7 @@ async function main() {
           case 'COMPLETE_BATCH':
             if (activeBatch) {
               const completedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(completedBatchId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: {
@@ -808,6 +915,7 @@ async function main() {
           case 'FORCE_CLOSE_BATCH':
             if (activeBatch) {
               const closedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(closedBatchId)
               stickyViolationBatchIds.add(closedBatchId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
@@ -865,6 +973,7 @@ async function main() {
               (shouldAutoCloseByEmpty && currentPacketIsEmpty)
             ) {
               const closedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(closedBatchId)
               await prisma.batch.update({
                 where: { id: closedBatchId },
                 data: {

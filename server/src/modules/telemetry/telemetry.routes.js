@@ -12,12 +12,17 @@ import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
 import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
 const MAX_TELEMETRY_HISTORY_LIMIT = 5000
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
+const UNLOAD_GROUP_STICKY_MS = 120000
+const UNLOAD_GROUP_CONFIRM_PACKETS = 2
+const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
+const unloadGroupEvidenceByBatch = new Map()
 
 function normalizeZoneType(value) {
   if (!value) return ''
@@ -56,6 +61,88 @@ function resolveExpectedIngredientsFromBatch(batch) {
       sortOrder: Number(ingredient.sortOrder || 0)
     }))
     : []
+}
+
+function unloadGroupConfirmDropKg(settings = {}) {
+  const configured = Number(settings.unloadDropThresholdKg)
+  return Number.isFinite(configured) && configured > 0
+    ? Math.max(MIN_UNLOAD_GROUP_CONFIRM_DROP_KG, configured)
+    : MIN_UNLOAD_GROUP_CONFIRM_DROP_KG
+}
+
+function createUnloadGroupEvidence(weight, timestamp, group = null) {
+  const timestampMs = new Date(timestamp).getTime()
+  return {
+    lastWeight: Number.isFinite(Number(weight)) ? Number(weight) : null,
+    lastTimeMs: Number.isFinite(timestampMs) ? timestampMs : null,
+    lastGroup: group || null,
+    lastGroupSeenAtMs: group && Number.isFinite(timestampMs) ? timestampMs : null,
+    confirmedGroupId: null,
+    groups: new Map()
+  }
+}
+
+function rememberUnloadGroupEvidence(batchId, { weight, timestamp, group = null, settings = {} }) {
+  if (!batchId) return null
+  const parsedWeight = Number(weight)
+  const timestampMs = new Date(timestamp).getTime()
+  if (!Number.isFinite(parsedWeight) || !Number.isFinite(timestampMs)) return null
+
+  let evidence = unloadGroupEvidenceByBatch.get(batchId)
+  if (!evidence) {
+    evidence = createUnloadGroupEvidence(parsedWeight, timestamp, group)
+    unloadGroupEvidenceByBatch.set(batchId, evidence)
+    return null
+  }
+
+  let evidenceGroup = group || null
+  if (group) {
+    evidence.lastGroup = group
+    evidence.lastGroupSeenAtMs = timestampMs
+  } else if (
+    evidence.lastGroup &&
+    Number.isFinite(Number(evidence.lastGroupSeenAtMs)) &&
+    timestampMs - Number(evidence.lastGroupSeenAtMs) <= UNLOAD_GROUP_STICKY_MS
+  ) {
+    evidenceGroup = evidence.lastGroup
+  }
+
+  const previousWeight = Number(evidence.lastWeight)
+  const drop = Number.isFinite(previousWeight) ? previousWeight - parsedWeight : 0
+  if (evidenceGroup?.id && Number.isFinite(drop) && drop > 0) {
+    const key = String(evidenceGroup.id)
+    const current = evidence.groups.get(key) || {
+      group: evidenceGroup,
+      dropKg: 0,
+      packets: 0
+    }
+    current.group = evidenceGroup
+    current.dropKg += drop
+    current.packets += 1
+    evidence.groups.set(key, current)
+  }
+
+  evidence.lastWeight = parsedWeight
+  evidence.lastTimeMs = timestampMs
+
+  let best = null
+  for (const item of evidence.groups.values()) {
+    if (!best || item.dropKg > best.dropKg) {
+      best = item
+    }
+  }
+
+  if (
+    best?.group?.id &&
+    best.dropKg >= unloadGroupConfirmDropKg(settings) &&
+    best.packets >= UNLOAD_GROUP_CONFIRM_PACKETS &&
+    evidence.confirmedGroupId !== best.group.id
+  ) {
+    evidence.confirmedGroupId = best.group.id
+    return best.group
+  }
+
+  return null
 }
 
 function parseBoolean(value) {
@@ -345,6 +432,7 @@ router.post('/', async (req, res) => {
       course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
     };
     const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
+    const hostResolvedGroup = await resolveGroupByCoordinates(prisma, packet.lat, packet.lon);
     const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones)
     const hostLoadingZone = getZoneByCoordinates(packet.lat, packet.lon, loadingZones)
     const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
@@ -368,6 +456,7 @@ router.post('/', async (req, res) => {
     let telemetry = null
     let shouldClearDeviceState = false
     let shouldScheduleReplay = false
+    const postprocessBatchIds = new Set()
     const latestStoredTimestampMs = latestStoredTelemetry?.timestamp instanceof Date
       ? latestStoredTelemetry.timestamp.getTime()
       : Number.NaN
@@ -413,25 +502,28 @@ router.post('/', async (req, res) => {
       const batchIdsToRecalculate = new Set()
       const stickyViolationBatchIds = new Set()
 
-      async function bindBatchToResolvedGroup({ overwriteExisting = false } = {}) {
-        if (!activeBatch || !resolvedGroup) {
+      async function bindBatchToResolvedGroup({ overwriteExisting = false, group = resolvedGroup, alignIngredients = true } = {}) {
+        if (!activeBatch || !group) {
           return
         }
 
         const patch = {}
 
-        if ((overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== resolvedGroup.id) {
-          patch.groupId = resolvedGroup.id
+        if ((overwriteExisting || !activeBatch.groupId) && activeBatch.groupId !== group.id) {
+          patch.groupId = group.id
         }
 
-        if (resolvedGroup.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== resolvedGroup.rationId) {
-          patch.rationId = resolvedGroup.rationId
+        if (group.rationId && (overwriteExisting || !activeBatch.rationId) && activeBatch.rationId !== group.rationId) {
+          patch.rationId = group.rationId
         }
 
         if (!Object.keys(patch).length) {
+          if (!alignIngredients) {
+            return
+          }
           await alignAmbiguousIngredientsWithRation(tx, {
             batchId: activeBatch.id,
-            expectedIngredients: resolvedGroup.ration?.ingredients || [],
+            expectedIngredients: group.ration?.ingredients || [],
             loadingZones
           })
           return
@@ -441,11 +533,13 @@ router.post('/', async (req, res) => {
           where: { id: activeBatch.id },
           data: patch
         })
-        await alignAmbiguousIngredientsWithRation(tx, {
-          batchId: activeBatch.id,
-          expectedIngredients: resolvedGroup.ration?.ingredients || [],
-          loadingZones
-        })
+        if (alignIngredients) {
+          await alignAmbiguousIngredientsWithRation(tx, {
+            batchId: activeBatch.id,
+            expectedIngredients: group.ration?.ingredients || [],
+            loadingZones
+          })
+        }
         batchIdsToRecalculate.add(activeBatch.id)
       }
 
@@ -559,7 +653,10 @@ router.post('/', async (req, res) => {
 
           case 'START_UNLOAD':
             if (activeBatch) {
-              await bindBatchToResolvedGroup({ overwriteExisting: true })
+              unloadGroupEvidenceByBatch.set(
+                activeBatch.id,
+                createUnloadGroupEvidence(action.startUnloadWeight ?? telemetry.weight, telemetry.timestamp, hostResolvedGroup)
+              )
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: { endWeight: roundWeight(action.startUnloadWeight ?? telemetry.weight) }
@@ -571,7 +668,19 @@ router.post('/', async (req, res) => {
           case 'UPDATE_UNLOAD':
             if (activeBatch) {
               if (Number(action.endWeight ?? telemetry.weight) >= emptyVehicleThresholdKg) {
-                await bindBatchToResolvedGroup()
+                const confirmedUnloadGroup = rememberUnloadGroupEvidence(activeBatch.id, {
+                  weight: action.endWeight ?? telemetry.weight,
+                  timestamp: telemetry.timestamp,
+                  group: hostResolvedGroup,
+                  settings: telemetrySettings
+                })
+                if (confirmedUnloadGroup) {
+                  await bindBatchToResolvedGroup({
+                    overwriteExisting: true,
+                    group: confirmedUnloadGroup,
+                    alignIngredients: false
+                  })
+                }
               }
               await tx.batch.update({
                 where: { id: activeBatch.id },
@@ -603,6 +712,7 @@ router.post('/', async (req, res) => {
           case 'COMPLETE_BATCH':
             if (activeBatch) {
               const completedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(completedBatchId)
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: {
@@ -611,6 +721,7 @@ router.post('/', async (req, res) => {
                 }
               })
               batchIdsToRecalculate.add(completedBatchId)
+              postprocessBatchIds.add(completedBatchId)
               console.log(`Замес ${activeBatch.id} закрыт!`)
               activeBatch = null
             }
@@ -619,6 +730,7 @@ router.post('/', async (req, res) => {
           case 'FORCE_CLOSE_BATCH':
             if (activeBatch) {
               const closedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(closedBatchId)
               stickyViolationBatchIds.add(closedBatchId)
               await tx.batch.update({
                 where: { id: activeBatch.id },
@@ -629,6 +741,7 @@ router.post('/', async (req, res) => {
                 }
               })
               batchIdsToRecalculate.add(closedBatchId)
+              postprocessBatchIds.add(closedBatchId)
               console.log(`Замес ${activeBatch.id} принудительно закрыт (недовыгрузка)!`)
             }
 
@@ -690,6 +803,7 @@ router.post('/', async (req, res) => {
               (shouldAutoCloseByEmpty && currentPacketIsEmpty)
             ) {
               const closedBatchId = activeBatch.id
+              unloadGroupEvidenceByBatch.delete(closedBatchId)
               await tx.batch.update({
                 where: { id: closedBatchId },
                 data: {
@@ -698,6 +812,7 @@ router.post('/', async (req, res) => {
                 }
               })
               batchIdsToRecalculate.add(closedBatchId)
+              postprocessBatchIds.add(closedBatchId)
               shouldClearDeviceState = true
               console.log(`Замес ${closedBatchId} автозакрыт (fallback по серии пустого/негативного веса)`)
               activeBatch = null
@@ -716,6 +831,14 @@ router.post('/', async (req, res) => {
         }
       }
     })
+
+    for (const batchId of postprocessBatchIds) {
+      try {
+        await postprocessCompletedBatch(prisma, batchId, telemetrySettings, { persist: true })
+      } catch (postprocessError) {
+        console.error(`[Postprocess] Не удалось пересчитать замес ${batchId}:`, postprocessError)
+      }
+    }
 
     if (shouldClearDeviceState) {
       telemetryProcessor.clearDeviceState(deviceId)
@@ -802,6 +925,11 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
 
     const telemetrySettings = await getTelemetrySettings(prisma)
     await recalculateBatchViolations(prisma, updatedBatch.id, telemetrySettings);
+    try {
+      await postprocessCompletedBatch(prisma, updatedBatch.id, telemetrySettings, { persist: true })
+    } catch (postprocessError) {
+      console.error(`[Postprocess] Не удалось пересчитать вручную остановленный замес ${updatedBatch.id}:`, postprocessError)
+    }
     telemetryProcessor.clearDeviceState(updatedBatch.deviceId);
 
     res.json({
