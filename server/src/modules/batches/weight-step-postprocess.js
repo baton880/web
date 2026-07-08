@@ -5,6 +5,8 @@ const WEIGHT_FILTER = {
   rollingMedianRadius: 8,
   roundToKg: 5
 }
+const BUFFER_OVERLAP_WINDOW_MS = 10 * 1000
+const BUFFER_OVERLAP_MAX_DISTANCE_M = 50
 
 export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   minLoadStepKg: 20,
@@ -78,6 +80,73 @@ export function resolveWeightStepOptions(overrides = {}) {
 function timestampMs(value) {
   const parsed = new Date(value).getTime()
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function isExplicitlyInvalidWeight(point) {
+  return point?.weightValid === false || point?.weightValid === 0
+}
+
+function hasTrackCoordinates(point) {
+  const lat = Number(point?.lat)
+  const lon = Number(point?.lon)
+  return Number.isFinite(lat)
+    && Number.isFinite(lon)
+    && Math.abs(lat) <= 90
+    && Math.abs(lon) <= 180
+    && !(lat === 0 && lon === 0)
+}
+
+function trackDistanceMeters(left, right) {
+  if (!hasTrackCoordinates(left) || !hasTrackCoordinates(right)) return Number.POSITIVE_INFINITY
+
+  const toRadians = (degrees) => degrees * Math.PI / 180
+  const earthRadiusMeters = 6371000
+  const lat1 = toRadians(Number(left.lat))
+  const lat2 = toRadians(Number(right.lat))
+  const deltaLat = toRadians(Number(right.lat) - Number(left.lat))
+  const deltaLon = toRadians(Number(right.lon) - Number(left.lon))
+  const sinLat = Math.sin(deltaLat / 2)
+  const sinLon = Math.sin(deltaLon / 2)
+  const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon
+
+  return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a))
+}
+
+function compareTrackPoints(left, right) {
+  const leftMs = timestampMs(left?.timestamp)
+  const rightMs = timestampMs(right?.timestamp)
+  if (leftMs !== rightMs) return (leftMs ?? 0) - (rightMs ?? 0)
+
+  if (isExplicitlyInvalidWeight(left) !== isExplicitlyInvalidWeight(right)) {
+    return isExplicitlyInvalidWeight(left) ? 1 : -1
+  }
+
+  const leftReceivedMs = timestampMs(left?.receivedAt)
+  const rightReceivedMs = timestampMs(right?.receivedAt)
+  if (leftReceivedMs !== rightReceivedMs) return (leftReceivedMs ?? 0) - (rightReceivedMs ?? 0)
+
+  return Number(left?.id || 0) - Number(right?.id || 0)
+}
+
+function removeOverlappingBufferedTrackPoints(points = []) {
+  const ordered = (Array.isArray(points) ? points : []).slice().sort(compareTrackPoints)
+  const reliablePoints = ordered.filter((point) => !isExplicitlyInvalidWeight(point) && hasTrackCoordinates(point))
+
+  return ordered.filter((point) => {
+    if (!isExplicitlyInvalidWeight(point) || !hasTrackCoordinates(point)) return true
+
+    const pointMs = timestampMs(point.timestamp)
+    if (!Number.isFinite(pointMs)) return true
+
+    const overlappingReliablePoint = reliablePoints.find((candidate) => {
+      const candidateMs = timestampMs(candidate.timestamp)
+      return Number.isFinite(candidateMs)
+        && Math.abs(candidateMs - pointMs) <= BUFFER_OVERLAP_WINDOW_MS
+        && trackDistanceMeters(candidate, point) > BUFFER_OVERLAP_MAX_DISTANCE_M
+    })
+
+    return !overlappingReliablePoint
+  })
 }
 
 function finiteNumber(value) {
@@ -206,8 +275,10 @@ function normalizeTelemetryRows(rows = [], opts) {
     .map((row) => ({
       id: row.id ?? null,
       x: timestampMs(row.timestamp ?? row.t),
+      receivedAt: row.receivedAt ?? row.received_at ?? null,
       raw: scaleWeight(finiteNumber(row.rawWeight ?? row.raw_weight ?? row.r), scale),
       weight: scaleWeight(finiteNumber(row.weight ?? row.w), scale),
+      weightValid: row.weightValid ?? row.weight_valid ?? null,
       speed: finiteNumber(row.speedKmh ?? row.speed_kmh ?? row.s),
       lat: finiteNumber(row.lat),
       lon: finiteNumber(row.lon),
@@ -816,10 +887,12 @@ function serializePoint(point) {
   return {
     id: point.id,
     timestamp: new Date(point.x),
+    receivedAt: point.receivedAt || null,
     weight: eventLevel(point.filtered),
     filteredWeight: eventLevel(point.filtered),
     rawWeight: Number.isFinite(point.raw) ? point.raw : null,
     telemetryWeight: Number.isFinite(point.weight) ? point.weight : null,
+    weightValid: point.weightValid ?? null,
     speedKmh: Number.isFinite(point.speed) ? point.speed : null,
     lat: Number.isFinite(point.lat) ? point.lat : null,
     lon: Number.isFinite(point.lon) ? point.lon : null
@@ -1013,13 +1086,17 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
 }
 
 export function buildPostprocessedHostTrack(analysis) {
-  return Array.isArray(analysis?.points) ? analysis.points.map((point) => ({
+  const points = Array.isArray(analysis?.points) ? analysis.points : []
+  return removeOverlappingBufferedTrackPoints(points.map((point) => ({
+    id: point.id,
     timestamp: point.timestamp,
+    receivedAt: point.receivedAt,
     weight: point.filteredWeight ?? point.weight,
     rawWeight: point.rawWeight,
     telemetryWeight: point.telemetryWeight,
+    weightValid: point.weightValid,
     speedKmh: point.speedKmh,
     lat: point.lat,
     lon: point.lon
-  })) : []
+  })))
 }

@@ -924,10 +924,13 @@ $(document).ready(function () {
     function normalizeTrackPoints(points) {
         return (Array.isArray(points) ? points : [])
             .map((point) => ({
+                id: point?.id == null ? null : Number(point.id),
                 lat: Number(point?.lat),
                 lon: Number(point?.lon),
                 timestamp: point?.timestamp || null,
+                receivedAtMs: parseTimestampMs(point?.receivedAt),
                 weight: point?.weight == null ? null : Number(point.weight),
+                weightValid: point?.weightValid,
                 speed: point?.speed == null ? null : Number(point.speed),
                 course: point?.course == null ? null : Number(point.course),
                 heading: point?.heading == null ? null : Number(point.heading),
@@ -939,7 +942,21 @@ $(document).ready(function () {
                 source: point,
             }))
             .filter((point) => hasValidCoordinates(point.lat, point.lon) && point.timestampMs !== null)
-            .sort((left, right) => left.timestampMs - right.timestampMs);
+            .sort((left, right) => {
+                const timestampDiff = left.timestampMs - right.timestampMs;
+                if (timestampDiff !== 0) return timestampDiff;
+
+                const leftInvalidWeight = left.weightValid === false || left.weightValid === 0;
+                const rightInvalidWeight = right.weightValid === false || right.weightValid === 0;
+                if (leftInvalidWeight !== rightInvalidWeight) {
+                    return leftInvalidWeight ? 1 : -1;
+                }
+
+                const receivedDiff = (left.receivedAtMs ?? 0) - (right.receivedAtMs ?? 0);
+                if (receivedDiff !== 0) return receivedDiff;
+
+                return Number(left.id || 0) - Number(right.id || 0);
+            });
     }
 
     function normalizeTelemetryPayload(payload) {

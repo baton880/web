@@ -180,8 +180,10 @@ export async function loadBatchPostprocessTelemetry(prismaClient, batch) {
     select: {
       id: true,
       timestamp: true,
+      receivedAt: true,
       weight: true,
       rawWeight: true,
+      weightValid: true,
       speedKmh: true,
       lat: true,
       lon: true

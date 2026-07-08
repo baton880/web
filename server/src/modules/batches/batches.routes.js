@@ -17,6 +17,84 @@ const STRAW_ALFALFA_VIOLATION_CODES = new Set([
 ]);
 const RECOVERED_INGREDIENT_GRAPH_LOOKBACK_SECONDS = 10 * 60;
 const INSTANT_START_INGREDIENT_TOLERANCE_MS = 5000;
+const BUFFER_OVERLAP_WINDOW_MS = 10 * 1000;
+const BUFFER_OVERLAP_MAX_DISTANCE_M = 50;
+
+function parseTimestampMs(value) {
+    const timestamp = value instanceof Date ? value.getTime() : new Date(value || 0).getTime();
+    return Number.isFinite(timestamp) ? timestamp : null;
+}
+
+function isExplicitlyInvalidWeight(point) {
+    return point?.weightValid === false || point?.weightValid === 0;
+}
+
+function hasTrackCoordinates(point) {
+    const lat = Number(point?.lat);
+    const lon = Number(point?.lon);
+    return Number.isFinite(lat)
+        && Number.isFinite(lon)
+        && Math.abs(lat) <= 90
+        && Math.abs(lon) <= 180
+        && !(lat === 0 && lon === 0);
+}
+
+function trackDistanceMeters(left, right) {
+    if (!hasTrackCoordinates(left) || !hasTrackCoordinates(right)) return Number.POSITIVE_INFINITY;
+
+    const toRadians = (degrees) => degrees * Math.PI / 180;
+    const earthRadiusMeters = 6371000;
+    const lat1 = toRadians(Number(left.lat));
+    const lat2 = toRadians(Number(right.lat));
+    const deltaLat = toRadians(Number(right.lat) - Number(left.lat));
+    const deltaLon = toRadians(Number(right.lon) - Number(left.lon));
+    const sinLat = Math.sin(deltaLat / 2);
+    const sinLon = Math.sin(deltaLon / 2);
+    const a = sinLat * sinLat + Math.cos(lat1) * Math.cos(lat2) * sinLon * sinLon;
+
+    return earthRadiusMeters * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+function compareTelemetryTrackPoints(left, right) {
+    const leftMs = parseTimestampMs(left?.timestamp);
+    const rightMs = parseTimestampMs(right?.timestamp);
+    if (leftMs !== rightMs) return (leftMs ?? 0) - (rightMs ?? 0);
+
+    if (isExplicitlyInvalidWeight(left) !== isExplicitlyInvalidWeight(right)) {
+        return isExplicitlyInvalidWeight(left) ? 1 : -1;
+    }
+
+    const leftReceivedMs = parseTimestampMs(left?.receivedAt);
+    const rightReceivedMs = parseTimestampMs(right?.receivedAt);
+    if (leftReceivedMs !== rightReceivedMs) return (leftReceivedMs ?? 0) - (rightReceivedMs ?? 0);
+
+    return Number(left?.id || 0) - Number(right?.id || 0);
+}
+
+function removeOverlappingBufferedTrackPoints(points = []) {
+    const ordered = (Array.isArray(points) ? points : [])
+        .slice()
+        .sort(compareTelemetryTrackPoints);
+    const reliablePoints = ordered.filter((point) => !isExplicitlyInvalidWeight(point) && hasTrackCoordinates(point));
+
+    return ordered.filter((point) => {
+        if (!isExplicitlyInvalidWeight(point) || !hasTrackCoordinates(point)) {
+            return true;
+        }
+
+        const pointMs = parseTimestampMs(point.timestamp);
+        if (pointMs === null) return true;
+
+        const overlappingReliablePoint = reliablePoints.find((candidate) => {
+            const candidateMs = parseTimestampMs(candidate.timestamp);
+            return candidateMs !== null
+                && Math.abs(candidateMs - pointMs) <= BUFFER_OVERLAP_WINDOW_MS
+                && trackDistanceMeters(candidate, point) > BUFFER_OVERLAP_MAX_DISTANCE_M;
+        });
+
+        return !overlappingReliablePoint;
+    });
+}
 
 function isStrawAlfalfaViolationCode(code) {
     return STRAW_ALFALFA_VIOLATION_CODES.has(String(code || ''));
@@ -632,19 +710,27 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
                 }
             },
             select: {
+                id: true,
                 timestamp: true,
+                receivedAt: true,
                 weight: true,
+                rawWeight: true,
+                weightValid: true,
                 lat: true,
                 lon: true
             },
-            orderBy: { timestamp: 'asc' }
+            orderBy: [
+                { timestamp: 'asc' },
+                { id: 'asc' }
+            ]
         });
 
-        const recoveredGraphAnchorPoint = findRecoveredGraphAnchorPoint(batch, hostTrack);
+        const cleanedHostTrack = removeOverlappingBufferedTrackPoints(hostTrack);
+        const recoveredGraphAnchorPoint = findRecoveredGraphAnchorPoint(batch, cleanedHostTrack);
         const graphNormalizationBatch = recoveredGraphAnchorPoint
             ? { ...batch, startTime: recoveredGraphAnchorPoint.timestamp, startWeight: 0 }
             : batch;
-        const normalizedHostTrack = normalizeBatchTrackWeights(graphNormalizationBatch, hostTrack);
+        const normalizedHostTrack = normalizeBatchTrackWeights(graphNormalizationBatch, cleanedHostTrack);
 
         if (!includeRtk) {
             return res.json(normalizedHostTrack);
@@ -660,17 +746,27 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
                     }
                 },
                 select: {
+                    id: true,
                     timestamp: true,
+                    receivedAt: true,
                     weight: true,
+                    rawWeight: true,
+                    weightValid: true,
                     lat: true,
                     lon: true
                 },
-                orderBy: { timestamp: 'asc' }
+                orderBy: [
+                    { timestamp: 'asc' },
+                    { id: 'asc' }
+                ]
             })
             : hostTrack;
-        const normalizedHostContextTrack = hostContextTrack === hostTrack
+        const cleanedHostContextTrack = hostContextTrack === hostTrack
+            ? cleanedHostTrack
+            : removeOverlappingBufferedTrackPoints(hostContextTrack);
+        const normalizedHostContextTrack = cleanedHostContextTrack === cleanedHostTrack
             ? normalizedHostTrack
-            : normalizeBatchTrackWeights(graphNormalizationBatch, hostContextTrack);
+            : normalizeBatchTrackWeights(graphNormalizationBatch, cleanedHostContextTrack);
 
         const loaderTrack = await getBatchLoaderTrack(batch, prisma, {
             lookbackSeconds: loaderLookbackSeconds
