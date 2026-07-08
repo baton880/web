@@ -7,9 +7,15 @@ import { SECRET_KEY } from '../../middleware/auth.js'
 
 const router = Router()
 const TOKEN_COOKIE_NAME = 'token'
+const DEFAULT_FRONTEND_URL = 'https://vi-korm.ru'
 
 function getFrontendUrl() {
-  return (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/+$/, '')
+  return (
+    process.env.FRONTEND_URL ||
+    process.env.APP_BASE_URL ||
+    process.env.SITE_URL ||
+    DEFAULT_FRONTEND_URL
+  ).replace(/\/+$/, '')
 }
 
 function getAuthCookieOptions() {
@@ -87,7 +93,11 @@ router.post('/forgot-password', async (req, res) => {
     const token = jwt.sign({ id: user.id, username: user.username }, secret, { expiresIn: '15m' })
 
     const frontendUrl = getFrontendUrl()
-    const resetLink = `${frontendUrl}/reset-password?token=${token}&id=${user.id}`
+    const resetParams = new URLSearchParams({
+      token,
+      id: String(user.id)
+    })
+    const resetLink = `${frontendUrl}/reset-password?${resetParams.toString()}`
 
     // Отправляем реальное письмо на привязанный email
     const transporter = createTransporter()
