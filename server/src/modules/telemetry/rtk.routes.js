@@ -10,7 +10,7 @@ import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_HISTORY_LIMIT = 20
-const MAX_RTK_HISTORY_LIMIT = 5000
+const MAX_RTK_HISTORY_LIMIT = 20000
 const DEFAULT_ZONE_SECONDS = 30
 const MAX_ZONE_SECONDS = 3600
 const MAX_ZONE_SCAN_ROWS = 5000

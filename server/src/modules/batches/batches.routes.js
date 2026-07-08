@@ -725,7 +725,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             ]
         });
 
-        const cleanedHostTrack = removeOverlappingBufferedTrackPoints(hostTrack);
+        const cleanedHostTrack = hostTrack.slice().sort(compareTelemetryTrackPoints);
         const recoveredGraphAnchorPoint = findRecoveredGraphAnchorPoint(batch, cleanedHostTrack);
         const graphNormalizationBatch = recoveredGraphAnchorPoint
             ? { ...batch, startTime: recoveredGraphAnchorPoint.timestamp, startWeight: 0 }
@@ -763,7 +763,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
             : hostTrack;
         const cleanedHostContextTrack = hostContextTrack === hostTrack
             ? cleanedHostTrack
-            : removeOverlappingBufferedTrackPoints(hostContextTrack);
+            : hostContextTrack.slice().sort(compareTelemetryTrackPoints);
         const normalizedHostContextTrack = cleanedHostContextTrack === cleanedHostTrack
             ? normalizedHostTrack
             : normalizeBatchTrackWeights(graphNormalizationBatch, cleanedHostContextTrack);

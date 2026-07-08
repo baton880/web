@@ -17,7 +17,7 @@ import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
-const MAX_TELEMETRY_HISTORY_LIMIT = 5000
+const MAX_TELEMETRY_HISTORY_LIMIT = 20000
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2

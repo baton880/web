@@ -1087,7 +1087,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
 
 export function buildPostprocessedHostTrack(analysis) {
   const points = Array.isArray(analysis?.points) ? analysis.points : []
-  return removeOverlappingBufferedTrackPoints(points.map((point) => ({
+  return points.map((point) => ({
     id: point.id,
     timestamp: point.timestamp,
     receivedAt: point.receivedAt,
@@ -1098,5 +1098,5 @@ export function buildPostprocessedHostTrack(analysis) {
     speedKmh: point.speedKmh,
     lat: point.lat,
     lon: point.lon
-  })))
+  })).sort(compareTrackPoints)
 }
