@@ -43,6 +43,7 @@ const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
 const DEFAULT_LOADING_ZONE_STICKY_SECONDS = 180;
 const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4;
 const MIN_TRACKABLE_WEIGHT_KG = -100;
+const MAX_TRACKABLE_WEIGHT_KG = 8000;
 const RAW_WEIGHT_LEAD_THRESHOLD_KG = 80;
 const RAW_WEIGHT_SMOOTHING_WINDOW = 5;
 const RAW_WEIGHT_SMOOTHING_ALPHA = 0.45;
@@ -639,8 +640,12 @@ export class TelemetryProcessor {
     const normalWeightRaw = Number(packet?.weight);
     const rawWeightRaw = Number(packet?.rawWeight ?? packet?.raw_weight ?? packet?.raw);
     const weightValid = this._parsePacketBoolean(packet?.weightValid ?? packet?.weight_valid);
-    const normalTrackable = Number.isFinite(normalWeightRaw) && normalWeightRaw >= MIN_TRACKABLE_WEIGHT_KG;
-    const rawTrackable = Number.isFinite(rawWeightRaw) && rawWeightRaw >= MIN_TRACKABLE_WEIGHT_KG;
+    const normalTrackable = Number.isFinite(normalWeightRaw)
+      && normalWeightRaw >= MIN_TRACKABLE_WEIGHT_KG
+      && normalWeightRaw <= MAX_TRACKABLE_WEIGHT_KG;
+    const rawTrackable = Number.isFinite(rawWeightRaw)
+      && rawWeightRaw >= MIN_TRACKABLE_WEIGHT_KG
+      && rawWeightRaw <= MAX_TRACKABLE_WEIGHT_KG;
     const rawTrustThreshold = this._getRawWeightTrustThreshold(thresholds);
     const smoothedRawWeight = rawTrackable
       ? this._resolveSmoothedRawWeight(state, rawWeightRaw, thresholds)
