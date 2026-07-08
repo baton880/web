@@ -147,6 +147,26 @@ function formatDateTime(value) {
     return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Novosibirsk" });
 }
 
+function formatTrackPointBalloon(label, point) {
+    const timestamp = point?.source?.timestamp || point?.timestamp || null;
+    const weight = point?.source?.weight;
+    const speed = point?.source?.speedKmh ?? point?.source?.speed;
+    const details = [
+        `<strong>${label}</strong>`,
+        `Время: ${formatDateTime(timestamp)}`,
+    ];
+
+    if (weight !== undefined && weight !== null) {
+        details.push(`Вес: ${formatMetric(weight, 0)} кг`);
+    }
+
+    if (speed !== undefined && speed !== null) {
+        details.push(`Скорость: ${formatMetric(speed, 1)} км/ч`);
+    }
+
+    return details.join("<br>");
+}
+
 function formatMetric(value, digits = 1) {
     if (value === null || value === undefined || value === "") return "--";
 
@@ -1553,6 +1573,7 @@ function buildTrackSegments(historyRows) {
             if (currentSegment.length >= 2) {
                 segments.push({
                     coords: currentSegment.map((item) => [item.lat, item.lon]),
+                    points: currentSegment.slice(),
                     dashed: false,
                 });
             }
@@ -1562,6 +1583,7 @@ function buildTrackSegments(historyRows) {
                     [previousPoint.lat, previousPoint.lon],
                     [point.lat, point.lon],
                 ],
+                points: [previousPoint, point],
                 dashed: true,
             });
 
@@ -1575,6 +1597,7 @@ function buildTrackSegments(historyRows) {
     if (currentSegment.length >= 2) {
         segments.push({
             coords: currentSegment.map((item) => [item.lat, item.lon]),
+            points: currentSegment.slice(),
             dashed: false,
         });
     }
@@ -1608,6 +1631,7 @@ function buildRtkTrackSegments(historyRows) {
                 [previousPoint.lat, previousPoint.lon],
                 [currentPoint.lat, currentPoint.lon],
             ],
+            points: [previousPoint, currentPoint],
             dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
             strokeColor: currentHasHeading ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
         });
@@ -1625,6 +1649,29 @@ function createTrackPolylines(segments, options) {
             strokeWidth: options.strokeWidth,
             strokeOpacity: options.strokeOpacity,
             ...(segment.dashed ? { strokeStyle: "dash" } : {}),
+        });
+
+        polyline.events.add("click", (event) => {
+            const clickedCoords = event.get("coords");
+            const points = Array.isArray(segment.points) ? segment.points : [];
+            if (!Array.isArray(clickedCoords) || clickedCoords.length < 2 || !points.length) {
+                return;
+            }
+
+            const closestPoint = points.reduce((bestPoint, point) => {
+                const distance = calculateDistanceMeters(
+                    { lat: clickedCoords[0], lon: clickedCoords[1] },
+                    point
+                );
+                const bestDistance = bestPoint
+                    ? calculateDistanceMeters({ lat: clickedCoords[0], lon: clickedCoords[1] }, bestPoint)
+                    : Number.POSITIVE_INFINITY;
+                return distance < bestDistance ? point : bestPoint;
+            }, null);
+
+            if (closestPoint) {
+                polyline.properties.set("balloonContent", formatTrackPointBalloon(options.label || options.balloonContent, closestPoint));
+            }
         });
 
         map.geoObjects.add(polyline);
@@ -1645,6 +1692,7 @@ function renderRoute(historyRows) {
 
     clearRoutePolyline();
     routePolylines = createTrackPolylines(routeSegments, {
+        label: "Маршрут хозяина",
         balloonContent: "Маршрут хозяина",
         strokeColor: HOST_TRACK_COLOR,
         strokeWidth: 4,
@@ -1665,6 +1713,7 @@ function renderRtkRoute(historyRows) {
 
     clearRtkRoutePolyline();
     rtkRoutePolylines = createTrackPolylines(routeSegments, {
+        label: "Маршрут погрузчика",
         balloonContent: "Маршрут погрузчика",
         strokeColor: RTK_GPS_FIX_COLOR,
         strokeWidth: 4,
