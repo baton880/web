@@ -22,6 +22,13 @@ $(document).ready(function () {
     const deviationTotal = document.getElementById("batchDeviationTotal");
     const telemetryEmpty = document.getElementById("batchTelemetryEmpty");
     const telemetryCanvas = document.getElementById("batchTelemetryChart");
+    const telemetryZoomControls = document.getElementById("batchTelemetryZoomControls");
+    const telemetryZoomMeta = document.getElementById("batchTelemetryZoomMeta");
+    const telemetryZoomInButton = document.getElementById("batchTelemetryZoomIn");
+    const telemetryZoomOutButton = document.getElementById("batchTelemetryZoomOut");
+    const telemetryZoomResetButton = document.getElementById("batchTelemetryZoomReset");
+    const telemetryPanLeftButton = document.getElementById("batchTelemetryPanLeft");
+    const telemetryPanRightButton = document.getElementById("batchTelemetryPanRight");
     const trackMapElement = document.getElementById("batchTrackMap");
     const trackEmpty = document.getElementById("batchTrackEmpty");
     const trackMeta = document.getElementById("batchTrackMeta");
@@ -94,6 +101,11 @@ $(document).ready(function () {
         groups: [],
         storageZones: [],
         telemetryPayload: null,
+        telemetryZoom: {
+            startIndex: 0,
+            endIndex: null,
+            total: 0,
+        },
         selectedIngredientId: null,
         lookupStatus: {
             rations: {
@@ -805,6 +817,110 @@ $(document).ready(function () {
         telemetryChart = null;
     }
 
+    function resetTelemetryZoom(total = 0) {
+        state.telemetryZoom = {
+            startIndex: 0,
+            endIndex: Math.max(0, Number(total) - 1),
+            total: Math.max(0, Number(total) || 0),
+        };
+    }
+
+    function normalizeTelemetryZoom(total) {
+        const count = Math.max(0, Number(total) || 0);
+        if (!canAdmin || count <= 0) {
+            resetTelemetryZoom(count);
+            return state.telemetryZoom;
+        }
+
+        const current = state.telemetryZoom || {};
+        const fallbackEnd = count - 1;
+        let startIndex = Number.isInteger(current.startIndex) ? current.startIndex : 0;
+        let endIndex = Number.isInteger(current.endIndex) ? current.endIndex : fallbackEnd;
+
+        startIndex = Math.max(0, Math.min(startIndex, fallbackEnd));
+        endIndex = Math.max(startIndex, Math.min(endIndex, fallbackEnd));
+
+        state.telemetryZoom = { startIndex, endIndex, total: count };
+        return state.telemetryZoom;
+    }
+
+    function getTelemetryZoomRows(rows) {
+        const zoom = normalizeTelemetryZoom(rows.length);
+        return rows.slice(zoom.startIndex, zoom.endIndex + 1);
+    }
+
+    function getTelemetryZoomWindowSize() {
+        const zoom = state.telemetryZoom || {};
+        return Math.max(1, (zoom.endIndex ?? 0) - (zoom.startIndex ?? 0) + 1);
+    }
+
+    function setTelemetryZoomWindow(startIndex, windowSize) {
+        const total = state.telemetryZoom?.total || 0;
+        if (!canAdmin || total <= 0) {
+            return;
+        }
+
+        const size = Math.max(8, Math.min(Math.round(windowSize), total));
+        const start = Math.max(0, Math.min(Math.round(startIndex), total - size));
+        state.telemetryZoom = {
+            startIndex: start,
+            endIndex: start + size - 1,
+            total,
+        };
+        renderTelemetry(state.telemetryPayload?.hostTrack || []);
+    }
+
+    function updateTelemetryZoomControls(sourceRows, visibleRows) {
+        if (!telemetryZoomControls) {
+            return;
+        }
+
+        const total = Array.isArray(sourceRows) ? sourceRows.length : 0;
+        const canZoom = canAdmin && total > 8;
+        telemetryZoomControls.classList.toggle("d-none", !canZoom);
+        telemetryZoomControls.hidden = !canZoom;
+
+        if (!canZoom) {
+            return;
+        }
+
+        const zoom = normalizeTelemetryZoom(total);
+        const isFull = zoom.startIndex === 0 && zoom.endIndex >= total - 1;
+        const visibleCount = Array.isArray(visibleRows) ? visibleRows.length : 0;
+        const firstPoint = visibleRows?.[0];
+        const lastPoint = visibleRows?.[visibleRows.length - 1];
+
+        if (telemetryZoomMeta) {
+            const timeLabel = firstPoint && lastPoint
+                ? `${formatTime(firstPoint.timestamp)} - ${formatTime(lastPoint.timestamp)}`
+                : "Весь график";
+            telemetryZoomMeta.textContent = isFull
+                ? `Весь график, ${total} точек`
+                : `${zoom.startIndex + 1}-${zoom.endIndex + 1} из ${total} точек, ${timeLabel}`;
+        }
+
+        if (telemetryZoomInButton) telemetryZoomInButton.disabled = visibleCount <= 8;
+        if (telemetryZoomOutButton) telemetryZoomOutButton.disabled = isFull;
+        if (telemetryZoomResetButton) telemetryZoomResetButton.disabled = isFull;
+        if (telemetryPanLeftButton) telemetryPanLeftButton.disabled = zoom.startIndex <= 0;
+        if (telemetryPanRightButton) telemetryPanRightButton.disabled = zoom.endIndex >= total - 1;
+    }
+
+    function zoomTelemetryChart(factor) {
+        const zoom = normalizeTelemetryZoom(state.telemetryZoom?.total || 0);
+        const currentSize = getTelemetryZoomWindowSize();
+        const nextSize = Math.max(8, Math.min(zoom.total, Math.round(currentSize * factor)));
+        const center = (zoom.startIndex + zoom.endIndex) / 2;
+        setTelemetryZoomWindow(Math.round(center - nextSize / 2), nextSize);
+    }
+
+    function panTelemetryChart(direction) {
+        const zoom = normalizeTelemetryZoom(state.telemetryZoom?.total || 0);
+        const size = getTelemetryZoomWindowSize();
+        const step = Math.max(1, Math.round(size * 0.35));
+        setTelemetryZoomWindow(zoom.startIndex + direction * step, size);
+    }
+
     function normalizeTrackPoints(points) {
         return (Array.isArray(points) ? points : [])
             .map((point) => ({
@@ -834,6 +950,7 @@ $(document).ready(function () {
                 loaderTrack: [],
                 events: [],
                 plateaus: [],
+                postprocessIngredients: [],
                 postprocess: null,
                 meta: null,
             };
@@ -845,6 +962,9 @@ $(document).ready(function () {
             loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
             events: Array.isArray(payload?.events) ? payload.events : [],
             plateaus: Array.isArray(payload?.plateaus) ? payload.plateaus : [],
+            postprocessIngredients: Array.isArray(payload?.postprocessIngredients)
+                ? payload.postprocessIngredients
+                : (Array.isArray(payload?.ingredients) ? payload.ingredients : []),
             postprocess: payload?.postprocess || payload?.meta?.postprocess || null,
             meta: payload?.meta || null,
         };
@@ -1084,6 +1204,7 @@ $(document).ready(function () {
                 if (currentSegment.length >= 2) {
                     segments.push({
                         coords: currentSegment.map((item) => [item.lat, item.lon]),
+                        points: currentSegment.slice(),
                         dashed: false,
                     });
                 }
@@ -1093,6 +1214,7 @@ $(document).ready(function () {
                         [previousPoint.lat, previousPoint.lon],
                         [point.lat, point.lon],
                     ],
+                    points: [previousPoint, point],
                     dashed: true,
                 });
 
@@ -1106,6 +1228,7 @@ $(document).ready(function () {
         if (currentSegment.length >= 2) {
             segments.push({
                 coords: currentSegment.map((item) => [item.lat, item.lon]),
+                points: currentSegment.slice(),
                 dashed: false,
             });
         }
@@ -1125,6 +1248,7 @@ $(document).ready(function () {
                     [previousPoint.lat, previousPoint.lon],
                     [currentPoint.lat, currentPoint.lon],
                 ],
+                points: [previousPoint, currentPoint],
                 dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
                 strokeColor: hasRtkHeadingData(currentPoint) ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
             });
@@ -1149,8 +1273,50 @@ $(document).ready(function () {
             );
 
             map.geoObjects.add(polyline);
+            if (typeof options.pointBalloonContent === "function" && Array.isArray(segment.points) && segment.points.length) {
+                polyline.events.add("click", (event) => {
+                    const coords = event.get("coords");
+                    const closestPoint = findClosestTrackPointByCoords(coords, segment.points);
+                    if (!closestPoint) {
+                        return;
+                    }
+                    polyline.properties.set("balloonContent", options.pointBalloonContent(closestPoint));
+                    polyline.balloon.open(coords || [closestPoint.lat, closestPoint.lon]);
+                });
+            }
             return polyline;
         });
+    }
+
+    function findClosestTrackPointByCoords(coords, points) {
+        if (!Array.isArray(coords) || coords.length < 2 || !Array.isArray(points) || !points.length) {
+            return null;
+        }
+
+        const lat = Number(coords[0]);
+        const lon = Number(coords[1]);
+        if (!Number.isFinite(lat) || !Number.isFinite(lon)) {
+            return null;
+        }
+
+        let bestPoint = null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+        points.forEach((point) => {
+            const pointLat = Number(point?.lat);
+            const pointLon = Number(point?.lon);
+            if (!Number.isFinite(pointLat) || !Number.isFinite(pointLon)) {
+                return;
+            }
+            const latDelta = pointLat - lat;
+            const lonDelta = pointLon - lon;
+            const distance = latDelta * latDelta + lonDelta * lonDelta;
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestPoint = point;
+            }
+        });
+
+        return bestPoint;
     }
 
     function drawTrackLayer(map, trackPoints, options = {}) {
@@ -1167,6 +1333,7 @@ $(document).ready(function () {
 
         objects.push(...createTrackPolylines(map, segments, {
             balloonContent: title,
+            pointBalloonContent: formatPointDetails,
             strokeColor: color,
             strokeWidth: options.strokeWidth || 4,
             strokeOpacity: options.strokeOpacity || 0.9,
@@ -1174,7 +1341,7 @@ $(document).ready(function () {
 
         const firstPoint = trackPoints[0];
         const lastPoint = trackPoints[trackPoints.length - 1];
-        const formatPointDetails = (point) => {
+        function formatPointDetails(point) {
             const rows = [
                 `${escapeHtml(title)}<br>Время: ${escapeHtml(formatDateTime(point.timestamp))}`,
                 point.weight == null || Number.isNaN(point.weight) ? null : `Вес: ${escapeHtml(formatWeight(point.weight))}`,
@@ -1186,7 +1353,7 @@ $(document).ready(function () {
             ].filter(Boolean);
 
             return rows.join("<br>");
-        };
+        }
 
         const startPlacemark = new window.ymaps.Placemark(
             [firstPoint.lat, firstPoint.lon],
@@ -1226,14 +1393,15 @@ $(document).ready(function () {
         return (Array.isArray(rows) ? rows : []).find((row) => normalizeNullableId(row?.id) === selectedId) || null;
     }
 
-    function buildIngredientTrackWindow(row, rows) {
+    function buildIngredientTrackWindow(row, rows, options = {}) {
         const ingredientId = normalizeNullableId(row?.id);
-        const endTimestampMs = parseTimestampMs(row?.endTime || row?.time);
-        if (ingredientId === null || !Number.isFinite(endTimestampMs)) {
+        const requireId = options.requireId !== false;
+        const endTimestampMs = parseTimestampMs(row?.endTime || row?.time || row?.addedAt);
+        if ((requireId && ingredientId === null) || !Number.isFinite(endTimestampMs)) {
             return null;
         }
 
-        const storedStartTimestampMs = parseTimestampMs(row?.startTime);
+        const storedStartTimestampMs = parseTimestampMs(row?.startTime || row?.startedAt);
         let startTimestampMs = Number.isFinite(storedStartTimestampMs) && storedStartTimestampMs < endTimestampMs
             ? storedStartTimestampMs
             : null;
@@ -1511,11 +1679,16 @@ $(document).ready(function () {
 
         const rows = Array.isArray(points) ? points : [];
         const actualRows = Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : [];
+        const chartIngredientRows = Array.isArray(state.telemetryPayload?.postprocessIngredients) &&
+            state.telemetryPayload.postprocessIngredients.length
+            ? state.telemetryPayload.postprocessIngredients
+            : actualRows;
 
         if (!rows.length) {
             destroyTelemetryChart();
             telemetryCanvas.classList.add("d-none");
             telemetryEmpty.classList.remove("d-none");
+            updateTelemetryZoomControls([], []);
             return;
         }
 
@@ -1523,17 +1696,24 @@ $(document).ready(function () {
         telemetryEmpty.classList.add("d-none");
         destroyTelemetryChart();
 
-        const componentDatasets = buildComponentTelemetryDatasets(rows, actualRows);
+        normalizeTelemetryZoom(rows.length);
+        const visibleRows = canAdmin ? getTelemetryZoomRows(rows) : rows;
+        updateTelemetryZoomControls(rows, visibleRows);
+
+        const componentDatasets = buildComponentTelemetryDatasets(visibleRows, chartIngredientRows);
+        const plateauDataset = canAdmin
+            ? buildPlateauTelemetryDataset(visibleRows, state.telemetryPayload?.plateaus)
+            : null;
         const componentZonePlugin = buildComponentZonePlugin();
         const context = telemetryCanvas.getContext("2d");
         telemetryChart = new Chart(context, {
             type: "line",
             data: {
-                labels: rows.map((point) => formatTime(point?.timestamp)),
+                labels: visibleRows.map((point) => formatTime(point?.timestamp)),
                 datasets: [
                     {
                         label: "Вес, кг",
-                        data: rows.map((point) => toNumber(point?.weight)),
+                        data: visibleRows.map((point) => toNumber(point?.weight)),
                         borderColor: "#4e73df",
                         backgroundColor: "rgba(78, 115, 223, 0.12)",
                         borderWidth: 2,
@@ -1543,6 +1723,7 @@ $(document).ready(function () {
                         fill: true,
                         order: 1,
                     },
+                    ...(plateauDataset ? [plateauDataset] : []),
                     ...componentDatasets,
                 ],
             },
@@ -1559,8 +1740,15 @@ $(document).ready(function () {
                     callbacks: {
                         label: function (tooltipItem, data) {
                             const dataset = data.datasets?.[tooltipItem.datasetIndex] || {};
+                            if (dataset.isPlateauDataset) {
+                                return `Плато: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                            }
+
                             if (dataset.ingredientName) {
-                                return `${dataset.ingredientName}: ${weightFormatter.format(tooltipItem.yLabel)} \u043a\u0433`;
+                                const startLabel = dataset.componentStartMs ? formatTime(new Date(dataset.componentStartMs)) : "";
+                                const endLabel = dataset.componentEndMs ? formatTime(new Date(dataset.componentEndMs)) : "";
+                                const windowLabel = startLabel && endLabel ? ` (${startLabel} - ${endLabel})` : "";
+                                return `${dataset.ingredientName}${windowLabel}: ${weightFormatter.format(tooltipItem.yLabel)} \u043a\u0433`;
                             }
 
                             return `Вес: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
@@ -1592,11 +1780,62 @@ $(document).ready(function () {
         });
     }
 
+    function buildPlateauTelemetryDataset(points, plateaus) {
+        const rows = Array.isArray(points) ? points : [];
+        const plateauRows = (Array.isArray(plateaus) ? plateaus : [])
+            .map((plateau) => ({
+                startMs: parseTimestampMs(plateau?.startTime),
+                endMs: parseTimestampMs(plateau?.endTime),
+                level: Number(plateau?.level),
+            }))
+            .filter((plateau) =>
+                Number.isFinite(plateau.startMs) &&
+                Number.isFinite(plateau.endMs) &&
+                plateau.endMs >= plateau.startMs &&
+                Number.isFinite(plateau.level)
+            );
+
+        if (!rows.length || !plateauRows.length) {
+            return null;
+        }
+
+        const data = rows.map((point) => {
+            const timestampMs = parseTimestampMs(point?.timestamp);
+            if (!Number.isFinite(timestampMs)) {
+                return null;
+            }
+
+            const plateau = plateauRows.find((item) => timestampMs >= item.startMs && timestampMs <= item.endMs);
+            return plateau ? plateau.level : null;
+        });
+
+        if (!data.some((value) => value !== null)) {
+            return null;
+        }
+
+        return {
+            label: "Плато",
+            isPlateauDataset: true,
+            data,
+            borderColor: "#111827",
+            backgroundColor: "rgba(17, 24, 39, 0.08)",
+            borderWidth: 2,
+            borderDash: [6, 4],
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            lineTension: 0,
+            steppedLine: true,
+            fill: false,
+            spanGaps: false,
+            order: 2,
+        };
+    }
+
     function buildComponentTelemetryDatasets(points, ingredientRows) {
         const rows = Array.isArray(points) ? points : [];
         const ingredients = (Array.isArray(ingredientRows) ? ingredientRows : [])
             .map((row, index) => {
-                const windowRange = buildIngredientTrackWindow(row, ingredientRows);
+                const windowRange = buildIngredientTrackWindow(row, ingredientRows, { requireId: false });
                 if (!windowRange) {
                     return null;
                 }
@@ -1605,6 +1844,7 @@ $(document).ready(function () {
                     name: getIngredientDisplayName(row?.ingredientName || row?.name),
                     startMs: windowRange.startMs,
                     endMs: windowRange.ingredientEndMs || windowRange.endMs,
+                    actualWeight: toNumber(row?.actualWeight ?? row?.fact),
                     color: INGREDIENT_CHART_COLORS[index % INGREDIENT_CHART_COLORS.length],
                 };
             })
@@ -1615,9 +1855,21 @@ $(document).ready(function () {
         }
 
         return ingredients
-            .map((ingredient) => ({
+            .map((ingredient) => {
+                const startIndex = findNearestTelemetryIndex(rows, ingredient.startMs);
+                const endIndex = findNearestTelemetryIndex(rows, ingredient.endMs);
+                if (startIndex === null || endIndex === null || endIndex < startIndex) {
+                    return null;
+                }
+
+                return {
                 label: ingredient.name,
                 ingredientName: ingredient.name,
+                componentStartMs: ingredient.startMs,
+                componentEndMs: ingredient.endMs,
+                componentStartIndex: startIndex,
+                componentEndIndex: endIndex,
+                actualWeight: ingredient.actualWeight,
                 data: rows.map((point) => {
                     const timestampMs = parseTimestampMs(point?.timestamp);
                     if (!Number.isFinite(timestampMs) || timestampMs < ingredient.startMs || timestampMs > ingredient.endMs) {
@@ -1637,8 +1889,34 @@ $(document).ready(function () {
                 fill: false,
                 spanGaps: false,
                 order: 0,
-            }))
+                };
+            })
+            .filter(Boolean)
             .filter((dataset) => dataset.data.some((value) => value !== null));
+    }
+
+    function findNearestTelemetryIndex(rows, targetMs) {
+        if (!Array.isArray(rows) || !rows.length || !Number.isFinite(targetMs)) {
+            return null;
+        }
+
+        let bestIndex = null;
+        let bestDistance = Number.POSITIVE_INFINITY;
+
+        rows.forEach((point, index) => {
+            const timestampMs = parseTimestampMs(point?.timestamp);
+            if (!Number.isFinite(timestampMs)) {
+                return;
+            }
+
+            const distance = Math.abs(timestampMs - targetMs);
+            if (distance < bestDistance) {
+                bestDistance = distance;
+                bestIndex = index;
+            }
+        });
+
+        return bestIndex;
     }
 
     function buildComponentZonePlugin() {
@@ -2490,6 +2768,7 @@ $(document).ready(function () {
 
             state.batch = batch;
             state.telemetryPayload = telemetryPayload;
+            resetTelemetryZoom(Array.isArray(telemetryPayload.hostTrack) ? telemetryPayload.hostTrack.length : 0);
             if (
                 state.selectedIngredientId !== null &&
                 !actualRows.some((row) => normalizeNullableId(row?.id) === state.selectedIngredientId)
@@ -2618,6 +2897,29 @@ $(document).ready(function () {
 
     if (deleteButton) {
         deleteButton.addEventListener("click", handleDeleteBatchClick);
+    }
+
+    if (telemetryZoomInButton) {
+        telemetryZoomInButton.addEventListener("click", () => zoomTelemetryChart(0.5));
+    }
+
+    if (telemetryZoomOutButton) {
+        telemetryZoomOutButton.addEventListener("click", () => zoomTelemetryChart(2));
+    }
+
+    if (telemetryZoomResetButton) {
+        telemetryZoomResetButton.addEventListener("click", () => {
+            resetTelemetryZoom(Array.isArray(state.telemetryPayload?.hostTrack) ? state.telemetryPayload.hostTrack.length : 0);
+            renderTelemetry(state.telemetryPayload?.hostTrack || []);
+        });
+    }
+
+    if (telemetryPanLeftButton) {
+        telemetryPanLeftButton.addEventListener("click", () => panTelemetryChart(-1));
+    }
+
+    if (telemetryPanRightButton) {
+        telemetryPanRightButton.addEventListener("click", () => panTelemetryChart(1));
     }
 
     if (canWrite) {

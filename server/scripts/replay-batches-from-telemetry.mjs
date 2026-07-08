@@ -915,12 +915,13 @@ async function main() {
           case 'FORCE_CLOSE_BATCH':
             if (activeBatch) {
               const closedBatchId = activeBatch.id
+              const actionEndTime = action.endTime ? new Date(action.endTime) : packet.timestamp
               unloadGroupEvidenceByBatch.delete(closedBatchId)
               stickyViolationBatchIds.add(closedBatchId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: {
-                  endTime: packet.timestamp,
+                  endTime: Number.isNaN(actionEndTime.getTime()) ? packet.timestamp : actionEndTime,
                   endWeight: roundWeight(action.closeWeight ?? packet.weight),
                   hasViolations: true
                 }

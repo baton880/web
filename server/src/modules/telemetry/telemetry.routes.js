@@ -730,12 +730,13 @@ router.post('/', async (req, res) => {
           case 'FORCE_CLOSE_BATCH':
             if (activeBatch) {
               const closedBatchId = activeBatch.id
+              const actionEndTime = action.endTime ? new Date(action.endTime) : telemetry.timestamp
               unloadGroupEvidenceByBatch.delete(closedBatchId)
               stickyViolationBatchIds.add(closedBatchId)
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: {
-                  endTime: telemetry.timestamp,
+                  endTime: Number.isNaN(actionEndTime.getTime()) ? telemetry.timestamp : actionEndTime,
                   endWeight: roundWeight(action.closeWeight ?? telemetry.weight),
                   hasViolations: true
                 }

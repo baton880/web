@@ -191,6 +191,28 @@
                                     <h6 class="m-0 font-weight-bold text-primary">График веса от времени</h6>
                                 </div>
                                 <div class="card-body">
+                                    <div id="batchTelemetryZoomControls" class="d-none mb-3" data-requires-admin>
+                                        <div class="d-flex flex-wrap align-items-center" style="gap: 8px;">
+                                            <div class="btn-group btn-group-sm" role="group" aria-label="Масштаб графика">
+                                                <button id="batchTelemetryZoomOut" class="btn btn-outline-primary" type="button" title="Отдалить график">
+                                                    <i class="fas fa-search-minus"></i>
+                                                </button>
+                                                <button id="batchTelemetryPanLeft" class="btn btn-outline-primary" type="button" title="Сдвинуть график влево">
+                                                    <i class="fas fa-arrow-left"></i>
+                                                </button>
+                                                <button id="batchTelemetryPanRight" class="btn btn-outline-primary" type="button" title="Сдвинуть график вправо">
+                                                    <i class="fas fa-arrow-right"></i>
+                                                </button>
+                                                <button id="batchTelemetryZoomIn" class="btn btn-outline-primary" type="button" title="Приблизить график">
+                                                    <i class="fas fa-search-plus"></i>
+                                                </button>
+                                                <button id="batchTelemetryZoomReset" class="btn btn-outline-secondary" type="button" title="Сбросить масштаб">
+                                                    <i class="fas fa-expand-arrows-alt"></i>
+                                                </button>
+                                            </div>
+                                            <span id="batchTelemetryZoomMeta" class="small text-muted">Весь график</span>
+                                        </div>
+                                    </div>
                                     <div class="batch-detail-chart-wrap">
                                         <canvas id="batchTelemetryChart" aria-label="График веса замеса" role="img"></canvas>
                                         <div id="batchTelemetryEmpty" class="batch-detail-empty d-none">Нет телеметрии для этого замеса</div>
@@ -346,7 +368,7 @@
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
     <script src="vendor/chart.js/Chart.min.js"></script>
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
-    <script src="js/batch-details.js?v=20260707a"></script>
+    <script src="js/batch-details.js?v=20260708f"></script>
 
 </body>
 

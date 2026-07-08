@@ -307,6 +307,7 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
   }))
 
   return loadEvents.map((event, index) => {
+    const existingName = findExistingIngredientName(batch, event, usedExistingIds)
     const processorName = loadingZones.length
       ? resolveIngredientWithProcessor({
         batch,
@@ -320,10 +321,7 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
         usedExpectedKeys
       })
       : null
-    const existingName = processorName && normalizeIngredientName(processorName) !== 'unknown'
-      ? null
-      : findExistingIngredientName(batch, event, usedExistingIds)
-    const ingredientName = processorName || existingName || fallbackExpectedIngredientName(expectedIngredients, usedExpectedKeys) || 'Unknown'
+    const ingredientName = existingName || processorName || fallbackExpectedIngredientName(expectedIngredients, usedExpectedKeys) || 'Unknown'
     const ingredientKey = normalizeIngredientName(ingredientName)
     if (ingredientKey) usedExpectedKeys.add(ingredientKey)
 

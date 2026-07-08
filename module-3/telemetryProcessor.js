@@ -2058,6 +2058,7 @@ export class TelemetryProcessor {
     // Защита от недовыгрузки
     if (
       !isMotionSuppressed &&
+      !suppressLoading &&
       state.isUnloading &&
       Number.isFinite(state.lastUnloadWeight) &&
       currentWeight > state.lastUnloadWeight + thresholds.unloadWeightBufferKg
@@ -2090,6 +2091,7 @@ export class TelemetryProcessor {
 
       result.dbActions.push({
         type: 'FORCE_CLOSE_BATCH',
+        endTime: state.unloadMinTimeMs !== null ? new Date(state.unloadMinTimeMs).toISOString() : null,
         closeWeight: roundNonNegativeWeight(closeWeight),
         nextStartWeight: roundNonNegativeWeight(closeWeight)
       });

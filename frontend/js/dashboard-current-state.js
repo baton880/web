@@ -218,6 +218,25 @@
         return `${countLabel}${updatedLabel}`;
     }
 
+    function hideWarningsSectionForNonAdmin() {
+        if (CAN_VIEW_WARNING_SECTION) {
+            return;
+        }
+
+        const sectionElement = document.getElementById("dashboardWarningsSection");
+        const titleElement = document.getElementById("dashboardWarningsHeading");
+        const metaElement = document.getElementById("dashboardWarningsMeta");
+        const listElement = document.getElementById("dashboardWarningsList");
+
+        if (sectionElement) {
+            sectionElement.hidden = true;
+            sectionElement.classList.add("d-none");
+        }
+        if (titleElement) titleElement.textContent = "";
+        if (metaElement) metaElement.textContent = "";
+        if (listElement) listElement.innerHTML = "";
+    }
+
     function renderWarnings(data) {
         const sectionElement = document.getElementById("dashboardWarningsSection");
         const titleElement = document.getElementById("dashboardWarningsHeading");
@@ -225,9 +244,7 @@
         const listElement = document.getElementById("dashboardWarningsList");
 
         if (!CAN_VIEW_WARNING_SECTION) {
-            if (sectionElement) {
-                sectionElement.hidden = true;
-            }
+            hideWarningsSectionForNonAdmin();
             return;
         }
 
@@ -239,6 +256,8 @@
 
         titleElement.textContent = WARNING_SECTION_TITLE;
         metaElement.textContent = getWarningsMetaText(items);
+        sectionElement.hidden = false;
+        sectionElement.classList.remove("d-none");
 
         if (!items.length) {
             listElement.innerHTML = `<div class="dashboard-warning-empty">${escapeHtml(WARNING_EMPTY_TEXT)}</div>`;
@@ -538,7 +557,7 @@
             const [hostResponse, rtkResponse, warningsResponse] = await Promise.all([
                 fetch(getLatestApiUrl(), { headers: getHeaders() }),
                 fetch(getRtkLatestApiUrl(), { headers: getHeaders() }).catch(() => null),
-                fetchWarningsResponse(),
+                CAN_VIEW_WARNING_SECTION ? fetchWarningsResponse() : Promise.resolve(null),
             ]);
 
             if (!hostResponse.ok) {

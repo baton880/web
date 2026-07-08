@@ -533,7 +533,7 @@ router.get('/:id', authenticate, requireReadAccess, async (req, res) => {
 
         const telemetrySettings = await getTelemetrySettings(prisma);
         const postprocess = existingBatch.endTime
-            ? await postprocessCompletedBatch(prisma, batchId, telemetrySettings, { persist: true })
+            ? await postprocessCompletedBatch(prisma, batchId, telemetrySettings, { persist: false })
             : { status: 'in_progress', reason: 'batch_in_progress' };
         const detailedBatch = await getDetailedBatchById(batchId, prisma, { telemetrySettings, postprocess });
         if (!detailedBatch) {
@@ -578,7 +578,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
         const hostLookaheadSeconds = parsePositiveInteger(req.query.hostLookaheadSeconds, 180);
         const telemetrySettings = await getTelemetrySettings(prisma);
         const postprocess = batch.endTime
-            ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, { persist: true })
+            ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, { persist: false })
             : { status: 'in_progress', reason: 'batch_in_progress' };
 
         if (postprocess.status === 'complete') {
@@ -597,6 +597,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
                 hostContextTrack: normalizedHostTrack,
                 loaderTrack,
                 postprocess: postprocessMeta,
+                postprocessIngredients: postprocess.ingredients || [],
                 events: postprocess.analysis?.includedEvents || [],
                 plateaus: postprocess.analysis?.plateaus || [],
                 meta: {
