@@ -14,8 +14,8 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260510a" rel="stylesheet">
-    <link href="css/responsive.css" rel="stylesheet">
+    <link href="css/custom.css?v=20260709a" rel="stylesheet">
+    <link href="css/responsive.css?v=20260709a" rel="stylesheet">
     <script src="js/app-auth.js?v=20260419a"></script>
 
 </head>
@@ -260,7 +260,11 @@
                             </div>
                         </div>
                         <div class="card-body">
-                            <div class="dashboard-map-wrap batch-track-map-wrap">
+                            <div id="batchTrackMapWrap" class="dashboard-map-wrap batch-track-map-wrap">
+                                <button id="batchTrackFullscreenButton" type="button" class="batch-track-fullscreen-button" aria-pressed="false" title="Открыть карту на весь экран">
+                                    <i class="fas fa-expand-arrows-alt mr-1"></i>
+                                    <span>На весь экран</span>
+                                </button>
                                 <div id="batchTrackMap" class="dashboard-map batch-track-map"></div>
                                 <div id="batchTrackEmpty" class="batch-detail-empty batch-track-empty d-none">Нет координат для отображения трека</div>
                             </div>
@@ -368,7 +372,7 @@
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
     <script src="vendor/chart.js/Chart.min.js"></script>
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
-    <script src="js/batch-details.js?v=20260708g"></script>
+    <script src="js/batch-details.js?v=20260709a"></script>
 
 </body>
 

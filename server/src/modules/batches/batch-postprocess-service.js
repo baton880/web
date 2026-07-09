@@ -133,6 +133,47 @@ function buildCacheKey(batch, telemetryRows) {
   ].join(':')
 }
 
+function isInvalidWeightPoint(point) {
+  return point?.weightValid === false || point?.weightValid === 0
+}
+
+function buildInvalidWeightMarkers(telemetryRows = []) {
+  return (Array.isArray(telemetryRows) ? telemetryRows : [])
+    .filter(isInvalidWeightPoint)
+    .map((row) => ({
+      id: row.id ?? null,
+      timestamp: row.timestamp,
+      receivedAt: row.receivedAt || null,
+      weight: 0,
+      rawWeight: finiteNumberOrNull(row.rawWeight),
+      telemetryWeight: finiteNumberOrNull(row.weight),
+      weightValid: false,
+      invalidWeight: true,
+      speedKmh: finiteNumberOrNull(row.speedKmh),
+      lat: finiteNumberOrNull(row.lat),
+      lon: finiteNumberOrNull(row.lon)
+    }))
+    .filter((point) => Number.isFinite(timestampMs(point.timestamp)))
+}
+
+function compareHostTrackPoints(left, right) {
+  const timeDiff = (timestampMs(left?.timestamp) ?? 0) - (timestampMs(right?.timestamp) ?? 0)
+  if (timeDiff !== 0) return timeDiff
+
+  if (Boolean(left?.invalidWeight) !== Boolean(right?.invalidWeight)) {
+    return left?.invalidWeight ? 1 : -1
+  }
+
+  return Number(left?.id || 0) - Number(right?.id || 0)
+}
+
+function buildGraphHostTrack(analysis, telemetryRows = []) {
+  return [
+    ...buildPostprocessedHostTrack(analysis),
+    ...buildInvalidWeightMarkers(telemetryRows)
+  ].sort(compareHostTrackPoints)
+}
+
 function postprocessOptionsFromSettings(settings = {}) {
   const factor = Number(settings?.weightCalibrationFactor)
   if (Number.isFinite(factor) && factor > 0 && Math.abs(factor - 1) > 0.000001) {
@@ -397,7 +438,7 @@ export async function buildBatchPostprocess(prismaClient, batch, telemetrySettin
     reason: null,
     analysis,
     ingredients,
-    hostTrack: buildPostprocessedHostTrack(analysis),
+    hostTrack: buildGraphHostTrack(analysis, telemetryRows),
     generatedAt: new Date()
   }
   POSTPROCESS_CACHE.set(batch.id, { cacheKey, result, persisted: false })

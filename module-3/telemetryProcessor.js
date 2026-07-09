@@ -2087,21 +2087,21 @@ export class TelemetryProcessor {
         recoveredLoadingWeight > thresholds.batchStartThresholdKg
       );
 
-      if (closeWeight > thresholds.leftoverThresholdKg) {
-        result.dbActions.push({
-          type: 'LEFTOVER_VIOLATION',
-          leftoverWeight: roundNonNegativeWeight(closeWeight),
-        });
-      }
-
-      result.dbActions.push({
-        type: 'FORCE_CLOSE_BATCH',
-        endTime: state.unloadMinTimeMs !== null ? new Date(state.unloadMinTimeMs).toISOString() : null,
-        closeWeight: roundNonNegativeWeight(closeWeight),
-        nextStartWeight: roundNonNegativeWeight(closeWeight)
-      });
-
       if (shouldRecordRecoveredLoading) {
+        if (closeWeight > thresholds.leftoverThresholdKg) {
+          result.dbActions.push({
+            type: 'LEFTOVER_VIOLATION',
+            leftoverWeight: roundNonNegativeWeight(closeWeight),
+          });
+        }
+
+        result.dbActions.push({
+          type: 'FORCE_CLOSE_BATCH',
+          endTime: state.unloadMinTimeMs !== null ? new Date(state.unloadMinTimeMs).toISOString() : null,
+          closeWeight: roundNonNegativeWeight(closeWeight),
+          nextStartWeight: roundNonNegativeWeight(closeWeight)
+        });
+
         result.dbActions.push({
           type: 'ADD_INGREDIENT',
           ingredientName: recoveredLoadingIngredientName,
@@ -2113,28 +2113,26 @@ export class TelemetryProcessor {
           endLat: Number.isFinite(Number(lat)) ? Number(lat) : null,
           endLon: Number.isFinite(Number(lon)) ? Number(lon) : null
         });
-      }
 
-      this._setZoneBaseline(
-        state,
-        shouldRecordRecoveredLoading ? currentWeight : closeWeight,
-        packetTimeMs,
-        lat,
-        lon
-      );
-      state.isUnloading = false;
-      state.isMixing = true;
-      state.isBatchStarted = true;
-      state.peakWeight = currentWeight;
-      state.loadedIngredientKeys = [];
-      if (shouldRecordRecoveredLoading) {
+        this._setZoneBaseline(
+          state,
+          currentWeight,
+          packetTimeMs,
+          lat,
+          lon
+        );
+        state.isUnloading = false;
+        state.isMixing = true;
+        state.isBatchStarted = true;
+        state.peakWeight = currentWeight;
+        state.loadedIngredientKeys = [];
         state.lastIngredientName = recoveredLoadingIngredientName;
         const recoveredIngredientKey = normalizeIngredientName(recoveredLoadingIngredientName);
         if (recoveredIngredientKey) {
           state.loadedIngredientKeys.push(recoveredIngredientKey);
         }
+        this._clearUnloadTracking(state);
       }
-      this._clearUnloadTracking(state);
     }
 
     // Детекция выгрузки

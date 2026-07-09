@@ -15,6 +15,11 @@ const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
 const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
+const PRELUDE_BATCH_MAX_DURATION_MS = 3 * 60 * 1000
+const PRELUDE_BATCH_MAX_GAP_MS = 4 * 60 * 1000
+const PRELUDE_BATCH_MAX_INGREDIENTS = 1
+const PRELUDE_BATCH_MAX_WEIGHT_BUFFER_KG = 30
+const BATCH_START_INGREDIENT_LOOKBACK_MS = 10 * 60 * 1000
 const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
 )
@@ -34,6 +39,12 @@ function finiteNumberOrNull(value) {
   if (value === null || value === undefined || value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
+}
+
+function timestampMs(value) {
+  if (!value) return Number.NaN
+  const parsed = value instanceof Date ? value.getTime() : new Date(value).getTime()
+  return Number.isFinite(parsed) ? parsed : Number.NaN
 }
 
 function normalizeZoneType(value) {
@@ -543,6 +554,183 @@ async function mergeEmptyCarryoverBatches(batchIdsToRecalculate) {
   return merged
 }
 
+function batchIngredientTotal(batch) {
+  return (batch.actualIngredients || []).reduce((sum, ingredient) => {
+    const weight = Number(ingredient.actualWeight || 0)
+    return sum + (Number.isFinite(weight) ? Math.max(0, weight) : 0)
+  }, 0)
+}
+
+function earliestIngredientDate(batch) {
+  let earliest = null
+  for (const ingredient of (batch.actualIngredients || [])) {
+    const candidates = [ingredient.startedAt, ingredient.addedAt]
+    for (const candidate of candidates) {
+      const candidateMs = timestampMs(candidate)
+      if (!Number.isFinite(candidateMs)) continue
+      if (!earliest || candidateMs < earliest.getTime()) {
+        earliest = new Date(candidateMs)
+      }
+    }
+  }
+  return earliest
+}
+
+function ingredientMatchesBatchPlan(ingredientName, batch) {
+  const normalized = normalizeIngredientName(ingredientName)
+  if (!normalized) return false
+  const planIngredients = batch?.ration?.ingredients || batch?.group?.ration?.ingredients || []
+  return planIngredients.some((item) => normalizeIngredientName(item?.name) === normalized)
+}
+
+function shouldMergePreludeBatch(previous, batch, settings = {}) {
+  if (!previous || !batch) return false
+  if (previous.deviceId !== batch.deviceId) return false
+
+  const previousIngredients = previous.actualIngredients || []
+  const nextIngredients = batch.actualIngredients || []
+  if (previousIngredients.length < 1 || previousIngredients.length > PRELUDE_BATCH_MAX_INGREDIENTS) return false
+  if (nextIngredients.length < 1) return false
+
+  const previousStartMs = timestampMs(previous.startTime)
+  const previousEndMs = timestampMs(previous.endTime)
+  const batchStartMs = timestampMs(batch.startTime)
+  if (!Number.isFinite(previousStartMs) || !Number.isFinite(previousEndMs) || !Number.isFinite(batchStartMs)) return false
+
+  const durationMs = previousEndMs - previousStartMs
+  const gapMs = batchStartMs - previousEndMs
+  if (durationMs < 0 || durationMs > PRELUDE_BATCH_MAX_DURATION_MS) return false
+  if (gapMs < 0 || gapMs > PRELUDE_BATCH_MAX_GAP_MS) return false
+
+  const emptyThresholdKg = Number(settings.emptyVehicleThresholdKg) > 0
+    ? Number(settings.emptyVehicleThresholdKg)
+    : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
+  const maxPreludeWeightKg = emptyThresholdKg + PRELUDE_BATCH_MAX_WEIGHT_BUFFER_KG
+  const totalWeight = batchIngredientTotal(previous)
+  if (totalWeight <= 0 || totalWeight > maxPreludeWeightKg) return false
+
+  const previousEndWeight = roundNonNegativeWeight(previous.endWeight ?? 0)
+  if (previousEndWeight > emptyThresholdKg) return false
+
+  return previousIngredients.every((ingredient) => (
+    ingredientMatchesBatchPlan(ingredient.ingredientName, batch)
+  ))
+}
+
+async function mergeShortPreludeBatches(batchIdsToRecalculate, settings = {}) {
+  const batches = await prisma.batch.findMany({
+    orderBy: [
+      { deviceId: 'asc' },
+      { startTime: 'asc' },
+      { id: 'asc' }
+    ],
+    include: {
+      group: {
+        include: {
+          ration: {
+            include: { ingredients: true }
+          }
+        }
+      },
+      ration: {
+        include: { ingredients: true }
+      },
+      actualIngredients: {
+        orderBy: [
+          { addedAt: 'asc' },
+          { id: 'asc' }
+        ]
+      }
+    }
+  })
+
+  let merged = 0
+  let previous = null
+
+  for (const batch of batches) {
+    if (!shouldMergePreludeBatch(previous, batch, settings)) {
+      previous = batch
+      continue
+    }
+
+    const mergedStart = earliestIngredientDate(previous) || previous.startTime
+    const data = {
+      startTime: mergedStart,
+      startWeight: roundWeight(previous.startWeight ?? batch.startWeight ?? 0)
+    }
+
+    await prisma.violation.deleteMany({
+      where: { batchId: { in: [previous.id, batch.id] } }
+    })
+    await prisma.batchIngredient.updateMany({
+      where: { batchId: previous.id },
+      data: { batchId: batch.id }
+    })
+    const updatedBatch = await prisma.batch.update({
+      where: { id: batch.id },
+      data,
+      include: {
+        group: {
+          include: {
+            ration: {
+              include: { ingredients: true }
+            }
+          }
+        },
+        ration: {
+          include: { ingredients: true }
+        },
+        actualIngredients: {
+          orderBy: [
+            { addedAt: 'asc' },
+            { id: 'asc' }
+          ]
+        }
+      }
+    })
+    await prisma.batch.delete({ where: { id: previous.id } })
+    batchIdsToRecalculate.delete(previous.id)
+    batchIdsToRecalculate.add(updatedBatch.id)
+    previous = updatedBatch
+    merged += 1
+  }
+
+  return merged
+}
+
+async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
+  const batches = await prisma.batch.findMany({
+    include: {
+      actualIngredients: {
+        select: {
+          startedAt: true,
+          addedAt: true
+        }
+      }
+    }
+  })
+
+  let aligned = 0
+  for (const batch of batches) {
+    const batchStartMs = timestampMs(batch.startTime)
+    const ingredientStart = earliestIngredientDate(batch)
+    const ingredientStartMs = timestampMs(ingredientStart)
+    if (!Number.isFinite(batchStartMs) || !Number.isFinite(ingredientStartMs)) continue
+
+    const lookbackMs = batchStartMs - ingredientStartMs
+    if (lookbackMs <= 1000 || lookbackMs > BATCH_START_INGREDIENT_LOOKBACK_MS) continue
+
+    await prisma.batch.update({
+      where: { id: batch.id },
+      data: { startTime: ingredientStart }
+    })
+    batchIdsToRecalculate.add(batch.id)
+    aligned += 1
+  }
+
+  return aligned
+}
+
 async function main() {
   telemetryProcessor.clearStates()
 
@@ -727,7 +915,9 @@ async function main() {
         batchIdsToRecalculate.add(activeBatch.id)
       }
 
-      for (const action of (result.dbActions || [])) {
+      const dbActions = result.dbActions || []
+      for (let actionIndex = 0; actionIndex < dbActions.length; actionIndex += 1) {
+        const action = dbActions[actionIndex]
         switch (action.type) {
           case 'START_BATCH':
             if (!activeBatch) {
@@ -930,21 +1120,26 @@ async function main() {
               stats.forceCloses += 1
             }
 
-            activeBatch = await prisma.batch.create({
-              data: {
-                deviceId,
-                startTime: packet.timestamp,
-                startWeight: roundWeight(action.nextStartWeight ?? packet.weight),
-                hasViolations: false,
-                ...(resolvedGroup ? {
-                  groupId: resolvedGroup.id,
-                  ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
-                } : {})
-              }
-            })
-            activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
-            activeBatchByDevice.set(deviceId, activeBatch)
-            stats.starts += 1
+            if (dbActions.slice(actionIndex + 1).some((item) => item.type === 'ADD_INGREDIENT')) {
+              activeBatch = await prisma.batch.create({
+                data: {
+                  deviceId,
+                  startTime: packet.timestamp,
+                  startWeight: roundWeight(action.nextStartWeight ?? packet.weight),
+                  hasViolations: false,
+                  ...(resolvedGroup ? {
+                    groupId: resolvedGroup.id,
+                    ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
+                  } : {})
+                }
+              })
+              activeBatch.expectedIngredients = resolveExpectedIngredientsFromGroup(resolvedGroup)
+              activeBatchByDevice.set(deviceId, activeBatch)
+              stats.starts += 1
+            } else {
+              activeBatch = null
+              activeBatchByDevice.delete(deviceId)
+            }
             break
         }
       }
@@ -1002,6 +1197,14 @@ async function main() {
   const mergedCarryovers = await mergeEmptyCarryoverBatches(batchIdsToRecalculate)
   if (mergedCarryovers > 0) {
     console.log(`Merged empty carryover batches: ${mergedCarryovers}`)
+  }
+  const mergedPreludes = await mergeShortPreludeBatches(batchIdsToRecalculate, telemetrySettings)
+  if (mergedPreludes > 0) {
+    console.log(`Merged short prelude batches: ${mergedPreludes}`)
+  }
+  const alignedStarts = await alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate)
+  if (alignedStarts > 0) {
+    console.log(`Aligned batch starts with first ingredient: ${alignedStarts}`)
   }
 
   console.log(`Recalculating violations for ${batchIdsToRecalculate.size} batches...`)

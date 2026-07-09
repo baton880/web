@@ -553,6 +553,29 @@
         font-size: 0.86rem;
     }
 
+    #batchPlanFactTableBody td,
+    #batchIngredientsTableBody td {
+        padding: 0.68rem 0.62rem;
+        font-size: 0.92rem;
+        line-height: 1.35;
+    }
+
+    #batchPlanFactTableBody td:first-child,
+    #batchIngredientsTableBody td:nth-child(2) {
+        font-size: 0.98rem;
+        font-weight: 800;
+        color: #243328;
+    }
+
+    #batchPlanFactTableBody td:nth-child(2),
+    #batchPlanFactTableBody td:nth-child(3),
+    #batchIngredientsTableBody td:nth-child(3),
+    #batchIngredientsTableBody td:nth-child(4) {
+        font-size: 0.96rem;
+        font-weight: 800;
+        white-space: nowrap;
+    }
+
     #map,
     #batchTrackMap,
     .dashboard-map,
@@ -576,6 +599,26 @@
 
     .map-action-button__label {
         display: none;
+    }
+
+    .batch-track-fullscreen-button {
+        top: 0.55rem;
+        right: 0.55rem;
+        min-height: 2.35rem;
+        padding: 0.42rem 0.7rem;
+        font-size: 0.78rem;
+    }
+
+    .batch-track-map-wrap--fullscreen .batch-track-fullscreen-button {
+        top: calc(env(safe-area-inset-top, 0px) + 0.6rem);
+        right: calc(env(safe-area-inset-right, 0px) + 0.6rem);
+    }
+
+    .batch-track-map-wrap--fullscreen,
+    .batch-track-map-wrap--fullscreen #batchTrackMap,
+    .batch-track-map-wrap--fullscreen .batch-track-map {
+        height: 100dvh !important;
+        min-height: 100dvh !important;
     }
 
     .map-marker-legend {

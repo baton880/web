@@ -299,6 +299,8 @@ export function hasUsableRawWeight(rows = []) {
 export function buildFilteredWeightPoints(rows = [], rawOptions = {}) {
   const opts = resolveWeightStepOptions(rawOptions)
   const points = normalizeTelemetryRows(rows, opts)
+    .filter((point) => !isExplicitlyInvalidWeight(point))
+    .filter((point) => Number.isFinite(point.raw) || Number.isFinite(point.weight))
 
   const cutoffKg = Number(opts.rawCutoffKg)
   const cutoffDropKg = Number(opts.rawCutoffDropKg)

@@ -30,9 +30,11 @@ $(document).ready(function () {
     const telemetryPanLeftButton = document.getElementById("batchTelemetryPanLeft");
     const telemetryPanRightButton = document.getElementById("batchTelemetryPanRight");
     const trackMapElement = document.getElementById("batchTrackMap");
+    const trackMapWrap = document.getElementById("batchTrackMapWrap") || trackMapElement?.closest(".batch-track-map-wrap");
     const trackEmpty = document.getElementById("batchTrackEmpty");
     const trackMeta = document.getElementById("batchTrackMeta");
     const trackResetButton = document.getElementById("batchTrackResetButton");
+    const trackFullscreenButton = document.getElementById("batchTrackFullscreenButton");
     const editCard = document.getElementById("batchEditCard");
     const editMeta = document.getElementById("batchEditMeta");
     const editState = document.getElementById("batchEditState");
@@ -127,6 +129,7 @@ $(document).ready(function () {
     let batchTrackMap = null;
     let ymapsReadyPromise = null;
     let batchTrackZoneObjects = [];
+    let trackMapFitTimer = null;
     const DEFAULT_ZONE_RADIUS = 20;
     const DEFAULT_SQUARE_SIDE = 40;
     const ZONE_TYPE_BARN = "BARN";
@@ -1079,6 +1082,63 @@ $(document).ready(function () {
         return batchTrackMap;
     }
 
+    function scheduleBatchTrackMapFit() {
+        window.clearTimeout(trackMapFitTimer);
+        trackMapFitTimer = window.setTimeout(() => {
+            if (batchTrackMap?.container && typeof batchTrackMap.container.fitToViewport === "function") {
+                batchTrackMap.container.fitToViewport();
+            }
+        }, 160);
+    }
+
+    function isBatchTrackFullscreen() {
+        return Boolean(trackMapWrap?.classList.contains("batch-track-map-wrap--fullscreen"));
+    }
+
+    function syncBatchTrackFullscreenButton() {
+        if (!trackFullscreenButton) {
+            return;
+        }
+
+        const isFullscreen = isBatchTrackFullscreen();
+        const icon = trackFullscreenButton.querySelector("i");
+        const label = trackFullscreenButton.querySelector("span");
+        trackFullscreenButton.classList.toggle("is-active", isFullscreen);
+        trackFullscreenButton.setAttribute("aria-pressed", String(isFullscreen));
+        trackFullscreenButton.setAttribute(
+            "title",
+            isFullscreen ? "Закрыть полноэкранную карту" : "Открыть карту на весь экран"
+        );
+
+        if (icon) {
+            icon.className = isFullscreen ? "fas fa-times mr-1" : "fas fa-expand-arrows-alt mr-1";
+        }
+        if (label) {
+            label.textContent = isFullscreen ? "Закрыть" : "На весь экран";
+        }
+    }
+
+    function setBatchTrackFullscreen(nextState) {
+        if (!trackMapWrap) {
+            return;
+        }
+
+        trackMapWrap.classList.toggle("batch-track-map-wrap--fullscreen", Boolean(nextState));
+        document.body.classList.toggle("batch-track-map-fullscreen", Boolean(nextState));
+        syncBatchTrackFullscreenButton();
+        scheduleBatchTrackMapFit();
+    }
+
+    function handleBatchTrackFullscreenClick() {
+        setBatchTrackFullscreen(!isBatchTrackFullscreen());
+    }
+
+    function handleBatchTrackFullscreenKeydown(event) {
+        if (event.key === "Escape" && isBatchTrackFullscreen()) {
+            setBatchTrackFullscreen(false);
+        }
+    }
+
     function clearBatchTrackZones(map) {
         if (!map) {
             return;
@@ -1696,10 +1756,9 @@ $(document).ready(function () {
 
         const rows = Array.isArray(points) ? points : [];
         const actualRows = Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : [];
-        const chartIngredientRows = Array.isArray(state.telemetryPayload?.postprocessIngredients) &&
-            state.telemetryPayload.postprocessIngredients.length
-            ? state.telemetryPayload.postprocessIngredients
-            : actualRows;
+        const chartIngredientRows = actualRows.length
+            ? actualRows
+            : (Array.isArray(state.telemetryPayload?.postprocessIngredients) ? state.telemetryPayload.postprocessIngredients : []);
 
         if (!rows.length) {
             destroyTelemetryChart();
@@ -1722,6 +1781,8 @@ $(document).ready(function () {
             ? buildPlateauTelemetryDataset(visibleRows, state.telemetryPayload?.plateaus)
             : null;
         const componentZonePlugin = buildComponentZonePlugin();
+        const isInvalidWeightPoint = (point) =>
+            point?.invalidWeight === true || point?.weightValid === false || point?.weightValid === 0;
         const context = telemetryCanvas.getContext("2d");
         telemetryChart = new Chart(context, {
             type: "line",
@@ -1730,7 +1791,7 @@ $(document).ready(function () {
                 datasets: [
                     {
                         label: "Вес, кг",
-                        data: visibleRows.map((point) => toNumber(point?.weight)),
+                        data: visibleRows.map((point) => isInvalidWeightPoint(point) ? null : toNumber(point?.weight)),
                         borderColor: "#4e73df",
                         backgroundColor: "rgba(78, 115, 223, 0.12)",
                         borderWidth: 2,
@@ -1738,6 +1799,20 @@ $(document).ready(function () {
                         pointHoverRadius: 4,
                         lineTension: 0.18,
                         fill: true,
+                        order: 1,
+                    },
+                    {
+                        label: "weightValid=false",
+                        invalidWeightDataset: true,
+                        data: visibleRows.map((point) => isInvalidWeightPoint(point) ? 0 : null),
+                        borderColor: "#e74a3b",
+                        backgroundColor: "rgba(231, 74, 59, 0.14)",
+                        borderWidth: 2,
+                        pointRadius: visibleRows.map((point) => isInvalidWeightPoint(point) ? 2 : 0),
+                        pointHoverRadius: 5,
+                        lineTension: 0,
+                        fill: false,
+                        spanGaps: false,
                         order: 1,
                     },
                     ...(plateauDataset ? [plateauDataset] : []),
@@ -1757,6 +1832,9 @@ $(document).ready(function () {
                     callbacks: {
                         label: function (tooltipItem, data) {
                             const dataset = data.datasets?.[tooltipItem.datasetIndex] || {};
+                            if (dataset.invalidWeightDataset) {
+                                return "weightValid=false";
+                            }
                             if (dataset.isPlateauDataset) {
                                 return `Плато: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
                             }
@@ -1765,7 +1843,11 @@ $(document).ready(function () {
                                 const startLabel = dataset.componentStartMs ? formatTime(new Date(dataset.componentStartMs)) : "";
                                 const endLabel = dataset.componentEndMs ? formatTime(new Date(dataset.componentEndMs)) : "";
                                 const windowLabel = startLabel && endLabel ? ` (${startLabel} - ${endLabel})` : "";
-                                return `${dataset.ingredientName}${windowLabel}: ${weightFormatter.format(tooltipItem.yLabel)} \u043a\u0433`;
+                                const actualWeight = Number(dataset.actualWeight);
+                                const weightLabel = Number.isFinite(actualWeight)
+                                    ? weightFormatter.format(actualWeight)
+                                    : weightFormatter.format(tooltipItem.yLabel);
+                                return `${dataset.ingredientName}${windowLabel}: ${weightLabel} \u043a\u0433`;
                             }
 
                             return `Вес: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
@@ -2907,6 +2989,15 @@ $(document).ready(function () {
     if (trackResetButton) {
         trackResetButton.addEventListener("click", handleTrackResetClick);
     }
+
+    if (trackFullscreenButton) {
+        trackFullscreenButton.addEventListener("click", handleBatchTrackFullscreenClick);
+        syncBatchTrackFullscreenButton();
+    }
+
+    document.addEventListener("keydown", handleBatchTrackFullscreenKeydown);
+    window.addEventListener("resize", scheduleBatchTrackMapFit);
+    window.addEventListener("orientationchange", scheduleBatchTrackMapFit);
 
     if (stopButton) {
         stopButton.addEventListener("click", handleStopBatchClick);

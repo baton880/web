@@ -543,7 +543,9 @@ router.post('/', async (req, res) => {
         batchIdsToRecalculate.add(activeBatch.id)
       }
 
-      for (const action of (result.dbActions || [])) {
+      const dbActions = result.dbActions || []
+      for (let actionIndex = 0; actionIndex < dbActions.length; actionIndex += 1) {
+        const action = dbActions[actionIndex]
         switch (action.type) {
           case 'START_BATCH':
             if (!activeBatch) {
@@ -746,18 +748,22 @@ router.post('/', async (req, res) => {
               console.log(`Замес ${activeBatch.id} принудительно закрыт (недовыгрузка)!`)
             }
 
-            activeBatch = await tx.batch.create({
-              data: {
-                deviceId,
-                startTime: telemetry.timestamp,
-                startWeight: roundWeight(action.nextStartWeight ?? telemetry.weight),
-                hasViolations: false,
-                ...(resolvedGroup ? {
-                  groupId: resolvedGroup.id,
-                  ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
-                } : {})
-              }
-            })
+            if (dbActions.slice(actionIndex + 1).some((item) => item.type === 'ADD_INGREDIENT')) {
+              activeBatch = await tx.batch.create({
+                data: {
+                  deviceId,
+                  startTime: telemetry.timestamp,
+                  startWeight: roundWeight(action.nextStartWeight ?? telemetry.weight),
+                  hasViolations: false,
+                  ...(resolvedGroup ? {
+                    groupId: resolvedGroup.id,
+                    ...(resolvedGroup.rationId ? { rationId: resolvedGroup.rationId } : {})
+                  } : {})
+                }
+              })
+            } else {
+              activeBatch = null
+            }
             break
         }
       }

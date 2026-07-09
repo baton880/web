@@ -452,6 +452,15 @@ function normalizeBatchTrackWeights(batch, hostTrack = []) {
 
     const serializePoint = (point, weightValue) => {
         const rawWeight = Number(point?.weight);
+        if (isExplicitlyInvalidWeight(point)) {
+            return {
+                ...point,
+                weight: 0,
+                rawWeight: Number.isFinite(rawWeight) ? rawWeight : point?.rawWeight,
+                invalidWeight: true
+            };
+        }
+
         return {
             ...point,
             weight: roundNonNegativeWeight(weightValue),
