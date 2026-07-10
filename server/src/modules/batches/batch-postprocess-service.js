@@ -2,7 +2,7 @@ import { detectZoneObject } from '../../../../module-1/geo.js'
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { roundWeight } from '../../../../module-2/weightRounding.js'
 import { TelemetryProcessor } from '../../../../module-3/telemetryProcessor.js'
-import { recalculateBatchViolations } from './batch-violations.js'
+import { getBatchPlan, recalculateBatchViolations } from './batch-violations.js'
 import { buildPostprocessedHostTrack, detectWeightStepMarkup } from './weight-step-postprocess.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
@@ -40,6 +40,17 @@ function isLoadingZone(zone, linkedBarnZoneIds = new Set()) {
 }
 
 function expectedIngredientsFromBatch(batch) {
+  const calculatedPlan = getBatchPlan(batch)
+  if (calculatedPlan.ingredients.length) {
+    return calculatedPlan.ingredients
+      .map((ingredient, index) => ({
+        name: ingredient.name,
+        sortOrder: Number(ingredient.sortOrder || index + 1),
+        targetWeight: finiteNumberOrNull(ingredient.targetWeight)
+      }))
+      .sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0))
+  }
+
   const ingredients = batch?.ration?.ingredients?.length
     ? batch.ration.ingredients
     : batch?.group?.ration?.ingredients
@@ -47,7 +58,8 @@ function expectedIngredientsFromBatch(batch) {
   return (Array.isArray(ingredients) ? ingredients : [])
     .map((ingredient, index) => ({
       name: ingredient.name,
-      sortOrder: Number(ingredient.sortOrder || index + 1)
+      sortOrder: Number(ingredient.sortOrder || index + 1),
+      targetWeight: null
     }))
     .sort((left, right) => Number(left.sortOrder || 0) - Number(right.sortOrder || 0))
 }
@@ -131,6 +143,42 @@ function buildCacheKey(batch, telemetryRows) {
     last?.id || '',
     last?.timestamp ? new Date(last.timestamp).toISOString() : ''
   ].join(':')
+}
+
+export function choosePostprocessedIngredientName(processorName, existingName, fallbackName, expectedIngredients = []) {
+  const expectedKeys = new Set(expectedIngredients.map((item) => normalizeIngredientName(item.name)))
+  const existingExpected = expectedKeys.has(normalizeIngredientName(existingName))
+  const processorExpected = expectedKeys.has(normalizeIngredientName(processorName))
+
+  if (existingName && (!expectedKeys.size || existingExpected)) return existingName
+  if (processorName && (!expectedKeys.size || processorExpected)) return processorName
+  return existingName || processorName || fallbackName || 'Unknown'
+}
+
+export function alignRepeatedIngredientWithPlan(candidateName, eventWeight, expectedIngredients, assignedWeights) {
+  const candidateKey = normalizeIngredientName(candidateName)
+  const assignedWeight = Number(assignedWeights.get(candidateKey) || 0)
+  if (!candidateKey || assignedWeight <= 0) return candidateName
+
+  const candidateIndex = expectedIngredients.findIndex((item) => normalizeIngredientName(item.name) === candidateKey)
+  if (candidateIndex < 0 || candidateIndex + 1 >= expectedIngredients.length) return candidateName
+
+  const current = expectedIngredients[candidateIndex]
+  const next = expectedIngredients[candidateIndex + 1]
+  const nextKey = normalizeIngredientName(next.name)
+  if (!nextKey || Number(assignedWeights.get(nextKey) || 0) > 0) return candidateName
+  if (candidateKey !== normalizeIngredientName('Солома') || nextKey !== normalizeIngredientName('Люцерна')) {
+    return candidateName
+  }
+
+  const weight = Number(eventWeight)
+  const currentTarget = Number(current.targetWeight)
+  const nextTarget = Number(next.targetWeight)
+  if (!(weight > 0) || !(currentTarget > 0) || !(nextTarget > 0)) return candidateName
+
+  const currentErrorAfter = Math.abs(currentTarget - assignedWeight - weight)
+  const nextError = Math.abs(nextTarget - weight)
+  return nextError + 20 < currentErrorAfter ? next.name : candidateName
 }
 
 function isInvalidWeightPoint(point) {
@@ -341,6 +389,7 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
   const processor = new TelemetryProcessor()
   const usedExpectedKeys = new Set()
   const usedExistingIds = new Set()
+  const assignedWeights = new Map()
   const processedTelemetry = (Array.isArray(analysis.points) ? analysis.points : []).map((point) => ({
     timestamp: point.timestamp,
     lat: point.lat,
@@ -364,9 +413,23 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
         usedExpectedKeys
       })
       : null
-    const ingredientName = existingName || processorName || fallbackExpectedIngredientName(expectedIngredients, usedExpectedKeys) || 'Unknown'
+    const candidateName = choosePostprocessedIngredientName(
+      processorName,
+      existingName,
+      fallbackExpectedIngredientName(expectedIngredients, usedExpectedKeys),
+      expectedIngredients
+    )
+    const ingredientName = alignRepeatedIngredientWithPlan(
+      candidateName,
+      event.delta,
+      expectedIngredients,
+      assignedWeights
+    )
     const ingredientKey = normalizeIngredientName(ingredientName)
-    if (ingredientKey) usedExpectedKeys.add(ingredientKey)
+    if (ingredientKey) {
+      usedExpectedKeys.add(ingredientKey)
+      assignedWeights.set(ingredientKey, Number(assignedWeights.get(ingredientKey) || 0) + Number(event.delta || 0))
+    }
 
     const closestStart = findClosestTelemetryPoint(analysis.points, timestampMs(event.startTime))
     const closestEnd = findClosestTelemetryPoint(analysis.points, timestampMs(event.endTime))

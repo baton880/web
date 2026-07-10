@@ -6,6 +6,7 @@ import { calculatePlan } from '../../module-2/rationManager.js'
 import { buildDigestHtml } from '../src/modules/digest/digest-scheduler.js'
 import { buildDailyDeviationRows } from '../../frontend/js/report-export-utils.mjs'
 import { collectReportData, toUiViolationStatus } from '../src/modules/reports/report-data.js'
+import { alignRepeatedIngredientWithPlan, choosePostprocessedIngredientName } from '../src/modules/batches/batch-postprocess-service.js'
 
 function runCase(name, fn) {
   try {
@@ -36,6 +37,32 @@ function todayReportPeriod() {
 
   return { fromDate, toDate }
 }
+
+runCase('postprocessing rejects replay ingredients missing from the ration', () => {
+  const dryCowPlan = [
+    { name: 'Солома' },
+    { name: 'Комбикорм' },
+    { name: 'Зерносенаж' },
+    { name: 'Силос' }
+  ]
+  assert.equal(choosePostprocessedIngredientName('Солома', 'Люцерна', 'Комбикорм', dryCowPlan), 'Солома')
+  assert.equal(choosePostprocessedIngredientName('Комбикорм', 'Солома', 'Зерносенаж', dryCowPlan), 'Солома')
+  assert.equal(choosePostprocessedIngredientName(null, 'Люцерна', 'Комбикорм'), 'Люцерна')
+  assert.equal(choosePostprocessedIngredientName(null, null, 'Комбикорм'), 'Комбикорм')
+})
+
+runCase('postprocessing uses plan residuals to separate adjacent ingredients', () => {
+  const expected = [
+    { name: 'Солома', targetWeight: 50 },
+    { name: 'Люцерна', targetWeight: 590 },
+    { name: 'Комбикорм', targetWeight: 615 }
+  ]
+  assert.equal(alignRepeatedIngredientWithPlan('Солома', 570, expected, new Map([['солома', 60]])), 'Люцерна')
+  assert.equal(alignRepeatedIngredientWithPlan('Солома', 55, [
+    { name: 'Солома', targetWeight: 330 },
+    { name: 'Комбикорм', targetWeight: 515 }
+  ], new Map([['солома', 280]])), 'Солома')
+})
 
 runCase('correct sequence has no order violations', () => {
   const plan = [
