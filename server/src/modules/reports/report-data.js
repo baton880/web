@@ -89,7 +89,9 @@ function toTopList(counterMap, top = 3) {
 }
 
 export async function collectReportData({ fromDate = null, toDate = null, limit = DEFAULT_LIMIT } = {}) {
-    const where = {};
+    const where = {
+        endTime: { not: null }
+    };
 
     if (fromDate || toDate) {
         where.startTime = {
@@ -177,6 +179,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
 
     const violations = await prisma.violation.findMany({
         where: {
+            batch: {
+                is: { endTime: { not: null } }
+            },
             ...(fromDate || toDate ? {
                 detectedAt: {
                     ...(fromDate ? { gte: fromDate } : {}),

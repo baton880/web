@@ -294,6 +294,7 @@ await (async function runReportIntegrationCase() {
         rationId: ration.id,
         groupId: group.id,
         startTime: batchStartTime,
+        endTime: addMinutes(batchStartTime, 3),
         actualIngredients: {
           create: [
             { ingredientName: 'alpha', actualWeight: 10, addedAt: batchStartTime },
@@ -374,6 +375,7 @@ await (async function runFeedingsReportIntegrationCase() {
         rationId: ration.id,
         groupId: group.id,
         startTime: batchStartTime,
+        endTime: addMinutes(batchStartTime, 3),
         actualIngredients: {
           create: [
             { ingredientName: 'daily-silage', actualWeight: 50, addedAt: batchStartTime }

@@ -7,6 +7,7 @@ import { roundNonNegativeWeight, roundWeight } from '../../module-2/weightRoundi
 import { DEFAULT_TELEMETRY_SETTINGS } from '../src/modules/telemetry/telemetry-settings.js'
 import { TELEMETRY_FRESHNESS_MS } from '../src/modules/telemetry/telemetry-helpers.js'
 import { recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
+import { postprocessCompletedBatch } from '../src/modules/batches/batch-postprocess-service.js'
 import { recordLeftoverViolation } from '../src/modules/violations/violation-service.js'
 import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/loading-zone-correction.js'
 
@@ -698,6 +699,73 @@ async function mergeShortPreludeBatches(batchIdsToRecalculate, settings = {}) {
   return merged
 }
 
+async function removeOrphanMicroBatches(batchIdsToRecalculate, settings = {}) {
+  const emptyThresholdKg = Number(settings.emptyVehicleThresholdKg) > 0
+    ? Number(settings.emptyVehicleThresholdKg)
+    : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
+  const maxMicroWeightKg = emptyThresholdKg + PRELUDE_BATCH_MAX_WEIGHT_BUFFER_KG
+  const batches = await prisma.batch.findMany({
+    where: {
+      endTime: { not: null },
+      groupId: null,
+      rationId: null
+    },
+    include: {
+      actualIngredients: {
+        select: { actualWeight: true }
+      }
+    }
+  })
+
+  let removed = 0
+  for (const batch of batches) {
+    if (batch.actualIngredients.length > PRELUDE_BATCH_MAX_INGREDIENTS) continue
+
+    const startMs = timestampMs(batch.startTime)
+    const endMs = timestampMs(batch.endTime)
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) continue
+    if (endMs < startMs || endMs - startMs > PRELUDE_BATCH_MAX_DURATION_MS) continue
+
+    const totalWeight = batchIngredientTotal(batch)
+    if (totalWeight <= 0 || totalWeight > maxMicroWeightKg) continue
+    if (roundNonNegativeWeight(batch.startWeight) > emptyThresholdKg) continue
+    if (roundNonNegativeWeight(batch.endWeight) > emptyThresholdKg) continue
+
+    await prisma.$transaction([
+      prisma.violation.deleteMany({ where: { batchId: batch.id } }),
+      prisma.batchIngredient.deleteMany({ where: { batchId: batch.id } }),
+      prisma.batch.delete({ where: { id: batch.id } })
+    ])
+    batchIdsToRecalculate.delete(batch.id)
+    removed += 1
+  }
+
+  return removed
+}
+
+async function postprocessReplayedBatches(telemetrySettings = {}) {
+  const completedBatches = await prisma.batch.findMany({
+    where: { endTime: { not: null } },
+    select: { id: true },
+    orderBy: { id: 'asc' }
+  })
+  const stats = { complete: 0, processing: 0, other: 0 }
+
+  console.log(`Postprocessing ${completedBatches.length} completed batches...`)
+  for (const [index, batch] of completedBatches.entries()) {
+    const result = await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, { persist: true })
+    if (result.status === 'complete') stats.complete += 1
+    else if (result.status === 'processing') stats.processing += 1
+    else stats.other += 1
+
+    if ((index + 1) % 25 === 0 || index + 1 === completedBatches.length) {
+      console.log(`Postprocessed ${index + 1}/${completedBatches.length}`)
+    }
+  }
+
+  return stats
+}
+
 async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
   const batches = await prisma.batch.findMany({
     include: {
@@ -1202,10 +1270,16 @@ async function main() {
   if (mergedPreludes > 0) {
     console.log(`Merged short prelude batches: ${mergedPreludes}`)
   }
+  const removedMicroBatches = await removeOrphanMicroBatches(batchIdsToRecalculate, telemetrySettings)
+  if (removedMicroBatches > 0) {
+    console.log(`Removed orphan micro batches: ${removedMicroBatches}`)
+  }
   const alignedStarts = await alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate)
   if (alignedStarts > 0) {
     console.log(`Aligned batch starts with first ingredient: ${alignedStarts}`)
   }
+
+  const postprocessStats = await postprocessReplayedBatches(telemetrySettings)
 
   console.log(`Recalculating violations for ${batchIdsToRecalculate.size} batches...`)
   for (const batchId of batchIdsToRecalculate) {
@@ -1245,6 +1319,8 @@ async function main() {
   console.log('Replay complete')
   console.log(JSON.stringify({
     stats,
+    postprocessStats,
+    removedMicroBatches,
     batchCount,
     ingredientCount,
     openBatchCount,
