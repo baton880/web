@@ -43,3 +43,4 @@ tools/
 .chrome-headless/
 korovki_page1.png
 server/tmp/
+server/runtime/

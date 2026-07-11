@@ -3,9 +3,12 @@ import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { roundWeight } from '../../../../module-2/weightRounding.js'
 import { TelemetryProcessor } from '../../../../module-3/telemetryProcessor.js'
 import { getBatchPlan, recalculateBatchViolations } from './batch-violations.js'
-import { buildPostprocessedHostTrack, detectWeightStepMarkup } from './weight-step-postprocess.js'
+import { buildPostprocessedHostTrack, detectWeightStepMarkup, resolveWeightStepOptions } from './weight-step-postprocess.js'
+import { resolveEffectiveCoordinatesFromRtkPoint } from '../telemetry/telemetry-helpers.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
+const DEFAULT_FALLBACK_LEFT_BOUNDARY_MS = 10 * 60 * 1000
+const MAX_DYNAMIC_LEFT_BOUNDARY_GAP_MS = 3 * 60 * 60 * 1000
 const POSTPROCESS_CACHE = new Map()
 
 function timestampMs(value) {
@@ -133,15 +136,21 @@ function findExistingIngredientName(batch, event, usedIds = new Set()) {
   return null
 }
 
-function buildCacheKey(batch, telemetryRows) {
+function buildCacheKey(batch, telemetryRows, rtkRows = [], resolvedOptions = {}, telemetrySettings = {}) {
   const last = telemetryRows[telemetryRows.length - 1]
+  const lastRtk = rtkRows[rtkRows.length - 1]
   return [
     batch?.id,
     batch?.startTime ? new Date(batch.startTime).toISOString() : '',
     batch?.endTime ? new Date(batch.endTime).toISOString() : '',
     telemetryRows.length,
     last?.id || '',
-    last?.timestamp ? new Date(last.timestamp).toISOString() : ''
+    last?.timestamp ? new Date(last.timestamp).toISOString() : '',
+    rtkRows.length,
+    lastRtk?.id || '',
+    lastRtk?.timestamp ? new Date(lastRtk.timestamp).toISOString() : '',
+    JSON.stringify(resolvedOptions),
+    JSON.stringify(telemetrySettings)
   ].join(':')
 }
 
@@ -150,9 +159,9 @@ export function choosePostprocessedIngredientName(processorName, existingName, f
   const existingExpected = expectedKeys.has(normalizeIngredientName(existingName))
   const processorExpected = expectedKeys.has(normalizeIngredientName(processorName))
 
-  if (existingName && (!expectedKeys.size || existingExpected)) return existingName
   if (processorName && (!expectedKeys.size || processorExpected)) return processorName
-  return existingName || processorName || fallbackName || 'Unknown'
+  if (existingName && (!expectedKeys.size || existingExpected)) return existingName
+  return processorName || existingName || fallbackName || 'Unknown'
 }
 
 export function alignRepeatedIngredientWithPlan(candidateName, eventWeight, expectedIngredients, assignedWeights) {
@@ -253,16 +262,21 @@ async function loadBatchForPostprocess(prismaClient, batchId) {
   })
 }
 
-export async function loadBatchPostprocessTelemetry(prismaClient, batch) {
+export async function loadBatchPostprocessTelemetry(prismaClient, batch, options = {}) {
   const startMs = timestampMs(batch?.startTime)
   const endMs = timestampMs(batch?.endTime || batch?.startTime)
   if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return []
+
+  const analysisStartMs = timestampMs(options.analysisStartTime ?? options.analysisStartMs)
+  const contextStartMs = Number.isFinite(analysisStartMs)
+    ? Math.min(startMs - POSTPROCESS_CONTEXT_MS, analysisStartMs - POSTPROCESS_CONTEXT_MS)
+    : startMs - POSTPROCESS_CONTEXT_MS
 
   return prismaClient.telemetry.findMany({
     where: {
       deviceId: batch.deviceId,
       timestamp: {
-        gte: new Date(startMs - POSTPROCESS_CONTEXT_MS),
+        gte: new Date(contextStartMs),
         lte: new Date(endMs + POSTPROCESS_CONTEXT_MS)
       }
     },
@@ -275,13 +289,70 @@ export async function loadBatchPostprocessTelemetry(prismaClient, batch) {
       weightValid: true,
       speedKmh: true,
       lat: true,
-      lon: true
+      lon: true,
+      rawPayload: true
     },
     orderBy: [
       { timestamp: 'asc' },
       { id: 'asc' }
     ]
   })
+}
+
+async function findPreviousCompletedBatchEnd(prismaClient, batch) {
+  const batchStartMs = timestampMs(batch?.startTime)
+  if (!batch?.deviceId || !Number.isFinite(batchStartMs)) return null
+
+  const previous = await prismaClient.batch.findFirst({
+    where: {
+      deviceId: batch.deviceId,
+      endTime: { not: null, lt: new Date(batchStartMs) }
+    },
+    select: { endTime: true },
+    orderBy: { endTime: 'desc' }
+  })
+  return timestampMs(previous?.endTime)
+}
+
+function findLastUnloadEndBeforeBatch(analysis, batchStartMs, minStartMs) {
+  const events = Array.isArray(analysis?.includedEvents) ? analysis.includedEvents : []
+  let lastUnloadEndMs = null
+  for (const event of events) {
+    if (!(Number(event?.delta) < 0)) continue
+    const endMs = timestampMs(event?.endTime)
+    if (!Number.isFinite(endMs) || endMs > batchStartMs || endMs < minStartMs) continue
+    if (lastUnloadEndMs === null || endMs > lastUnloadEndMs) {
+      lastUnloadEndMs = endMs
+    }
+  }
+  return lastUnloadEndMs
+}
+
+function findLastTerminalRestart(telemetryRows, minStartMs, maxEndMs) {
+  const ordered = (Array.isArray(telemetryRows) ? telemetryRows : [])
+    .filter((row) => {
+      const rowMs = timestampMs(row?.timestamp)
+      return Number.isFinite(rowMs) && rowMs >= minStartMs && rowMs <= maxEndMs
+    })
+    .sort((left, right) => {
+      const timeDiff = timestampMs(left.timestamp) - timestampMs(right.timestamp)
+      return timeDiff || Number(left.id || 0) - Number(right.id || 0)
+    })
+
+  let invalidWeightSeen = false
+  let lastRestartMs = null
+  for (const row of ordered) {
+    if (isInvalidWeightPoint(row)) {
+      invalidWeightSeen = true
+      continue
+    }
+    if (invalidWeightSeen) {
+      lastRestartMs = timestampMs(row.timestamp)
+      invalidWeightSeen = false
+    }
+  }
+
+  return lastRestartMs
 }
 
 async function loadLoadingZones(prismaClient) {
@@ -298,142 +369,269 @@ async function loadLoadingZones(prismaClient) {
   )
   return {
     activeZones,
-    loadingZones: activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
+    loadingZones: activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds)),
+    linkedBarnZoneIds
   }
 }
 
-function resolveIngredientWithProcessor({
-  batch,
-  event,
-  eventIndex,
-  processor,
-  processedTelemetry,
-  loadingZones,
-  telemetrySettings,
-  expectedIngredients,
-  usedExpectedKeys
-}) {
-  const deviceId = batch.deviceId || 'host_01'
-  const startMs = timestampMs(event.startTime)
-  if (!Number.isFinite(startMs)) {
-    return null
+function parseRawPayload(value) {
+  if (typeof value !== 'string' || !value.trim()) return {}
+  try {
+    const parsed = JSON.parse(value)
+    return parsed && typeof parsed === 'object' ? parsed : {}
+  } catch {
+    return {}
   }
+}
 
-  for (const point of processedTelemetry) {
-    if (point._processedForPostprocess) continue
-    const pointMs = timestampMs(point.timestamp)
-    if (!Number.isFinite(pointMs) || pointMs > startMs) break
-    point._processedForPostprocess = true
-    if (!Number.isFinite(Number(point.lat)) || !Number.isFinite(Number(point.lon))) continue
-    processor.processLoaderPacket({
-      deviceId,
-      timestamp: point.timestamp,
-      lat: Number(point.lat),
-      lon: Number(point.lon),
-      speedKmh: Number(point.speedKmh || 0)
-    }, loadingZones, telemetrySettings, { deviceId })
+function readRawValue(raw, keys = []) {
+  const sections = [raw, raw?.pvt, raw?.navPvt, raw?.nav_pvt, raw?.position, raw?.relposned, raw?.relPosNed, raw?.rel_pos_ned, raw?.relpos, raw?.relPos, raw?.baseline]
+  for (const section of sections) {
+    if (!section || typeof section !== 'object') continue
+    for (const key of keys) {
+      if (section[key] !== undefined && section[key] !== null && section[key] !== '') return section[key]
+    }
   }
+  return undefined
+}
 
-  let state = processor.deviceStates.get(deviceId)
-  if (!state) {
-    state = processor.getInitialState(Number(event.beforeLevel || 0))
-    processor.deviceStates.set(deviceId, state)
+function readRawNumber(raw, keys = []) {
+  const value = Number(readRawValue(raw, keys))
+  return Number.isFinite(value) ? value : null
+}
+
+function readRawBoolean(raw, keys = []) {
+  const value = readRawValue(raw, keys)
+  if (typeof value === 'boolean') return value
+  if (typeof value === 'number') return value !== 0
+  if (typeof value === 'string') {
+    const normalized = value.trim().toLowerCase()
+    if (normalized === 'true' || normalized === '1') return true
+    if (normalized === 'false' || normalized === '0') return false
   }
+  return undefined
+}
 
-  const nearest = findClosestTelemetryPoint(processedTelemetry, startMs)
-  const activeZone = nearest ? detectZoneObject(Number(nearest.lat), Number(nearest.lon), loadingZones) : null
-  if (activeZone) {
-    state.currentZone = { ...activeZone, ingredient: activeZone.ingredient || activeZone.name || null }
-    state.confirmedZoneName = activeZone.name || null
+function indexRtkPoints(points = []) {
+  const all = points.map((point) => ({ ...point, timestampMs: timestampMs(point.timestamp) }))
+    .filter((point) => Number.isFinite(point.timestampMs))
+    .sort((left, right) => left.timestampMs - right.timestampMs || Number(left.id) - Number(right.id))
+  const byDevice = new Map()
+  for (const point of all) {
+    const key = String(point.deviceId || '')
+    if (!byDevice.has(key)) byDevice.set(key, [])
+    byDevice.get(key).push(point)
   }
+  return { all, byDevice }
+}
 
-  state.loadingStartTimeMs = startMs
-  state.loadingStartLat = finiteNumberOrNull(nearest?.lat)
-  state.loadingStartLon = finiteNumberOrNull(nearest?.lon)
-  processor._freezeZoneScoreboardForLoading(state)
+function latestFreshPoint(points, referenceMs, freshnessMs) {
+  let result = null
+  for (const point of points || []) {
+    if (point.timestampMs > referenceMs) break
+    result = point
+  }
+  return result && referenceMs - result.timestampMs <= freshnessMs ? result : null
+}
 
-  const visitedZoneMaxAgeMs = processor._getVisitedZoneMaxAgeMs(processor._resolveThresholds(telemetrySettings))
-  const ingredientName = processor._resolveSegmentIngredient(state, expectedIngredients, {
-    allowVisitedZoneIngredient: true,
-    preferCurrentZoneIngredient: true,
-    packetTimeMs: startMs,
-    visitedZoneMaxAgeMs
+function resolveReplayRtkPoint(hostPoint, rtkIndex, telemetrySettings) {
+  const referenceMs = timestampMs(hostPoint.timestamp)
+  const freshnessMs = Number(telemetrySettings.loaderOfflineTimeoutMinutes || 4) * 60 * 1000
+  return latestFreshPoint(rtkIndex.byDevice.get(hostPoint.deviceId), referenceMs, freshnessMs)
+    || latestFreshPoint(rtkIndex.all, referenceMs, freshnessMs)
+}
+
+function buildRtkScoreboardPacket(point, deviceId) {
+  const raw = parseRawPayload(point.rawPayload)
+  const flags = readRawNumber(raw, ['relPosFlags', 'rel_pos_flags', 'flags'])
+  return {
+    deviceId,
+    hostDeviceId: deviceId,
+    timestamp: point.timestamp,
+    lat: Number(point.lat),
+    lon: Number(point.lon),
+    speedKmh: Number(point.speed || 0),
+    headingDeg: point.course ?? readRawNumber(raw, ['heading', 'course', 'azimuth', 'headingDeg', 'heading_deg']),
+    headingAccDeg: readRawNumber(raw, ['headingAccDeg', 'heading_acc_deg', 'accHeadingDeg', 'acc_heading_deg']),
+    relPosValid: readRawBoolean(raw, ['rel_pos_valid', 'relPosValid']) ?? (Number.isInteger(flags) ? Boolean(flags & (1 << 2)) : undefined),
+    relPosHeadingValid: readRawBoolean(raw, ['rel_pos_heading_valid', 'relPosHeadingValid', 'headingValid', 'heading_valid'])
+      ?? (Number.isInteger(flags) ? Boolean(flags & (1 << 8)) : undefined)
+  }
+}
+
+async function loadPostprocessRtk(prismaClient, telemetryRows, telemetrySettings) {
+  const firstMs = timestampMs(telemetryRows[0]?.timestamp)
+  const lastMs = timestampMs(telemetryRows[telemetryRows.length - 1]?.timestamp)
+  if (!Number.isFinite(firstMs) || !Number.isFinite(lastMs)) return []
+  const freshnessMs = Number(telemetrySettings.loaderOfflineTimeoutMinutes || 4) * 60 * 1000
+  return prismaClient.rtkTelemetry.findMany({
+    where: { timestamp: { gte: new Date(firstMs - freshnessMs), lte: new Date(lastMs) } },
+    orderBy: [{ timestamp: 'asc' }, { id: 'asc' }]
   })
-
-  const normalized = normalizeIngredientName(ingredientName)
-  if (normalized && normalized !== 'unknown') {
-    usedExpectedKeys.add(normalized)
-    processor._resetVisitedZones(state, timestampMs(event.endTime) || startMs)
-    state.loadedIngredientKeys = Array.from(usedExpectedKeys)
-    state.lastIngredientName = ingredientName
-    state.loadingStartTimeMs = null
-    state.loadingStartLat = null
-    state.loadingStartLon = null
-    return ingredientName
-  }
-
-  processor._resetVisitedZones(state, timestampMs(event.endTime) || startMs)
-  state.loadedIngredientKeys = Array.from(usedExpectedKeys)
-  state.loadingStartTimeMs = null
-  state.loadingStartLat = null
-  state.loadingStartLon = null
-  return null
 }
 
-async function buildPostprocessedIngredients(prismaClient, batch, analysis, telemetrySettings) {
+async function buildPostprocessedIngredients(prismaClient, batch, analysis, telemetrySettings, telemetryRows = [], rtkRows = []) {
   const loadEvents = (analysis.includedEvents || []).filter((event) => event.delta > 0)
-  if (!loadEvents.length) return []
 
-  const { loadingZones } = await loadLoadingZones(prismaClient)
+  const { activeZones, loadingZones, linkedBarnZoneIds } = await loadLoadingZones(prismaClient)
   const expectedIngredients = expectedIngredientsFromBatch(batch)
   const processor = new TelemetryProcessor()
   const usedExpectedKeys = new Set()
-  const usedExistingIds = new Set()
-  const assignedWeights = new Map()
-  const processedTelemetry = (Array.isArray(analysis.points) ? analysis.points : []).map((point) => ({
-    timestamp: point.timestamp,
-    lat: point.lat,
-    lon: point.lon,
-    speedKmh: point.speedKmh,
-    _processedForPostprocess: false
+  const filteredSpeedTimeline = (analysis.points || []).map((point) => ({
+    timestamp: point.speedTimestamp || point.timestamp,
+    speedKmh: point.speedKmh
   }))
+  const hostPoints = telemetryRows.map((point) => ({
+    ...point,
+    deviceId: batch.deviceId || point.deviceId || 'host_01',
+    speedKmh: findClosestTelemetryPoint(filteredSpeedTimeline, timestampMs(point.timestamp))?.speedKmh ?? 0
+  }))
+  const rtkIndex = indexRtkPoints(rtkRows)
+  const deviceId = batch.deviceId || 'host_01'
+  let hostCursor = 0
+  let rtkScoreCursor = 0
+  let lastReplayPacket = null
+  const replayFrames = []
 
-  return loadEvents.map((event, index) => {
-    const existingName = findExistingIngredientName(batch, event, usedExistingIds)
-    const processorName = loadingZones.length
-      ? resolveIngredientWithProcessor({
-        batch,
-        event,
-        eventIndex: index,
-        processor,
-        processedTelemetry,
-        loadingZones,
-        telemetrySettings,
+  function serializeReplayZone(zone) {
+    return zone ? {
+      id: zone.id ?? null,
+      name: zone.name || null,
+      ingredient: zone.ingredient || zone.name || null
+    } : null
+  }
+
+  function replayRtkUntil(referenceMs) {
+    while (rtkScoreCursor < rtkIndex.all.length && rtkIndex.all[rtkScoreCursor].timestampMs <= referenceMs) {
+      processor.processLoaderPacket(buildRtkScoreboardPacket(rtkIndex.all[rtkScoreCursor], deviceId), loadingZones, telemetrySettings, { deviceId })
+      rtkScoreCursor += 1
+    }
+  }
+
+  function replayHostUntil(referenceMs) {
+    while (hostCursor < hostPoints.length && timestampMs(hostPoints[hostCursor].timestamp) <= referenceMs) {
+      const hostPoint = hostPoints[hostCursor]
+      const pointMs = timestampMs(hostPoint.timestamp)
+      replayRtkUntil(pointMs)
+      const raw = parseRawPayload(hostPoint.rawPayload)
+      const rtkPoint = resolveReplayRtkPoint(hostPoint, rtkIndex, telemetrySettings)
+      const effective = resolveEffectiveCoordinatesFromRtkPoint(hostPoint, rtkPoint, telemetrySettings)
+      const currentZoneEvidenceAgeMs = effective.source === 'rtk'
+        ? Math.max(0, pointMs - timestampMs(effective.rtkPoint?.timestamp))
+        : null
+      const processorPacket = {
+        ...hostPoint,
+        weight: 0,
+        rawWeight: 0,
+        weightValid: true,
+        lat: effective.lat,
+        lon: effective.lon,
+        headingDeg: effective.rtkPoint?.course ?? readRawNumber(raw, ['heading', 'headingDeg', 'heading_deg', 'course']),
+        course: effective.rtkPoint?.course ?? readRawNumber(raw, ['course', 'heading'])
+      }
+      const currentZone = detectZoneObject(effective.lat, effective.lon, activeZones)
+      const hostLoadingZone = detectZoneObject(Number(hostPoint.lat), Number(hostPoint.lon), loadingZones)
+      const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
+      const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
+      processor.processPacket(processorPacket, loadingZones, telemetrySettings, {
+        suppressLoading,
+        skipZoneVisit: effective.source === 'rtk',
+        allowVisitedZoneIngredient: effective.source === 'rtk',
+        preferCurrentZoneIngredient: effective.source === 'rtk',
+        currentZoneEvidenceAgeMs,
+        hostLat: Number(hostPoint.lat),
+        hostLon: Number(hostPoint.lon),
+        hostForceIngredientName,
+        expectedIngredients
+      })
+      const loaderZone = rtkPoint
+        ? detectZoneObject(Number(rtkPoint.lat), Number(rtkPoint.lon), loadingZones)
+        : null
+      replayFrames.push({
+        timestamp: hostPoint.timestamp,
+        filteredSpeedKmh: Number(hostPoint.speedKmh || 0),
+        host: {
+          lat: Number(hostPoint.lat),
+          lon: Number(hostPoint.lon),
+          zone: serializeReplayZone(hostLoadingZone)
+        },
+        loader: rtkPoint ? {
+          lat: Number(rtkPoint.lat),
+          lon: Number(rtkPoint.lon),
+          speedKmh: finiteNumberOrNull(rtkPoint.speed),
+          course: finiteNumberOrNull(rtkPoint.course),
+          zone: serializeReplayZone(loaderZone)
+        } : null,
+        effective: {
+          source: effective.source,
+          lat: Number(effective.lat),
+          lon: Number(effective.lon),
+          zone: serializeReplayZone(currentZone),
+          loaderDistanceMeters: finiteNumberOrNull(effective.loaderDistanceMeters),
+          ignoredReason: effective.ignoredReason || null
+        },
+        scoreboard: processor.getZoneScoreboard(deviceId)
+      })
+      lastReplayPacket = { packet: processorPacket, effective }
+      hostCursor += 1
+    }
+  }
+
+  const results = []
+  for (const event of loadEvents) {
+    const startMs = timestampMs(event.startTime)
+    const endMs = timestampMs(event.endTime) || startMs
+    replayHostUntil(startMs)
+    replayRtkUntil(startMs)
+    const startHost = findClosestTelemetryPoint(hostPoints, startMs)
+    if (!lastReplayPacket && startHost) replayHostUntil(timestampMs(startHost.timestamp))
+    const startPacket = lastReplayPacket?.packet || {
+      deviceId,
+      timestamp: new Date(startMs),
+      lat: Number(startHost?.lat),
+      lon: Number(startHost?.lon),
+      speedKmh: Number(startHost?.speedKmh || 0),
+      weight: 0
+    }
+    const determination = loadingZones.length
+      ? processor.resolveIngredientAtKnownLoadingStart({ ...startPacket, timestamp: new Date(startMs) }, loadingZones, telemetrySettings, {
+        deviceId,
+        allowVisitedZoneIngredient: lastReplayPacket?.effective?.source === 'rtk',
+        preferCurrentZoneIngredient: lastReplayPacket?.effective?.source === 'rtk',
         expectedIngredients,
-        usedExpectedKeys
+        effectivePositionSource: lastReplayPacket?.effective?.source || 'host',
+        currentZoneEvidenceAgeMs: lastReplayPacket?.effective?.source === 'rtk'
+          ? Math.max(0, startMs - timestampMs(lastReplayPacket.effective.rtkPoint?.timestamp))
+          : null,
+        hostLat: Number(startHost?.lat),
+        hostLon: Number(startHost?.lon),
+        returnDecisionDetails: true
       })
       : null
-    const candidateName = choosePostprocessedIngredientName(
-      processorName,
-      existingName,
-      fallbackExpectedIngredientName(expectedIngredients, usedExpectedKeys),
-      expectedIngredients
-    )
-    const ingredientName = alignRepeatedIngredientWithPlan(
-      candidateName,
-      event.delta,
-      expectedIngredients,
-      assignedWeights
-    )
+    const processorName = determination?.ingredientName || null
+    const ingredientName = processorName || 'Unknown'
     const ingredientKey = normalizeIngredientName(ingredientName)
     if (ingredientKey) {
       usedExpectedKeys.add(ingredientKey)
-      assignedWeights.set(ingredientKey, Number(assignedWeights.get(ingredientKey) || 0) + Number(event.delta || 0))
+    }
+
+    replayHostUntil(endMs)
+    replayRtkUntil(endMs)
+    processor.completeKnownLoadingSegment(deviceId, {
+      timestamp: new Date(endMs),
+      lat: lastReplayPacket?.packet?.lat,
+      lon: lastReplayPacket?.packet?.lon,
+      weight: 0
+    })
+    const state = processor.deviceStates.get(deviceId)
+    if (state) {
+      state.loadedIngredientKeys = Array.from(usedExpectedKeys)
+      state.lastIngredientName = ingredientName
     }
 
     const closestStart = findClosestTelemetryPoint(analysis.points, timestampMs(event.startTime))
     const closestEnd = findClosestTelemetryPoint(analysis.points, timestampMs(event.endTime))
-    return {
+    results.push({
       ingredientName,
       actualWeight: roundWeight(event.delta),
       startedAt: event.startTime ? new Date(event.startTime) : null,
@@ -444,9 +642,16 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
       endLon: finiteNumberOrNull(closestEnd?.lon),
       postprocessEventId: event.id,
       beforeLevel: event.beforeLevel,
-      afterLevel: event.afterLevel
-    }
-  })
+      afterLevel: event.afterLevel,
+      determination
+    })
+  }
+  const replayEndMs = timestampMs(analysis?.bounds?.endTime)
+  if (Number.isFinite(replayEndMs)) {
+    replayHostUntil(replayEndMs)
+    replayRtkUntil(replayEndMs)
+  }
+  return { ingredients: results, replayFrames }
 }
 
 export function buildPostprocessMeta(result) {
@@ -471,17 +676,55 @@ export async function buildBatchPostprocess(prismaClient, batch, telemetrySettin
     return { status: 'in_progress', reason: 'batch_in_progress' }
   }
 
-  const telemetryRows = options.telemetryRows || await loadBatchPostprocessTelemetry(prismaClient, batch)
-  const cacheKey = buildCacheKey(batch, telemetryRows)
+  const baseStepOptions = {
+    ...postprocessOptionsFromSettings(telemetrySettings),
+    ...(options.stepOptions || {})
+  }
+  const resolvedOptions = resolveWeightStepOptions(baseStepOptions)
+  const batchStartMs = timestampMs(batch.startTime)
+  const defaultLeftBoundaryMs = batchStartMs - DEFAULT_FALLBACK_LEFT_BOUNDARY_MS
+  const previousBatchEndMs = await findPreviousCompletedBatchEnd(prismaClient, batch)
+  const previousBatchIsRecent = Number.isFinite(previousBatchEndMs) &&
+    batchStartMs - previousBatchEndMs <= MAX_DYNAMIC_LEFT_BOUNDARY_GAP_MS
+  const initialLeftBoundaryMs = previousBatchIsRecent
+    ? previousBatchEndMs
+    : defaultLeftBoundaryMs
+  const telemetryRows = options.telemetryRows || await loadBatchPostprocessTelemetry(prismaClient, batch, {
+    analysisStartMs: initialLeftBoundaryMs
+  })
+  const rtkRows = options.rtkRows || await loadPostprocessRtk(prismaClient, telemetryRows, telemetrySettings)
+  const cacheKey = buildCacheKey(batch, telemetryRows, rtkRows, resolvedOptions, telemetrySettings)
   const cached = POSTPROCESS_CACHE.get(batch.id)
-  if (cached?.cacheKey === cacheKey && (!options.requirePersisted || cached.persisted)) {
+  if (!options.disableCache && cached?.cacheKey === cacheKey && (!options.requirePersisted || cached.persisted)) {
     return cached.result
   }
 
-  const analysis = detectWeightStepMarkup(batch, telemetryRows, {
-    ...postprocessOptionsFromSettings(telemetrySettings),
-    ...(options.stepOptions || {})
+  const terminalRestartMs = findLastTerminalRestart(telemetryRows, initialLeftBoundaryMs, timestampMs(batch.endTime))
+  const restartAwareLeftBoundaryMs = Number.isFinite(terminalRestartMs)
+    ? Math.max(initialLeftBoundaryMs, terminalRestartMs)
+    : initialLeftBoundaryMs
+  const initialAnalysis = detectWeightStepMarkup(batch, telemetryRows, {
+    ...baseStepOptions,
+    analysisStartMs: restartAwareLeftBoundaryMs
   })
+  const lastUnloadEndMs = findLastUnloadEndBeforeBatch(initialAnalysis, batchStartMs, restartAwareLeftBoundaryMs)
+  const leftBoundaryMs = Number.isFinite(lastUnloadEndMs)
+    ? Math.max(restartAwareLeftBoundaryMs, lastUnloadEndMs)
+    : restartAwareLeftBoundaryMs
+  const analysis = leftBoundaryMs > restartAwareLeftBoundaryMs
+    ? detectWeightStepMarkup(batch, telemetryRows, { ...baseStepOptions, analysisStartMs: leftBoundaryMs })
+    : initialAnalysis
+
+  if (analysis?.bounds) {
+    analysis.bounds.terminalRestartTime = Number.isFinite(terminalRestartMs) ? new Date(terminalRestartMs) : null
+    analysis.bounds.leftSource = Number.isFinite(lastUnloadEndMs) && lastUnloadEndMs >= restartAwareLeftBoundaryMs
+      ? 'last-unload-end'
+      : Number.isFinite(terminalRestartMs) && terminalRestartMs >= initialLeftBoundaryMs
+        ? 'terminal-restart'
+      : previousBatchIsRecent
+        ? 'previous-batch-end'
+        : 'default-lookback'
+  }
 
   if (analysis.status !== 'complete') {
     const result = {
@@ -491,20 +734,34 @@ export async function buildBatchPostprocess(prismaClient, batch, telemetrySettin
       ingredients: [],
       generatedAt: new Date()
     }
-    POSTPROCESS_CACHE.set(batch.id, { cacheKey, result, persisted: false })
+    if (!options.disableCache) {
+      POSTPROCESS_CACHE.set(batch.id, { cacheKey, result, persisted: false })
+    }
     return result
   }
 
-  const ingredients = await buildPostprocessedIngredients(prismaClient, batch, analysis, telemetrySettings)
+  const replayTelemetryRows = telemetryRows.filter((row) => timestampMs(row.timestamp) >= leftBoundaryMs)
+  const replayRtkRows = rtkRows.filter((row) => timestampMs(row.timestamp) >= leftBoundaryMs)
+  const postprocessed = await buildPostprocessedIngredients(
+    prismaClient,
+    batch,
+    analysis,
+    telemetrySettings,
+    replayTelemetryRows,
+    replayRtkRows
+  )
   const result = {
     status: 'complete',
     reason: null,
     analysis,
-    ingredients,
+    ingredients: postprocessed.ingredients,
+    replayFrames: postprocessed.replayFrames,
     hostTrack: buildGraphHostTrack(analysis, telemetryRows),
     generatedAt: new Date()
   }
-  POSTPROCESS_CACHE.set(batch.id, { cacheKey, result, persisted: false })
+  if (!options.disableCache) {
+    POSTPROCESS_CACHE.set(batch.id, { cacheKey, result, persisted: false })
+  }
   return result
 }
 

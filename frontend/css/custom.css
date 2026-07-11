@@ -739,11 +739,334 @@
     height: 320px !important;
 }
 
+.postprocess-debug-state {
+    margin-bottom: 1rem;
+    padding: 0.75rem 0.9rem;
+    border-radius: 0.65rem;
+    font-size: 0.88rem;
+    font-weight: 600;
+}
+
+.postprocess-debug-collapse-button {
+    white-space: nowrap;
+}
+
+.postprocess-debug-state--info {
+    color: #1d4ed8;
+    background: #eff6ff;
+}
+
+.postprocess-debug-state--danger {
+    color: #b91c1c;
+    background: #fef2f2;
+}
+
+.postprocess-debug-summary > div {
+    margin-bottom: 0.75rem;
+}
+
+.postprocess-debug-kpi {
+    height: 100%;
+    min-height: 82px;
+    padding: 0.72rem 0.85rem;
+    border: 1px solid #e3e6f0;
+    border-radius: 0.7rem;
+    background: linear-gradient(180deg, #ffffff 0%, #f8f9fc 100%);
+}
+
+.postprocess-debug-kpi__label {
+    color: #6b7280;
+    font-size: 0.7rem;
+    font-weight: 800;
+    letter-spacing: 0.025em;
+    text-transform: uppercase;
+}
+
+.postprocess-debug-kpi__value {
+    margin-top: 0.28rem;
+    color: #1f2937;
+    font-size: 1.05rem;
+    font-weight: 800;
+    line-height: 1.25;
+}
+
+.postprocess-debug-settings,
+.postprocess-debug-advanced {
+    border: 1px solid #e3e6f0;
+    border-radius: 0.7rem;
+    background: #fbfcff;
+}
+
+.postprocess-debug-settings {
+    padding: 0.85rem 1rem 1rem;
+}
+
+.postprocess-debug-settings > summary,
+.postprocess-debug-advanced > summary {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    color: #2D5A27;
+    font-size: 0.9rem;
+    font-weight: 800;
+    cursor: pointer;
+}
+
+.postprocess-debug-advanced {
+    padding: 0.7rem 0.85rem;
+    background: #fff;
+}
+
+.postprocess-debug-option {
+    margin-bottom: 0.85rem;
+}
+
+.postprocess-debug-option label {
+    display: block;
+    margin-bottom: 0.32rem;
+    color: #4b5563;
+    font-size: 0.76rem;
+    font-weight: 700;
+}
+
+.postprocess-debug-option .form-control {
+    min-height: 32px;
+    padding: 0.3rem 0.55rem;
+    font-size: 0.88rem;
+}
+
+.postprocess-debug-option--switch {
+    display: flex;
+    align-items: center;
+    min-height: 64px;
+}
+
+.postprocess-debug-option--switch .custom-control-label {
+    color: #4b5563;
+    font-size: 0.82rem;
+    font-weight: 700;
+}
+
+.postprocess-debug-toggles {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 0.85rem;
+    padding: 0.75rem 0.85rem;
+    border: 1px solid #e3e6f0;
+    border-radius: 0.7rem;
+    background: #fff;
+}
+
+.postprocess-debug-toggle {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.35rem;
+    margin: 0;
+    color: #4b5563;
+    font-size: 0.8rem;
+    font-weight: 700;
+    cursor: pointer;
+}
+
+.postprocess-debug-toggle input {
+    margin: 0;
+}
+
+.postprocess-debug-toggle__swatch {
+    display: inline-block;
+    width: 10px;
+    height: 10px;
+    border-radius: 999px;
+}
+
+.postprocess-debug-chart-card {
+    height: 100%;
+    padding: 0.9rem;
+    border: 1px solid #e3e6f0;
+    border-radius: 0.7rem;
+    background: #fff;
+}
+
+.postprocess-debug-chart-stack {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 1rem;
+}
+
+.postprocess-debug-chart-card__title {
+    margin-bottom: 0.7rem;
+    color: #2D5A27;
+    font-size: 0.86rem;
+    font-weight: 800;
+}
+
+.postprocess-debug-chart-wrap {
+    position: relative;
+    min-height: 300px;
+}
+
+.postprocess-debug-chart-wrap canvas {
+    width: 100% !important;
+    height: 300px !important;
+}
+
+.postprocess-debug-chart-wrap--speed {
+    min-height: 180px;
+}
+
+.postprocess-debug-chart-wrap--speed canvas {
+    height: 180px !important;
+}
+
+.postprocess-debug-events-table tr.is-artifact {
+    color: #7c8797;
+    background: #f5f6f8;
+}
+
+.postprocess-debug-events-table tr.is-artifact td:first-child,
+.postprocess-debug-events-table tr.is-artifact td:nth-child(2),
+.postprocess-debug-events-table tr.is-artifact td:nth-child(4) {
+    font-weight: 700;
+}
+
 .batch-track-map-wrap {
     position: relative;
     border-radius: 0.9rem;
     overflow: hidden;
     border: 1px solid #e3e6f0;
+}
+
+.batch-replay-panel {
+    border: 1px solid #d8e1ee;
+    border-radius: 10px;
+    padding: 12px;
+    background: #f8fafc;
+}
+
+.batch-replay-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.batch-replay-slider {
+    flex: 1 1 auto;
+    min-width: 160px;
+}
+
+.batch-replay-time {
+    min-width: 72px;
+    font-variant-numeric: tabular-nums;
+    color: #1f3b62;
+}
+
+.batch-replay-speed {
+    width: 76px;
+}
+
+.batch-replay-status {
+    color: #64748b;
+    font-size: 0.82rem;
+}
+
+.batch-replay-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+}
+
+.batch-replay-grid > div {
+    display: flex;
+    flex-direction: column;
+    padding: 8px 10px;
+    border-radius: 8px;
+    background: #fff;
+    border: 1px solid #e2e8f0;
+}
+
+.batch-replay-grid span {
+    color: #64748b;
+    font-size: 0.72rem;
+    text-transform: uppercase;
+}
+
+.batch-replay-grid strong {
+    color: #17395f;
+    font-size: 0.9rem;
+}
+
+.batch-replay-scoreboard {
+    background: #fff;
+    font-size: 0.78rem;
+}
+
+.batch-ingredient-component-cell {
+    position: relative;
+}
+
+.batch-ingredients-table-wrap {
+    overflow: visible;
+}
+
+.ingredient-determination-badge {
+    display: block;
+    width: fit-content;
+    margin-top: 4px;
+    color: #3f6fae;
+    font-size: 0.72rem;
+    cursor: help;
+}
+
+.ingredient-determination-popover {
+    display: none;
+    position: absolute;
+    z-index: 1200;
+    left: 10px;
+    top: calc(100% - 4px);
+    width: min(560px, 80vw);
+    padding: 12px;
+    border: 1px solid #b9c8da;
+    border-radius: 9px;
+    color: #25364c;
+    background: #fff;
+    box-shadow: 0 12px 30px rgba(31, 59, 98, 0.2);
+    font-size: 0.8rem;
+}
+
+.batch-ingredient-component-cell:hover .ingredient-determination-popover,
+.batch-ingredient-component-cell:focus-within .ingredient-determination-popover {
+    display: block;
+}
+
+.ingredient-determination-popover table {
+    width: 100%;
+    margin-top: 8px;
+    border-collapse: collapse;
+}
+
+.ingredient-determination-popover th,
+.ingredient-determination-popover td {
+    padding: 4px 6px;
+    border: 1px solid #e2e8f0;
+    white-space: nowrap;
+}
+
+@media (max-width: 767px) {
+    .batch-ingredients-table-wrap {
+        overflow-x: auto;
+        overflow-y: visible;
+    }
+    .batch-replay-toolbar {
+        flex-wrap: wrap;
+    }
+    .batch-replay-slider {
+        order: 3;
+        flex-basis: 100%;
+    }
+    .batch-replay-grid {
+        grid-template-columns: 1fr;
+    }
 }
 
 .batch-track-map {

@@ -42,6 +42,8 @@ const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
 const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
 const DEFAULT_LOADING_ZONE_STICKY_SECONDS = 180;
 const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4;
+const LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS = 10000;
+const NEAREST_HOST_ZONE_FALLBACK_MAX_METERS = 15;
 const MIN_TRACKABLE_WEIGHT_KG = -100;
 const MAX_TRACKABLE_WEIGHT_KG = 8000;
 const RAW_WEIGHT_LEAD_THRESHOLD_KG = 80;
@@ -69,9 +71,13 @@ function angleDiffDeg(first, second) {
   return diff > 180 ? 360 - diff : diff;
 }
 
-function detectZoneWithRadiusFallback(lat, lon, zonesConfig = []) {
+function detectZoneWithRadiusFallback(lat, lon, zonesConfig = [], fallbackLat = lat, fallbackLon = lon) {
   const exactZone = detectZoneObject(lat, lon, zonesConfig);
   if (exactZone) return exactZone;
+
+  const nearestLat = Number(fallbackLat);
+  const nearestLon = Number(fallbackLon);
+  if (!isValidLocation(nearestLat, nearestLon)) return null;
 
   let closestZone = null;
   let closestDistance = Number.POSITIVE_INFINITY;
@@ -79,19 +85,15 @@ function detectZoneWithRadiusFallback(lat, lon, zonesConfig = []) {
   for (const zone of zonesConfig) {
     const zoneLat = Number(zone?.lat);
     const zoneLon = Number(zone?.lon);
-    const radius = Number(zone?.radius);
-
     if (
       !Number.isFinite(zoneLat) ||
-      !Number.isFinite(zoneLon) ||
-      !Number.isFinite(radius) ||
-      radius <= 0
+      !Number.isFinite(zoneLon)
     ) {
       continue;
     }
 
-    const distance = calculateHaversine(lat, lon, zoneLat, zoneLon);
-    if (distance <= radius && distance < closestDistance) {
+    const distance = calculateHaversine(nearestLat, nearestLon, zoneLat, zoneLon);
+    if (distance <= NEAREST_HOST_ZONE_FALLBACK_MAX_METERS && distance < closestDistance) {
       closestZone = zone;
       closestDistance = distance;
     }
@@ -1312,7 +1314,7 @@ export class TelemetryProcessor {
     return this._isForceCurrentZoneIngredientName(zoneObject?.ingredient || zoneName);
   }
 
-  _resolveForcedLoadingStartIngredient(state, zonesConfig = []) {
+  _resolveForcedLoadingStartIngredient(state, zonesConfig = [], options = {}) {
     if (
       !Number.isFinite(Number(state?.loadingStartLat)) ||
       !Number.isFinite(Number(state?.loadingStartLon))
@@ -1323,7 +1325,9 @@ export class TelemetryProcessor {
     const loadingStartZone = detectZoneWithRadiusFallback(
       Number(state.loadingStartLat),
       Number(state.loadingStartLon),
-      zonesConfig
+      zonesConfig,
+      options.hostLat,
+      options.hostLon
     );
     const ingredientName = loadingStartZone?.ingredient || loadingStartZone?.name || null;
     return this._isForceCurrentZoneIngredientName(ingredientName) ? ingredientName : null;
@@ -1353,7 +1357,10 @@ export class TelemetryProcessor {
       headingSamples: Number(visit.headingSamples || 0),
       dwellSeconds: Math.round(Number(visit.dwellMs || 0) / 100) / 10,
       maxContinuousSeconds: Math.round(Number(visit.maxContinuousDwellMs || 0) / 100) / 10,
-      samples: Number(visit.samples || 0)
+      samples: Number(visit.samples || 0),
+      lastSeenAt: Number.isFinite(Number(visit.lastSeenAtMs))
+        ? new Date(Number(visit.lastSeenAtMs)).toISOString()
+        : null
     }));
   }
 
@@ -1439,6 +1446,213 @@ export class TelemetryProcessor {
         maxAgeMs: options.visitedZoneMaxAgeMs
       });
     return visitedIngredient || state.currentZone?.ingredient || null;
+  }
+
+  getZoneScoreboard(deviceId = 'host_01') {
+    const state = this.deviceStates.get(deviceId);
+    return state ? this._serializeZoneCandidates(state) : [];
+  }
+
+  _resolveLoadingStartIngredient(state, activeIngredientName, expectedIngredients = [], options = {}) {
+    if (!options.preferCurrentZoneIngredient) {
+      return activeIngredientName || this._resolveSegmentIngredient(state, expectedIngredients, {
+        allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+        preferCurrentZoneIngredient: false,
+        packetTimeMs: options.packetTimeMs,
+        visitedZoneMaxAgeMs: options.visitedZoneMaxAgeMs
+      });
+    }
+
+    const currentZoneEvidenceAgeMs = options.currentZoneEvidenceAgeMs === null || options.currentZoneEvidenceAgeMs === undefined
+      ? Number.NaN
+      : Number(options.currentZoneEvidenceAgeMs);
+    const currentZoneEvidenceIsStale = Number.isFinite(currentZoneEvidenceAgeMs) &&
+      currentZoneEvidenceAgeMs > LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS;
+    const serializedCandidates = this._serializeZoneCandidates(state);
+    const scoreFor = (ingredientName) => {
+      const key = normalizeIngredientName(ingredientName);
+      const candidate = serializedCandidates.find((item) => (
+        normalizeIngredientName(item.ingredient || item.name) === key
+      ));
+      return candidate ? Number(candidate.score || 0) : 0;
+    };
+    const visitedIngredient = options.allowVisitedZoneIngredient === false
+      ? null
+      : this._pickVisitedZoneIngredient(state, expectedIngredients, {
+        referenceMs: options.packetTimeMs,
+        maxAgeMs: options.visitedZoneMaxAgeMs
+      });
+    if (currentZoneEvidenceIsStale) {
+      if (visitedIngredient) return visitedIngredient;
+      return activeIngredientName || null;
+    }
+    if (!visitedIngredient) return activeIngredientName || state.currentZone?.ingredient || null;
+    if (!activeIngredientName) return visitedIngredient;
+
+    const activeScore = scoreFor(activeIngredientName);
+    const expectedNextKey = this._getExpectedNextIngredientKey(state, expectedIngredients);
+    const referenceMs = Number(options.packetTimeMs);
+    const maxAgeMs = Number(options.visitedZoneMaxAgeMs);
+    const strongerRecentCandidates = this._getIngredientZoneVisits(state)
+      .filter((visit) => {
+        const ingredientName = visit.ingredient || visit.name;
+        const lastSeenAtMs = Number(visit.lastSeenAtMs);
+        const isFresh = !Number.isFinite(referenceMs) || !Number.isFinite(maxAgeMs) || maxAgeMs <= 0 || (
+          Number.isFinite(lastSeenAtMs) && referenceMs >= lastSeenAtMs && referenceMs - lastSeenAtMs <= maxAgeMs
+        );
+        return ingredientName &&
+          normalizeIngredientName(ingredientName) !== normalizeIngredientName(activeIngredientName) &&
+          Number(visit.score || 0) > activeScore &&
+          isFresh;
+      })
+      .sort((left, right) => {
+        const recencyDiff = Number(right.lastSeenAtMs || 0) - Number(left.lastSeenAtMs || 0);
+        return recencyDiff || Number(right.score || 0) - Number(left.score || 0);
+      });
+    const expectedCandidate = expectedNextKey
+      ? strongerRecentCandidates.find((item) => normalizeIngredientName(item.ingredient || item.name) === expectedNextKey)
+      : null;
+    const strongerCandidate = expectedCandidate || strongerRecentCandidates[0] || null;
+    if (strongerCandidate) {
+      return strongerCandidate.ingredient || strongerCandidate.name || visitedIngredient;
+    }
+
+    return activeIngredientName;
+  }
+
+  _activateLoadingStartContext(state, zonesConfig = [], expectedIngredients = [], options = {}) {
+    const currentZoneEvidenceAgeMs = options.currentZoneEvidenceAgeMs === null || options.currentZoneEvidenceAgeMs === undefined
+      ? Number.NaN
+      : Number(options.currentZoneEvidenceAgeMs);
+    const currentZoneEvidenceIsStale = Boolean(
+      options.preferCurrentZoneIngredient &&
+      Number.isFinite(currentZoneEvidenceAgeMs) &&
+      currentZoneEvidenceAgeMs > LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS
+    );
+    const loadingStartForcedIngredientName = currentZoneEvidenceIsStale
+      ? null
+      : this._resolveForcedLoadingStartIngredient(state, zonesConfig, options);
+    if (loadingStartForcedIngredientName) {
+      state.loadingForcedIngredientName = loadingStartForcedIngredientName;
+    }
+    if (!state.loadingContextIngredientName) {
+      state.loadingContextIngredientName = loadingStartForcedIngredientName || options.loadingContextIngredientName || null;
+    }
+    this._freezeZoneScoreboardForLoading(state);
+
+    if (currentZoneEvidenceIsStale && !state.loadingContextIngredientName && !state.loadingForcedIngredientName) {
+      return null;
+    }
+
+    return this._resolveSegmentIngredient(state, expectedIngredients, {
+      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+      preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
+      packetTimeMs: options.packetTimeMs,
+      visitedZoneMaxAgeMs: options.visitedZoneMaxAgeMs
+    });
+  }
+
+  resolveIngredientAtKnownLoadingStart(packet, zonesConfig, settings = {}, options = {}) {
+    const deviceId = options.deviceId || packet.deviceId || packet.device_id || 'host_01';
+    const state = this.deviceStates.get(deviceId);
+    if (!state) return null;
+
+    const packetTimeMs = this._parsePacketTimestampMs(packet);
+    const lat = Number(packet.lat);
+    const lon = Number(packet.lon);
+    const thresholds = this._resolveThresholds(settings);
+    const currentZoneEvidenceAgeMs = options.currentZoneEvidenceAgeMs === null || options.currentZoneEvidenceAgeMs === undefined
+      ? Number.NaN
+      : Number(options.currentZoneEvidenceAgeMs);
+    const useHostZoneEvidence = Boolean(
+      options.preferCurrentZoneIngredient &&
+      Number.isFinite(currentZoneEvidenceAgeMs) &&
+      currentZoneEvidenceAgeMs > LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS &&
+      isValidLocation(Number(options.hostLat), Number(options.hostLon))
+    );
+    const zoneLat = useHostZoneEvidence ? Number(options.hostLat) : lat;
+    const zoneLon = useHostZoneEvidence ? Number(options.hostLon) : lon;
+    const activePositionSource = useHostZoneEvidence ? 'host' : (options.effectivePositionSource || 'host');
+    const activeZone = isValidLocation(zoneLat, zoneLon)
+      ? detectZoneWithRadiusFallback(zoneLat, zoneLon, zonesConfig, options.hostLat, options.hostLon)
+      : null;
+    const activeIngredientName = activeZone?.ingredient || activeZone?.name || null;
+    const expectedIngredients = Array.isArray(options.expectedIngredients) ? options.expectedIngredients : [];
+    const visitedZoneMaxAgeMs = this._getVisitedZoneMaxAgeMs(thresholds);
+    const loadingContextIngredientName = this._resolveLoadingStartIngredient(state, activeIngredientName, expectedIngredients, {
+      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+      preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
+      packetTimeMs,
+      visitedZoneMaxAgeMs,
+      currentZoneEvidenceAgeMs: options.currentZoneEvidenceAgeMs
+    });
+
+    this._rememberLoadingStart(state, packetTimeMs, lat, lon);
+    const ingredientName = this._activateLoadingStartContext(state, zonesConfig, expectedIngredients, {
+      loadingContextIngredientName,
+      allowVisitedZoneIngredient: options.allowVisitedZoneIngredient,
+      preferCurrentZoneIngredient: options.preferCurrentZoneIngredient,
+      packetTimeMs,
+      visitedZoneMaxAgeMs,
+      currentZoneEvidenceAgeMs: options.currentZoneEvidenceAgeMs,
+      hostLat: options.hostLat,
+      hostLon: options.hostLon
+    });
+    if (!options.returnDecisionDetails) {
+      return ingredientName;
+    }
+
+    const forcedIngredientName = state.loadingForcedIngredientName || null;
+    const scoreboard = this._serializeZoneCandidates(state)
+      .slice()
+      .sort((left, right) => Number(right.score || 0) - Number(left.score || 0));
+    const selectedFromScoreboard = scoreboard.some((candidate) => (
+      normalizeIngredientName(candidate.ingredient || candidate.name) === normalizeIngredientName(ingredientName)
+    ));
+    const selectedFromActiveZone = Boolean(
+      activeIngredientName &&
+      normalizeIngredientName(activeIngredientName) === normalizeIngredientName(ingredientName)
+    );
+    const source = forcedIngredientName
+      ? 'forced_current_zone'
+      : selectedFromActiveZone
+        ? (activePositionSource === 'rtk' ? 'loader_current_zone' : 'host_current_zone')
+        : options.allowVisitedZoneIngredient && selectedFromScoreboard
+          ? 'loader_scoreboard'
+          : state.currentZone?.ingredient && ingredientName
+            ? 'confirmed_current_zone'
+            : 'unknown';
+    return {
+      ingredientName,
+      source,
+      effectivePositionSource: activePositionSource,
+      activeZone: activeZone ? {
+        id: activeZone.id ?? null,
+        name: activeZone.name || null,
+        ingredient: activeZone.ingredient || activeZone.name || null
+      } : null,
+      forcedIngredientName,
+      loadingContextIngredientName: state.loadingContextIngredientName || null,
+      expectedNextIngredientKey: this._getExpectedNextIngredientKey(state, expectedIngredients),
+      timestamp: new Date(packetTimeMs).toISOString(),
+      lat: Number.isFinite(lat) ? lat : null,
+      lon: Number.isFinite(lon) ? lon : null,
+      visitedZoneMaxAgeMs,
+      currentZoneEvidenceAgeMs: Number.isFinite(Number(options.currentZoneEvidenceAgeMs))
+        ? Number(options.currentZoneEvidenceAgeMs)
+        : null,
+      scoreboard
+    };
+  }
+
+  completeKnownLoadingSegment(deviceId, packet = {}) {
+    const state = this.deviceStates.get(deviceId || packet.deviceId || 'host_01');
+    if (!state) return;
+
+    const packetTimeMs = this._parsePacketTimestampMs(packet);
+    const weight = Number.isFinite(Number(packet.weight)) ? Number(packet.weight) : Number(state.zoneStartWeight || 0);
+    this._setZoneBaseline(state, weight, packetTimeMs, packet.lat, packet.lon);
+    this._resetVisitedZones(state, packetTimeMs);
   }
 
   _hasLoadingContext(state, options = {}) {
@@ -1682,6 +1896,17 @@ export class TelemetryProcessor {
     const allowVisitedZoneIngredient = options.allowVisitedZoneIngredient !== false;
     const preferCurrentZoneIngredient = Boolean(options.preferCurrentZoneIngredient);
     const visitedZoneMaxAgeMs = this._getVisitedZoneMaxAgeMs(thresholds);
+    const currentZoneEvidenceAgeMs = options.currentZoneEvidenceAgeMs === null || options.currentZoneEvidenceAgeMs === undefined
+      ? Number.NaN
+      : Number(options.currentZoneEvidenceAgeMs);
+    const useHostZoneEvidence = Boolean(
+      preferCurrentZoneIngredient &&
+      Number.isFinite(currentZoneEvidenceAgeMs) &&
+      currentZoneEvidenceAgeMs > LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS &&
+      isValidLocation(Number(options.hostLat), Number(options.hostLon))
+    );
+    const zoneEvidenceLat = useHostZoneEvidence ? Number(options.hostLat) : lat;
+    const zoneEvidenceLon = useHostZoneEvidence ? Number(options.hostLon) : lon;
 
     if (!weightResolution.usable) {
       if (!state.recoveringFromInvalidWeight) {
@@ -1721,7 +1946,7 @@ export class TelemetryProcessor {
     }
 
     if (movement.exitedMoving && resolveTimestampMs(state.loadingStartTimeMs) !== null && !state.isUnloading) {
-      const motionActiveZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+      const motionActiveZone = detectZoneWithRadiusFallback(zoneEvidenceLat, zoneEvidenceLon, zonesConfig, options.hostLat, options.hostLon);
       const motionActiveZoneName = motionActiveZone?.name || null;
       const confirmedLoadingZoneName = state.confirmedZoneName || null;
       const segmentPeakWeight = Number(state.segmentPeakWeight);
@@ -1802,7 +2027,7 @@ export class TelemetryProcessor {
       }
     }
 
-    const nearbyLoadingZone = detectZoneWithRadiusFallback(lat, lon, zonesConfig);
+    const nearbyLoadingZone = detectZoneWithRadiusFallback(zoneEvidenceLat, zoneEvidenceLon, zonesConfig, options.hostLat, options.hostLon);
     if (suppressLoading && nearbyLoadingZone && !state.isUnloading) {
       suppressLoading = false;
     }
@@ -1913,11 +2138,12 @@ export class TelemetryProcessor {
       state.pendingZoneCount = 0;
     }
 
-    const loadingContextIngredientName = activeIngredientName || this._resolveSegmentIngredient(state, expectedIngredients, {
+    const loadingContextIngredientName = this._resolveLoadingStartIngredient(state, activeIngredientName, expectedIngredients, {
       allowVisitedZoneIngredient,
       preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient,
       packetTimeMs,
-      visitedZoneMaxAgeMs
+      visitedZoneMaxAgeMs,
+      currentZoneEvidenceAgeMs: options.currentZoneEvidenceAgeMs
     });
     const hasCandidateLoadingContext = Boolean(
       loadingContextIngredientName &&
@@ -1958,14 +2184,16 @@ export class TelemetryProcessor {
       this._updateLoadingStartCandidate(state, currentWeight, thresholds, packetTimeMs, lat, lon)
     );
     if (hasConfirmedLoadingStart) {
-      const loadingStartForcedIngredientName = this._resolveForcedLoadingStartIngredient(state, zonesConfig);
-      if (loadingStartForcedIngredientName) {
-        state.loadingForcedIngredientName = loadingStartForcedIngredientName;
-      }
-      if (!state.loadingContextIngredientName) {
-        state.loadingContextIngredientName = loadingStartForcedIngredientName || loadingContextIngredientName;
-      }
-      this._freezeZoneScoreboardForLoading(state);
+      this._activateLoadingStartContext(state, zonesConfig, expectedIngredients, {
+        loadingContextIngredientName,
+        allowVisitedZoneIngredient,
+        preferCurrentZoneIngredient: shouldPreferCurrentZoneIngredient,
+        packetTimeMs,
+        visitedZoneMaxAgeMs,
+        currentZoneEvidenceAgeMs: options.currentZoneEvidenceAgeMs,
+        hostLat: options.hostLat,
+        hostLon: options.hostLon
+      });
     }
 
     // Базовый вес обновляется только в спокойном режиме

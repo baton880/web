@@ -6,6 +6,7 @@
   import { fileURLToPath } from 'url'
   import telemetryRouter from './modules/telemetry/telemetry.routes.js'
   import rtkTelemetryRouter, { handleRtkTelemetryPost } from './modules/telemetry/rtk.routes.js'
+  import { recordRtkMalformedRequest } from './modules/telemetry/rtk-ingest-monitor.js'
   import telemetryWarningsRouter from './modules/telemetry/warnings.routes.js'
   import telemetrySettingsRouter from './modules/telemetry/telemetry-settings.routes.js'
   import storageZonesRouter from './modules/storage-zones/storage-zones.routes.js'
@@ -56,12 +57,15 @@
       req.body = JSON.parse(rawBody)
       return next()
     } catch (error) {
-      console.warn('[RTK ingest warning]: malformed raw body acknowledged before JSON parser', {
+      console.warn('[RTK ingest warning]: malformed raw body acknowledged and recorded before JSON parser', {
         type: error?.type,
         status: error?.status,
         message: error?.message,
         rawLength: rawBody.length,
         rawPreview: rawBody.slice(0, 200)
+      })
+      recordRtkMalformedRequest(rawBody, error).catch((monitorError) => {
+        console.error('[RTK ingest monitor] Failed to record malformed body:', monitorError)
       })
       return res.status(201).end()
     }
@@ -80,12 +84,15 @@
   }))
   app.use((error, req, res, next) => {
     if (req.originalUrl?.startsWith('/api/telemetry/rtk')) {
-      console.warn('[RTK ingest warning]: malformed body acknowledged before route', {
+      console.warn('[RTK ingest warning]: malformed body acknowledged and recorded before route', {
         type: error?.type,
         status: error?.status,
         message: error?.message,
         rawLength: req.rawBody?.length ?? null,
         rawPreview: req.rawBody ? req.rawBody.slice(0, 200) : null
+      })
+      recordRtkMalformedRequest(req.rawBody || '', error).catch((monitorError) => {
+        console.error('[RTK ingest monitor] Failed to record malformed body:', monitorError)
       })
       return res.status(201).end()
     }

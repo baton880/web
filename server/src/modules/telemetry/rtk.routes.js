@@ -6,6 +6,12 @@ import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-se
 import { getHostTrackClearSince } from './track-state-store.js'
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import {
+  getRtkIngestStatus,
+  noteRtkRequestAcknowledged,
+  recordRtkIngestFailure,
+  recordRtkIngestResult
+} from './rtk-ingest-monitor.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -1017,12 +1023,15 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
 
 export function handleRtkTelemetryPost(req, res) {
   const receivedAt = new Date()
-
+  noteRtkRequestAcknowledged(req.body)
   res.status(201).end()
 
   setImmediate(() => {
     processRtkTelemetryBody(req.body, receivedAt)
       .then((result) => {
+        recordRtkIngestResult(req.body, result, receivedAt).catch((monitorError) => {
+          console.error('[RTK ingest monitor] Failed to record ingest result:', monitorError)
+        })
         if (result.accepted > 0 || result.dropped > 0) {
           console.log('[RTK ingest background]:', {
             received: result.received,
@@ -1033,11 +1042,23 @@ export function handleRtkTelemetryPost(req, res) {
       })
       .catch((error) => {
         console.error('[Ошибка POST /api/telemetry/rtk background]:', error)
+        recordRtkIngestFailure(req.body, error, receivedAt).catch((monitorError) => {
+          console.error('[RTK ingest monitor] Failed to record ingest failure:', monitorError)
+        })
       })
   })
 }
 
 router.post('/', handleRtkTelemetryPost)
+
+router.get('/admin/ingest-status', authenticate, requireAdmin, async (req, res) => {
+  try {
+    res.json(await getRtkIngestStatus())
+  } catch (error) {
+    console.error('[Ошибка GET /api/telemetry/rtk/admin/ingest-status]:', error)
+    res.status(500).json({ error: 'Internal server error' })
+  }
+})
 
 router.get('/current', authenticate, requireReadAccess, async (req, res) => {
   try {

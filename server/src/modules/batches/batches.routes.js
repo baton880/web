@@ -8,6 +8,7 @@ import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
 import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js';
 import { buildPostprocessMeta, postprocessCompletedBatch } from './batch-postprocess-service.js';
+import { DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS } from './weight-step-postprocess.js';
 
 const router = Router();
 const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
@@ -171,6 +172,61 @@ async function getBatchWeightContext(batch, prismaClient = prisma) {
 function parsePositiveInteger(value, fallback) {
     const parsed = Number.parseInt(value, 10);
     return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
+}
+
+function parsePostprocessDebugOptions(query = {}) {
+    const result = {};
+
+    for (const [key, defaultValue] of Object.entries(DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS)) {
+        const rawValue = query?.[key];
+        if (rawValue === undefined || rawValue === null || rawValue === '') {
+            continue;
+        }
+
+        if (typeof defaultValue === 'boolean') {
+            const normalized = String(rawValue).trim().toLowerCase();
+            if (normalized === 'true' || normalized === '1') result[key] = true;
+            if (normalized === 'false' || normalized === '0') result[key] = false;
+            continue;
+        }
+
+        const numeric = Number(rawValue);
+        if (Number.isFinite(numeric)) {
+            result[key] = numeric;
+        }
+    }
+
+    return result;
+}
+
+function buildPostprocessDebugPayload(postprocess) {
+    const analysis = postprocess?.analysis || {};
+
+    return {
+        status: postprocess?.status || analysis.status || 'processing',
+        reason: postprocess?.reason || analysis.reason || null,
+        generatedAt: postprocess?.generatedAt || null,
+        filter: analysis.filter || null,
+        speedFilter: analysis.speedFilter || null,
+        options: analysis.options || null,
+        bounds: analysis.bounds || null,
+        points: Array.isArray(analysis.points) ? analysis.points : [],
+        inBatchPoints: Array.isArray(analysis.inBatchPoints) ? analysis.inBatchPoints : [],
+        plateaus: Array.isArray(analysis.plateaus) ? analysis.plateaus : [],
+        events: Array.isArray(analysis.events) ? analysis.events : [],
+        ingredients: Array.isArray(postprocess?.ingredients) ? postprocess.ingredients : [],
+        replayFrames: Array.isArray(postprocess?.replayFrames) ? postprocess.replayFrames : [],
+        summary: {
+            loaded: analysis.loaded ?? null,
+            unloaded: analysis.unloaded ?? null,
+            net: analysis.net ?? null,
+            observedNet: analysis.observedNet ?? null,
+            range: analysis.range ?? null,
+            first: analysis.first ?? null,
+            last: analysis.last ?? null,
+            eventCount: Array.isArray(analysis.includedEvents) ? analysis.includedEvents.length : 0
+        }
+    };
 }
 
 function findInstantStartIngredient(batch) {
@@ -371,6 +427,22 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
             ? { status: 'processing', reason: 'not_checked' }
             : { status: 'in_progress', reason: 'batch_in_progress' }
     );
+    const postprocessLoaded = Number(postprocess?.analysis?.loaded);
+    const postprocessUnloaded = Number(postprocess?.analysis?.unloaded);
+    const hasPostprocessUnload = postprocess?.status === 'complete' &&
+        Number.isFinite(postprocessLoaded) &&
+        Number.isFinite(postprocessUnloaded);
+    const unloadProgress = hasPostprocessUnload
+        ? {
+            target_weight: roundWeight(postprocessLoaded),
+            unloaded_fact: roundWeight(postprocessUnloaded)
+        }
+        : buildUnloadProgress(batch, weightContext.currentWeight, { peakWeight: weightContext.peakWeight });
+    const postprocessRemainingWeight = hasPostprocessUnload
+        ? roundNonNegativeWeight(postprocessLoaded - postprocessUnloaded)
+        : weightContext.remainingWeight;
+    const postprocessLatestTelemetryAt = postprocess?.analysis?.bounds?.endTime
+        || weightContext.latestTelemetryAt;
     const ingredientSummary = buildIngredientSummary(batch, telemetrySettings);
     const summaryViolationByKey = new Map(ingredientSummary.map((item) => [
         normalizeIngredientName(item.name),
@@ -419,9 +491,9 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
         } : null,
         unloadingInfo: {
             barnName: batch.group?.name || 'Коровник не выбран',
-            remainingWeight: weightContext.remainingWeight,
-            latestTelemetryAt: weightContext.latestTelemetryAt,
-            progress: buildUnloadProgress(batch, weightContext.currentWeight, { peakWeight: weightContext.peakWeight })
+            remainingWeight: postprocessRemainingWeight,
+            latestTelemetryAt: postprocessLatestTelemetryAt,
+            progress: unloadProgress
         },
         actualIngredients: batch.actualIngredients.map((ing) => ({
             id: ing.id,
@@ -631,6 +703,56 @@ router.get('/:id', authenticate, requireReadAccess, async (req, res) => {
     } catch (error) {
         console.error('[Ошибка GET /batches/:id]:', error);
         res.status(500).json({ error: 'Не удалось получить замес' });
+    }
+});
+
+// ============================================================================
+// 2.1 GET /:id/postprocess-debug - admin-only, non-persistent preview
+// ============================================================================
+router.get('/:id/postprocess-debug', authenticate, requireAdmin, async (req, res) => {
+    try {
+        const batchId = parseInt(req.params.id, 10);
+        if (!Number.isInteger(batchId)) {
+            return res.status(400).json({ error: 'Некорректный ID замеса' });
+        }
+
+        const batch = await prisma.batch.findUnique({
+            where: { id: batchId },
+            select: {
+                id: true,
+                deviceId: true,
+                startTime: true,
+                endTime: true
+            }
+        });
+        if (!batch) {
+            return res.status(404).json({ error: 'Замес не найден' });
+        }
+
+        const telemetrySettings = await getTelemetrySettings(prisma);
+        const stepOptions = parsePostprocessDebugOptions(req.query);
+        const postprocess = batch.endTime
+            ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, {
+                persist: false,
+                disableCache: true,
+                stepOptions
+            })
+            : { status: 'in_progress', reason: 'batch_in_progress' };
+        const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 180);
+        const rtkTrack = await getBatchLoaderTrack(batch, prisma, {
+            lookbackSeconds: loaderLookbackSeconds
+        });
+
+        return res.json({
+            batchId: batch.id,
+            postprocess: buildPostprocessMeta(postprocess),
+            debug: buildPostprocessDebugPayload(postprocess),
+            hostTrack: Array.isArray(postprocess?.hostTrack) ? postprocess.hostTrack : [],
+            rtkTrack
+        });
+    } catch (error) {
+        console.error('[Ошибка debug postprocess замеса]:', error);
+        return res.status(500).json({ error: 'Не удалось собрать отладку постпроцессинга' });
     }
 });
 

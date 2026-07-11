@@ -74,6 +74,17 @@ export async function resolveEffectiveCoordinates(prisma, telemetryLike, options
     thresholdMs: options.thresholdMs || loaderOfflineTimeoutMinutes * 60 * 1000
   })
 
+  return resolveEffectiveCoordinatesFromRtkPoint(source, rtkPoint, {
+    loaderMaxDistanceMeters
+  })
+}
+
+export function resolveEffectiveCoordinatesFromRtkPoint(telemetryLike, rtkPoint, options = {}) {
+  const source = telemetryLike || {}
+  const loaderMaxDistanceMeters = Number(options.loaderMaxDistanceMeters) > 0
+    ? Number(options.loaderMaxDistanceMeters)
+    : DEFAULT_LOADER_MAX_DISTANCE_METERS
+
   if (rtkPoint) {
     const hostLat = Number(source.lat)
     const hostLon = Number(source.lon)

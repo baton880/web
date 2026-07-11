@@ -5,6 +5,12 @@ const WEIGHT_FILTER = {
   rollingMedianRadius: 8,
   roundToKg: 5
 }
+const HOST_SPEED_FILTER = {
+  source: 'speedKmh',
+  hampelRadius: 32,
+  hampelSigma: 10,
+  rollingMedianRadius: 6
+}
 const BUFFER_OVERLAP_WINDOW_MS = 10 * 1000
 const BUFFER_OVERLAP_MAX_DISTANCE_M = 50
 
@@ -41,7 +47,8 @@ export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   startSoftPlateauRangeKg: 30,
   rawCutoffKg: -1000,
   rawCutoffDropKg: 500,
-  excludeBounceDips: true
+  excludeBounceDips: true,
+  speedOffsetSec: 0
 }
 
 export function resolveWeightStepOptions(overrides = {}) {
@@ -72,6 +79,11 @@ export function resolveWeightStepOptions(overrides = {}) {
   }
   if (!(Number(options.stableRadius) >= 1)) {
     options.stableRadius = DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS.stableRadius
+  }
+
+  const analysisStartMs = timestampMs(source.analysisStartTime ?? source.analysisStartMs)
+  if (Number.isFinite(analysisStartMs)) {
+    options.analysisStartMs = analysisStartMs
   }
 
   return options
@@ -271,7 +283,8 @@ function decoratePlateaus(plateaus, opts) {
 
 function normalizeTelemetryRows(rows = [], opts) {
   const scale = Number.isFinite(opts.weightScale) && opts.weightScale > 0 ? opts.weightScale : 1
-  return (Array.isArray(rows) ? rows : [])
+  const speedOffsetMs = Number.isFinite(Number(opts.speedOffsetSec)) ? Number(opts.speedOffsetSec) * 1000 : 0
+  const points = (Array.isArray(rows) ? rows : [])
     .map((row) => ({
       id: row.id ?? null,
       x: timestampMs(row.timestamp ?? row.t),
@@ -279,13 +292,23 @@ function normalizeTelemetryRows(rows = [], opts) {
       raw: scaleWeight(finiteNumber(row.rawWeight ?? row.raw_weight ?? row.r), scale),
       weight: scaleWeight(finiteNumber(row.weight ?? row.w), scale),
       weightValid: row.weightValid ?? row.weight_valid ?? null,
-      speed: finiteNumber(row.speedKmh ?? row.speed_kmh ?? row.s),
+      rawSpeed: finiteNumber(row.speedKmh ?? row.speed_kmh ?? row.s),
       lat: finiteNumber(row.lat),
       lon: finiteNumber(row.lon),
       original: row
     }))
     .filter((point) => Number.isFinite(point.x))
     .sort((left, right) => left.x - right.x || Number(left.id || 0) - Number(right.id || 0))
+
+  const filteredSpeeds = rollingMedian(
+    hampel(points.map((point) => point.rawSpeed), HOST_SPEED_FILTER.hampelRadius, HOST_SPEED_FILTER.hampelSigma),
+    HOST_SPEED_FILTER.rollingMedianRadius
+  )
+  return points.map((point, index) => ({
+      ...point,
+      speed: filteredSpeeds[index],
+      speedX: point.x + speedOffsetMs
+    }))
 }
 
 export function hasUsableRawWeight(rows = []) {
@@ -550,7 +573,10 @@ function insertTransitionPlateaus(points, plateaus, opts, batchStartMs = null) {
 }
 
 function speedSummary(points, fromMs, toMs, movingSpeedKmh = 0.1) {
-  const selected = points.filter((point) => point.x >= fromMs && point.x <= toMs)
+  const selected = points.filter((point) => {
+    const speedX = Number.isFinite(point.speedX) ? point.speedX : point.x
+    return speedX >= fromMs && speedX <= toMs
+  })
   const speeds = selected.map((point) => Math.abs(point.speed)).filter(Number.isFinite)
   if (!speeds.length) return { avg: null, max: null, movingPct: null }
   let movingMs = 0
@@ -558,8 +584,10 @@ function speedSummary(points, fromMs, toMs, movingSpeedKmh = 0.1) {
   for (let index = 0; index < selected.length; index += 1) {
     const point = selected[index]
     const next = selected[index + 1]
-    const segmentStart = Math.max(fromMs, point.x)
-    const segmentEnd = Math.min(toMs, next?.x ?? toMs)
+    const pointSpeedX = Number.isFinite(point.speedX) ? point.speedX : point.x
+    const nextSpeedX = Number.isFinite(next?.speedX) ? next.speedX : next?.x
+    const segmentStart = Math.max(fromMs, pointSpeedX)
+    const segmentEnd = Math.min(toMs, nextSpeedX ?? toMs)
     const segmentMs = Math.max(0, segmentEnd - segmentStart)
     if (!segmentMs) continue
     coveredMs += segmentMs
@@ -682,26 +710,31 @@ function moving(point, opts) {
 }
 
 function findAnalysisBounds(points, batchStartMs, batchEndMs, opts) {
-  const minStart = batchStartMs - opts.boundaryMinExtendMs
+  const explicitStartMs = Number.isFinite(opts.analysisStartMs) ? opts.analysisStartMs : null
+  const minStart = explicitStartMs ?? (batchStartMs - opts.boundaryMinExtendMs)
   const minEnd = batchEndMs + opts.boundaryMinExtendMs
   const firstPointMs = points[0]?.x ?? minStart
   const lastPointMs = points[points.length - 1]?.x ?? minEnd
   let startMs = Math.max(firstPointMs, minStart)
   let endMs = Math.min(lastPointMs, minEnd)
 
-  for (let index = points.length - 1; index >= 0; index -= 1) {
-    const point = points[index]
-    if (point.x > minStart) continue
-    if (moving(point, opts)) {
-      startMs = Math.max(firstPointMs, point.x)
-      break
+  if (explicitStartMs === null) {
+    for (let index = points.length - 1; index >= 0; index -= 1) {
+      const point = points[index]
+      const speedX = Number.isFinite(point.speedX) ? point.speedX : point.x
+      if (speedX > minStart) continue
+      if (moving(point, opts)) {
+        startMs = Math.max(firstPointMs, speedX)
+        break
+      }
     }
   }
 
   for (const point of points) {
-    if (point.x < minEnd) continue
+    const speedX = Number.isFinite(point.speedX) ? point.speedX : point.x
+    if (speedX < minEnd) continue
     if (moving(point, opts)) {
-      endMs = Math.min(lastPointMs, point.x)
+      endMs = Math.min(lastPointMs, speedX)
       break
     }
   }
@@ -895,7 +928,9 @@ function serializePoint(point) {
     rawWeight: Number.isFinite(point.raw) ? point.raw : null,
     telemetryWeight: Number.isFinite(point.weight) ? point.weight : null,
     weightValid: point.weightValid ?? null,
+    rawSpeedKmh: Number.isFinite(point.rawSpeed) ? point.rawSpeed : null,
     speedKmh: Number.isFinite(point.speed) ? point.speed : null,
+    speedTimestamp: Number.isFinite(point.speedX) ? new Date(point.speedX) : null,
     lat: Number.isFinite(point.lat) ? point.lat : null,
     lon: Number.isFinite(point.lon) ? point.lon : null
   }
@@ -945,6 +980,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       status: 'in_progress',
       reason: 'batch_in_progress',
       filter: WEIGHT_FILTER,
+      speedFilter: HOST_SPEED_FILTER,
       options: resolveWeightStepOptions(rawOptions),
       points: [],
       plateaus: [],
@@ -958,6 +994,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       status: 'processing',
       reason: 'raw_weight_missing',
       filter: WEIGHT_FILTER,
+      speedFilter: HOST_SPEED_FILTER,
       options: resolveWeightStepOptions(rawOptions),
       points: [],
       plateaus: [],
@@ -976,6 +1013,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       status: 'processing',
       reason: 'insufficient_points',
       filter: WEIGHT_FILTER,
+      speedFilter: HOST_SPEED_FILTER,
       options: opts,
       points: points.map(serializePoint),
       plateaus: [],
@@ -991,6 +1029,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       status: 'processing',
       reason: 'insufficient_analysis_points',
       filter: WEIGHT_FILTER,
+      speedFilter: HOST_SPEED_FILTER,
       options: opts,
       points: points.map(serializePoint),
       plateaus: [],
@@ -1065,6 +1104,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
     status: 'complete',
     reason: null,
     filter: WEIGHT_FILTER,
+    speedFilter: HOST_SPEED_FILTER,
     options: opts,
     bounds: {
       startTime: new Date(bounds.startMs),
@@ -1098,6 +1138,8 @@ export function buildPostprocessedHostTrack(analysis) {
     telemetryWeight: point.telemetryWeight,
     weightValid: point.weightValid,
     speedKmh: point.speedKmh,
+    rawSpeedKmh: point.rawSpeedKmh,
+    speedTimestamp: point.speedTimestamp,
     lat: point.lat,
     lon: point.lon
   })).sort(compareTrackPoints)

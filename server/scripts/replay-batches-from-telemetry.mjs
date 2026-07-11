@@ -24,6 +24,15 @@ const BATCH_START_INGREDIENT_LOOKBACK_MS = 10 * 60 * 1000
 const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
 )
+const REPLAY_FROM = (() => {
+  const value = String(process.env.REPLAY_FROM || '').trim()
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid REPLAY_FROM value: ${value}`)
+  }
+  return parsed
+})()
 
 function parseBoolean(value) {
   if (typeof value === 'boolean') return value
@@ -802,6 +811,8 @@ async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
 async function main() {
   telemetryProcessor.clearStates()
 
+  const replayTelemetryWhere = REPLAY_FROM ? { timestamp: { gte: REPLAY_FROM } } : {}
+
   const [
     telemetryCount,
     rtkCount,
@@ -809,8 +820,8 @@ async function main() {
     livestockGroups,
     telemetrySettingsRaw
   ] = await Promise.all([
-    prisma.telemetry.count(),
-    prisma.rtkTelemetry.count(),
+    prisma.telemetry.count({ where: replayTelemetryWhere }),
+    prisma.rtkTelemetry.count({ where: replayTelemetryWhere }),
     prisma.storageZone.findMany({ where: { active: true }, orderBy: { id: 'asc' } }),
     prisma.livestockGroup.findMany({
       include: {
@@ -844,12 +855,14 @@ async function main() {
 
   console.log(`Raw telemetry rows: ${telemetryCount}`)
   console.log(`RTK rows: ${rtkCount}`)
+  console.log(`Replay from: ${REPLAY_FROM ? REPLAY_FROM.toISOString() : 'all telemetry'}`)
   console.log(`Active zones: ${activeZones.length}, loading zones: ${loadingZones.length}`)
   console.log('Clearing calculated batches...')
   await resetCalculatedTables()
 
   console.log('Loading RTK index...')
   const rtkIndex = indexRtkPoints(await prisma.rtkTelemetry.findMany({
+    where: replayTelemetryWhere,
     orderBy: [
       { timestamp: 'asc' },
       { id: 'asc' }
@@ -888,6 +901,7 @@ async function main() {
 
   while (true) {
     const rows = await prisma.telemetry.findMany({
+      where: replayTelemetryWhere,
       take: pageSize,
       ...(cursor ? { skip: 1, cursor: { id: cursor } } : {}),
       orderBy: [
@@ -929,11 +943,17 @@ async function main() {
       const hostLoadingZone = detectZoneObject(packet.lat, packet.lon, loadingZones)
       const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
       const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
+      const currentZoneEvidenceAgeMs = effectivePosition.source === 'rtk'
+        ? Math.max(0, new Date(packet.timestamp).getTime() - new Date(effectivePosition.rtkPoint?.timestamp).getTime())
+        : null
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
         skipZoneVisit: effectivePosition.source === 'rtk',
         allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
         preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
+        currentZoneEvidenceAgeMs,
+        hostLat: Number(packet.lat),
+        hostLon: Number(packet.lon),
         hostForceIngredientName,
         expectedIngredients
       })

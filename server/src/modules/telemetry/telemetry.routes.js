@@ -437,6 +437,9 @@ router.post('/', async (req, res) => {
     const hostLoadingZone = getZoneByCoordinates(packet.lat, packet.lon, loadingZones)
     const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
     const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
+    const currentZoneEvidenceAgeMs = effectivePosition.source === 'rtk'
+      ? Math.max(0, new Date(packet.timestamp).getTime() - new Date(effectivePosition.rtkPoint?.timestamp).getTime())
+      : null
 
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
@@ -444,6 +447,9 @@ router.post('/', async (req, res) => {
       skipZoneVisit: effectivePosition.source === 'rtk',
       allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
       preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
+      currentZoneEvidenceAgeMs,
+      hostLat: Number(packet.lat),
+      hostLon: Number(packet.lon),
       hostForceIngredientName,
       expectedIngredients: resolveExpectedIngredientsFromBatch(activeBatchForHints)
     });

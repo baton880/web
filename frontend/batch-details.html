@@ -14,7 +14,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260709a" rel="stylesheet">
+    <link href="css/custom.css?v=20260710b" rel="stylesheet">
     <link href="css/responsive.css?v=20260709a" rel="stylesheet">
     <script src="js/app-auth.js?v=20260419a"></script>
 
@@ -107,6 +107,113 @@
                             <i class="fas fa-arrow-left mr-1"></i>
                             К списку замесов
                         </a>
+                    </div>
+
+                    <div id="batchPostprocessDebugCard" class="card shadow mb-4" data-requires-admin>
+                        <div class="card-header py-3 d-flex flex-column flex-md-row align-items-md-center justify-content-between">
+                            <div>
+                                <h6 class="m-0 font-weight-bold text-primary">
+                                    <i class="fas fa-flask mr-1"></i>
+                                    Отладка постпроцессинга
+                                </h6>
+                                <div class="small text-muted mt-1">Предпросмотр не сохраняет настройки и не меняет замес</div>
+                            </div>
+                            <div class="mt-2 mt-md-0 d-flex align-items-center" style="gap: 0.5rem;">
+                                <button id="postprocessDebugCollapse" type="button" class="btn btn-sm btn-outline-secondary postprocess-debug-collapse-button" aria-expanded="true" aria-controls="batchPostprocessDebugBody">
+                                    <i class="fas fa-chevron-up mr-1"></i>
+                                    Свернуть
+                                </button>
+                                <button id="postprocessDebugRefresh" type="button" class="btn btn-sm btn-outline-primary">
+                                    <i class="fas fa-sync-alt mr-1"></i>
+                                    Обновить
+                                </button>
+                            </div>
+                        </div>
+                        <div id="batchPostprocessDebugBody" class="card-body">
+                            <div id="postprocessDebugState" class="postprocess-debug-state d-none" role="status" aria-live="polite"></div>
+
+                            <div id="postprocessDebugSummary" class="row postprocess-debug-summary mb-4"></div>
+
+                            <details class="postprocess-debug-settings mb-4" open>
+                                <summary>
+                                    <span>Параметры детектора</span>
+                                    <span id="postprocessDebugFilterMeta" class="small text-muted"></span>
+                                </summary>
+                                <p class="small text-muted mt-3 mb-3">
+                                    Значения применяются только к этому отладочному предпросмотру. Сохранённые замес и общие настройки не меняются.
+                                </p>
+                                <div id="postprocessDebugMainOptions" class="row"></div>
+                                <details class="postprocess-debug-advanced mt-3">
+                                    <summary>Тонкие настройки</summary>
+                                    <div id="postprocessDebugAdvancedOptions" class="row pt-3"></div>
+                                </details>
+                                <div class="d-flex flex-wrap align-items-center mt-3" style="gap: 8px;">
+                                    <button id="postprocessDebugApply" type="button" class="btn btn-primary btn-sm">
+                                        <i class="fas fa-play mr-1"></i>
+                                        Пересчитать предпросмотр
+                                    </button>
+                                    <button id="postprocessDebugReset" type="button" class="btn btn-outline-secondary btn-sm">
+                                        <i class="fas fa-undo mr-1"></i>
+                                        Вернуть рабочие значения
+                                    </button>
+                                    <span id="postprocessDebugGeneratedAt" class="small text-muted"></span>
+                                </div>
+                            </details>
+
+                            <div id="postprocessDebugToggles" class="postprocess-debug-toggles mb-3" aria-label="Слои графика"></div>
+
+                            <div class="postprocess-debug-chart-stack">
+                                <div class="postprocess-debug-chart-card">
+                                    <div class="postprocess-debug-chart-card__title">Вес host: raw, telemetry и фильтр</div>
+                                    <div class="postprocess-debug-chart-wrap">
+                                        <canvas id="postprocessDebugHostChart" aria-label="Отладочный график веса host" role="img"></canvas>
+                                        <div id="postprocessDebugHostEmpty" class="batch-detail-empty d-none">Нет точек для отладочного графика</div>
+                                    </div>
+                                </div>
+                                <div class="postprocess-debug-chart-card">
+                                    <div class="postprocess-debug-chart-card__title">Скорость host — фильтрованная (Hampel → median)</div>
+                                    <div class="postprocess-debug-chart-wrap postprocess-debug-chart-wrap--speed">
+                                        <canvas id="postprocessDebugHostSpeedChart" aria-label="График скорости host" role="img"></canvas>
+                                        <div id="postprocessDebugHostSpeedEmpty" class="batch-detail-empty d-none">Нет данных скорости host</div>
+                                    </div>
+                                </div>
+                                <div class="postprocess-debug-chart-card">
+                                    <div class="postprocess-debug-chart-card__title">Скорость RTK</div>
+                                    <div class="postprocess-debug-chart-wrap postprocess-debug-chart-wrap--speed">
+                                        <canvas id="postprocessDebugRtkSpeedChart" aria-label="График скорости RTK" role="img"></canvas>
+                                        <div id="postprocessDebugRtkSpeedEmpty" class="batch-detail-empty d-none">Нет данных скорости RTK</div>
+                                    </div>
+                                </div>
+                            </div>
+
+                            <div class="mt-4">
+                                <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between mb-2">
+                                    <div class="font-weight-bold text-primary">Ступеньки</div>
+                                    <div class="small text-muted">Серые строки определились, но исключены из расчёта</div>
+                                </div>
+                                <div class="table-responsive">
+                                    <table class="table table-bordered table-sm mb-0 postprocess-debug-events-table">
+                                        <thead>
+                                            <tr>
+                                                <th>#</th>
+                                                <th>Тип</th>
+                                                <th>Переход</th>
+                                                <th class="text-right">Δ, кг</th>
+                                                <th class="text-right">До</th>
+                                                <th class="text-right">После</th>
+                                                <th class="text-right">с</th>
+                                                <th class="text-right">ход, %</th>
+                                                <th class="text-right">v avg</th>
+                                                <th class="text-right">v max</th>
+                                            </tr>
+                                        </thead>
+                                        <tbody id="postprocessDebugEventsBody">
+                                            <tr><td colspan="10" class="batch-detail-empty">Загрузка отладочных данных...</td></tr>
+                                        </tbody>
+                                    </table>
+                                </div>
+                            </div>
+                        </div>
                     </div>
 
                     <div class="card shadow mb-4">
@@ -260,6 +367,33 @@
                             </div>
                         </div>
                         <div class="card-body">
+                            <div id="batchReplayPanel" class="batch-replay-panel mb-3" data-requires-admin>
+                                <div class="batch-replay-toolbar">
+                                    <button id="batchReplayPlay" type="button" class="btn btn-sm btn-outline-primary" aria-pressed="false">
+                                        <i class="fas fa-play mr-1"></i><span>Пуск</span>
+                                    </button>
+                                    <input id="batchReplaySlider" class="batch-replay-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Время реплея замеса">
+                                    <strong id="batchReplayTime" class="batch-replay-time">--:--:--</strong>
+                                    <select id="batchReplaySpeed" class="form-control form-control-sm batch-replay-speed" aria-label="Скорость реплея">
+                                        <option value="1">×1</option>
+                                        <option value="5" selected>×5</option>
+                                        <option value="15">×15</option>
+                                        <option value="30">×30</option>
+                                    </select>
+                                </div>
+                                <div id="batchReplayStatus" class="batch-replay-status mt-2">Загрузка replay…</div>
+                                <div class="batch-replay-grid mt-2">
+                                    <div><span>Host</span><strong id="batchReplayHostZone">—</strong></div>
+                                    <div><span>Погрузчик</span><strong id="batchReplayLoaderZone">—</strong></div>
+                                    <div><span>Effective</span><strong id="batchReplayEffectiveZone">—</strong></div>
+                                </div>
+                                <div class="table-responsive mt-2">
+                                    <table class="table table-sm table-bordered mb-0 batch-replay-scoreboard">
+                                        <thead><tr><th>Зона</th><th>Score</th><th>Dwell</th><th>Въезд</th><th>Heading</th><th>Точки</th></tr></thead>
+                                        <tbody id="batchReplayScoreboard"><tr><td colspan="6" class="text-muted">Нет кандидатов</td></tr></tbody>
+                                    </table>
+                                </div>
+                            </div>
                             <div id="batchTrackMapWrap" class="dashboard-map-wrap batch-track-map-wrap">
                                 <button id="batchTrackFullscreenButton" type="button" class="batch-track-fullscreen-button" aria-pressed="false" title="Открыть карту на весь экран">
                                     <i class="fas fa-expand-arrows-alt mr-1"></i>
@@ -276,7 +410,7 @@
                             <h6 class="m-0 font-weight-bold text-primary">Загруженные ингредиенты</h6>
                         </div>
                         <div class="card-body">
-                            <div class="table-responsive">
+                            <div class="table-responsive batch-ingredients-table-wrap">
                                 <table class="table table-bordered mb-0">
                                     <thead>
                                         <tr>
@@ -372,7 +506,7 @@
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
     <script src="vendor/chart.js/Chart.min.js"></script>
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
-    <script src="js/batch-details.js?v=20260709a"></script>
+    <script src="js/batch-details.js?v=20260710g"></script>
 
 </body>
 

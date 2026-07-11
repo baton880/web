@@ -35,6 +35,16 @@ $(document).ready(function () {
     const trackMeta = document.getElementById("batchTrackMeta");
     const trackResetButton = document.getElementById("batchTrackResetButton");
     const trackFullscreenButton = document.getElementById("batchTrackFullscreenButton");
+    const replayPanel = document.getElementById("batchReplayPanel");
+    const replayPlayButton = document.getElementById("batchReplayPlay");
+    const replaySlider = document.getElementById("batchReplaySlider");
+    const replayTime = document.getElementById("batchReplayTime");
+    const replaySpeed = document.getElementById("batchReplaySpeed");
+    const replayStatus = document.getElementById("batchReplayStatus");
+    const replayHostZone = document.getElementById("batchReplayHostZone");
+    const replayLoaderZone = document.getElementById("batchReplayLoaderZone");
+    const replayEffectiveZone = document.getElementById("batchReplayEffectiveZone");
+    const replayScoreboard = document.getElementById("batchReplayScoreboard");
     const editCard = document.getElementById("batchEditCard");
     const editMeta = document.getElementById("batchEditMeta");
     const editState = document.getElementById("batchEditState");
@@ -45,15 +55,37 @@ $(document).ready(function () {
     const editSubmitButton = document.getElementById("batchEditSubmitButton");
     const stopButton = document.getElementById("batchStopButton");
     const deleteButton = document.getElementById("batchDeleteButton");
+    const postprocessDebugCard = document.getElementById("batchPostprocessDebugCard");
+    const postprocessDebugBody = document.getElementById("batchPostprocessDebugBody");
+    const postprocessDebugCollapseButton = document.getElementById("postprocessDebugCollapse");
+    const postprocessDebugState = document.getElementById("postprocessDebugState");
+    const postprocessDebugSummary = document.getElementById("postprocessDebugSummary");
+    const postprocessDebugFilterMeta = document.getElementById("postprocessDebugFilterMeta");
+    const postprocessDebugGeneratedAt = document.getElementById("postprocessDebugGeneratedAt");
+    const postprocessDebugMainOptions = document.getElementById("postprocessDebugMainOptions");
+    const postprocessDebugAdvancedOptions = document.getElementById("postprocessDebugAdvancedOptions");
+    const postprocessDebugApplyButton = document.getElementById("postprocessDebugApply");
+    const postprocessDebugResetButton = document.getElementById("postprocessDebugReset");
+    const postprocessDebugRefreshButton = document.getElementById("postprocessDebugRefresh");
+    const postprocessDebugToggles = document.getElementById("postprocessDebugToggles");
+    const postprocessDebugHostCanvas = document.getElementById("postprocessDebugHostChart");
+    const postprocessDebugHostEmpty = document.getElementById("postprocessDebugHostEmpty");
+    const postprocessDebugHostSpeedCanvas = document.getElementById("postprocessDebugHostSpeedChart");
+    const postprocessDebugHostSpeedEmpty = document.getElementById("postprocessDebugHostSpeedEmpty");
+    const postprocessDebugRtkSpeedCanvas = document.getElementById("postprocessDebugRtkSpeedChart");
+    const postprocessDebugRtkSpeedEmpty = document.getElementById("postprocessDebugRtkSpeedEmpty");
+    const postprocessDebugEventsBody = document.getElementById("postprocessDebugEventsBody");
 
     const batchUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
     const telemetryUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=180&hostLookbackSeconds=180`) || `/api/batches/${batchId}/telemetry?includeRtk=true&loaderLookbackSeconds=180&hostLookbackSeconds=180`;
+    const postprocessDebugUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}/postprocess-debug`) || `/api/batches/${batchId}/postprocess-debug`;
     const batchDeleteUrl = window.AppAuth?.getApiUrl?.(`/api/batches/${batchId}`) || `/api/batches/${batchId}`;
     const stopBatchUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/host/manual-stop") || "/api/telemetry/host/manual-stop";
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
     const groupsUrl = window.AppAuth?.getApiUrl?.("/api/groups") || "/api/groups";
     const zonesUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/zones") || "/api/telemetry/zones";
     const FARM_TIME_ZONE = "Asia/Novosibirsk";
+    const POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY = "vikorm:batch-postprocess-debug-collapsed";
     const INGREDIENT_CHART_COLORS = [
         "#4e73df",
         "#1cc88a",
@@ -65,6 +97,50 @@ $(document).ready(function () {
         "#6f42c1",
         "#20c997",
         "#2f855a",
+    ];
+    const POSTPROCESS_DEBUG_FIELDS = [
+        { key: "minLoadStepKg", label: "Мин. загрузка, кг", min: 0, max: 500, step: 5, group: "main" },
+        { key: "minUnloadStepKg", label: "Мин. выгрузка, кг", min: 0, max: 500, step: 5, group: "main" },
+        { key: "stableRadius", label: "Стаб. окно", min: 1, max: 30, step: 1, group: "main" },
+        { key: "stableRangeKg", label: "Шум плато, кг", min: 5, max: 150, step: 5, group: "main" },
+        { key: "maxLoadTransitionSec", label: "Макс. загрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
+        { key: "maxUnloadTransitionSec", label: "Макс. выгрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
+        { key: "anchorSec", label: "Плато-якорь, с", min: 5, max: 90, step: 5, group: "main" },
+        { key: "weightScale", label: "Калибр. вес", min: 0.1, max: 3, step: 0.001, group: "main" },
+        { key: "loadDriftMaxKg", label: "Дрейф + до, кг", min: 5, max: 200, step: 5, group: "main" },
+        { key: "loadForceKg", label: "Всегда загрузка, кг", min: 20, max: 500, step: 5, group: "main" },
+        { key: "loadMovingSpeedKmh", label: "Загрузка v >", min: 0, max: 15, step: 0.1, group: "main" },
+        { key: "loadMovingMaxPct", label: "Ход загрузки, %", min: 0, max: 100, step: 5, group: "main" },
+        { key: "speedOffsetSec", label: "Сдвиг скорости host, с", min: -120, max: 120, step: 0.5, group: "main" },
+        { key: "maxPlateauSec", label: "Макс. плато, с", min: 0, max: 900, step: 5, group: "advanced" },
+        { key: "loadMergeGapSec", label: "Склейка загрузок, с", min: 0, max: 120, step: 1, group: "advanced" },
+        { key: "stableMinPoints", label: "Мин. точек плато", min: 2, max: 30, step: 1, group: "advanced" },
+        { key: "plateauMergeGapSec", label: "Склейка плато, с", min: 0, max: 120, step: 1, group: "advanced" },
+        { key: "samePlateauKg", label: "Порог склейки, кг", min: 0, max: 100, step: 5, group: "advanced" },
+        { key: "boundaryMinExtendMs", label: "Расширение, мин", min: 0, max: 20, step: 1, divisor: 60000, group: "advanced" },
+        { key: "boundarySpeedKmh", label: "Движение host >", min: 0, max: 5, step: 0.1, group: "advanced" },
+        { key: "bounceWindowSec", label: "Отскок окно, с", min: 0, max: 600, step: 5, group: "advanced" },
+        { key: "bounceReturnKg", label: "Отскок возврат, кг", min: 0, max: 300, step: 5, group: "advanced" },
+        { key: "movementDipKg", label: "Просадка до, кг", min: 0, max: 300, step: 5, group: "advanced" },
+        { key: "movementDipSpeedKmh", label: "Просадка v avg", min: 0, max: 15, step: 0.1, group: "advanced" },
+        { key: "edgePlateauMinSec", label: "Край плато мин, с", min: 0, max: 120, step: 1, group: "advanced" },
+        { key: "edgePlateauMaxSec", label: "Край плато макс, с", min: 0, max: 300, step: 5, group: "advanced" },
+        { key: "edgePlateauRangeKg", label: "Край плато шум, кг", min: 0, max: 150, step: 5, group: "advanced" },
+        { key: "startSoftWindowMs", label: "Старт мягче, мин", min: 0, max: 15, step: 1, divisor: 60000, group: "advanced" },
+        { key: "startSoftMinLoadKg", label: "Старт мин. загр, кг", min: 0, max: 150, step: 5, group: "advanced" },
+        { key: "startSoftPlateauMinSec", label: "Старт мин. плато, с", min: 0, max: 120, step: 5, group: "advanced" },
+        { key: "startSoftPlateauRangeKg", label: "Старт шум, кг", min: 0, max: 100, step: 5, group: "advanced" },
+        { key: "rawCutoffKg", label: "Raw обрыв <, кг", min: -5000, max: 5000, step: 50, group: "advanced" },
+        { key: "rawCutoffDropKg", label: "Raw обрыв падение, кг", min: 0, max: 5000, step: 50, group: "advanced" },
+        { key: "excludeBounceDips", label: "Не считать дрейф/просадки на ходу", type: "checkbox", group: "advanced" },
+    ];
+    const POSTPROCESS_DEBUG_TOGGLES = [
+        { key: "showFiltered", label: "filtered rawWeight", color: "#2563eb" },
+        { key: "showRaw", label: "rawWeight", color: "#dc2626" },
+        { key: "showTelemetryWeight", label: "Telemetry.weight", color: "#16a34a" },
+        { key: "showPlateaus", label: "плато", color: "#111827" },
+        { key: "showEvents", label: "ступеньки", color: "#168a4a" },
+        { key: "showIngredients", label: "линии ингредиентов", color: "#64748b" },
     ];
 
     const dateTimeFormatter = new Intl.DateTimeFormat("ru-RU", {
@@ -103,12 +179,25 @@ $(document).ready(function () {
         groups: [],
         storageZones: [],
         telemetryPayload: null,
+        postprocessDebug: null,
+        postprocessDebugLoading: false,
+        postprocessDebugRequestId: 0,
+        postprocessDebugView: {
+            showFiltered: true,
+            showRaw: false,
+            showTelemetryWeight: false,
+            showPlateaus: true,
+            showEvents: true,
+            showIngredients: false,
+        },
         telemetryZoom: {
             startIndex: 0,
             endIndex: null,
             total: 0,
         },
         selectedIngredientId: null,
+        replayIndex: 0,
+        replayPlaying: false,
         lookupStatus: {
             rations: {
                 loading: false,
@@ -126,10 +215,15 @@ $(document).ready(function () {
     };
 
     let telemetryChart = null;
+    let postprocessDebugHostChart = null;
+    let postprocessDebugHostSpeedChart = null;
+    let postprocessDebugRtkSpeedChart = null;
     let batchTrackMap = null;
     let ymapsReadyPromise = null;
     let batchTrackZoneObjects = [];
     let trackMapFitTimer = null;
+    let replayTimer = null;
+    let batchReplayObjects = [];
     const DEFAULT_ZONE_RADIUS = 20;
     const DEFAULT_SQUARE_SIDE = 40;
     const ZONE_TYPE_BARN = "BARN";
@@ -150,6 +244,38 @@ $(document).ready(function () {
 
     function normalizeDateValue(value) {
         return /^\d{4}-\d{2}-\d{2}$/.test(value || "") ? value : "";
+    }
+
+    function getPostprocessDebugCollapsedPreference() {
+        try {
+            return window.localStorage.getItem(POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY) === "true";
+        } catch (_error) {
+            return false;
+        }
+    }
+
+    function setPostprocessDebugCollapsed(collapsed, { persist = true } = {}) {
+        if (!canAdmin || !postprocessDebugBody || !postprocessDebugCollapseButton) {
+            return;
+        }
+
+        postprocessDebugBody.classList.toggle("d-none", collapsed);
+        postprocessDebugCollapseButton.setAttribute("aria-expanded", String(!collapsed));
+        postprocessDebugCollapseButton.innerHTML = collapsed
+            ? '<i class="fas fa-chevron-down mr-1"></i>Развернуть'
+            : '<i class="fas fa-chevron-up mr-1"></i>Свернуть';
+
+        if (persist) {
+            try {
+                window.localStorage.setItem(POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY, String(collapsed));
+            } catch (_error) {
+                // Отладка остаётся рабочей, даже если браузер запретил localStorage.
+            }
+        }
+
+        if (!collapsed && state.postprocessDebug) {
+            window.requestAnimationFrame(() => renderPostprocessDebug());
+        }
     }
 
     function normalizeNullableId(value) {
@@ -549,6 +675,59 @@ $(document).ready(function () {
         );
     }
 
+    function findIngredientDetermination(row) {
+        if (!canAdmin) return null;
+        const decisions = Array.isArray(state.postprocessDebug?.debug?.ingredients)
+            ? state.postprocessDebug.debug.ingredients
+            : [];
+        const rowStartMs = parseTimestampMs(row?.startTime || row?.startedAt || row?.time);
+        if (!Number.isFinite(rowStartMs)) return null;
+        return decisions
+            .map((item) => ({ item, distance: Math.abs(parseTimestampMs(item?.startedAt) - rowStartMs) }))
+            .filter((entry) => Number.isFinite(entry.distance) && entry.distance <= 5000)
+            .sort((left, right) => left.distance - right.distance)[0]?.item?.determination || null;
+    }
+
+    function getDeterminationSourceLabel(source) {
+        return ({
+            forced_current_zone: "Принудительно по текущей зоне",
+            loader_current_zone: "По текущей зоне погрузчика",
+            host_current_zone: "По текущей зоне host",
+            loader_scoreboard: "По scoreboard погрузчика",
+            confirmed_current_zone: "По подтверждённой зоне",
+            unknown: "Контекст не определён",
+        })[source] || source || "Неизвестно";
+    }
+
+    function renderIngredientDetermination(row) {
+        const decision = findIngredientDetermination(row);
+        if (!decision) return "";
+        const scoreboard = Array.isArray(decision.scoreboard) ? decision.scoreboard : [];
+        const scoreboardRows = scoreboard.length
+            ? scoreboard.map((candidate) => `
+                <tr>
+                    <td>${escapeHtml(candidate.ingredient || candidate.name || "—")}</td>
+                    <td>${escapeHtml(String(candidate.score ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.dwellScore ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.entryScore ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.squareHeadingScore ?? "—"))}</td>
+                </tr>`).join("")
+            : '<tr><td colspan="5" class="text-muted">Scoreboard пуст</td></tr>';
+        return `
+            <span class="ingredient-determination-badge"><i class="fas fa-info-circle"></i> как определён</span>
+            <div class="ingredient-determination-popover" role="tooltip">
+                <strong>${escapeHtml(getDeterminationSourceLabel(decision.source))}</strong>
+                <div>Результат: ${escapeHtml(decision.ingredientName || "Unknown")}</div>
+                <div>Effective: ${escapeHtml(decision.effectivePositionSource || "host")}</div>
+                <div>Активная зона: ${escapeHtml(decision.activeZone?.name || "—")}</div>
+                ${Number.isFinite(Number(decision.currentZoneEvidenceAgeMs))
+                    ? `<div>Возраст RTK: ${escapeHtml((Number(decision.currentZoneEvidenceAgeMs) / 1000).toFixed(1))} с</div>`
+                    : ""}
+                <div>Время: ${escapeHtml(formatDateTime(decision.timestamp))}</div>
+                <table><thead><tr><th>Кандидат</th><th>Score</th><th>Dwell</th><th>Въезд</th><th>Heading</th></tr></thead><tbody>${scoreboardRows}</tbody></table>
+            </div>`;
+    }
+
     function renderIngredientList(rows) {
         if (!ingredientListBody) {
             return;
@@ -588,7 +767,7 @@ $(document).ready(function () {
                 tabindex="0"
             >
                 <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
-                <td>${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}</td>
+                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}</td>
                 <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
                 <td class="text-center">${renderIngredientActionsCell(row)}</td>
@@ -1564,6 +1743,7 @@ $(document).ready(function () {
 
         if (!allTrackPoints.length) {
             map.geoObjects.removeAll();
+            batchReplayObjects = [];
             renderBatchTrackZones(map, state.storageZones);
             if (map.container && typeof map.container.fitToViewport === "function") {
                 map.container.fitToViewport();
@@ -1607,6 +1787,7 @@ $(document).ready(function () {
         }
 
         map.geoObjects.removeAll();
+        batchReplayObjects = [];
         renderBatchTrackZones(map, state.storageZones);
         if (trackEmpty) {
             trackEmpty.classList.add("d-none");
@@ -1746,6 +1927,901 @@ $(document).ready(function () {
 
         if (trackResetButton) {
             trackResetButton.classList.toggle("d-none", !selectedIngredientRow);
+        }
+        if (canAdmin && getReplayFrames().length) {
+            renderReplayFrame(state.replayIndex);
+        }
+    }
+
+    function getFiniteNumber(value) {
+        if (value === null || value === undefined || value === "") {
+            return null;
+        }
+        const numeric = Number(value);
+        return Number.isFinite(numeric) ? numeric : null;
+    }
+
+    function getReplayFrames() {
+        return Array.isArray(state.postprocessDebug?.debug?.replayFrames)
+            ? state.postprocessDebug.debug.replayFrames
+            : [];
+    }
+
+    function clearReplayMapObjects() {
+        if (!batchTrackMap) return;
+        batchReplayObjects.forEach((object) => batchTrackMap.geoObjects.remove(object));
+        batchReplayObjects = [];
+    }
+
+    function replayZoneLabel(point) {
+        return point?.zone?.name || "вне зоны";
+    }
+
+    function renderReplayScoreboard(rows) {
+        if (!replayScoreboard) return;
+        const candidates = Array.isArray(rows) ? rows : [];
+        replayScoreboard.innerHTML = candidates.length
+            ? candidates.map((candidate) => `
+                <tr>
+                    <td>${escapeHtml(candidate.ingredient || candidate.name || "—")}</td>
+                    <td>${escapeHtml(String(candidate.score ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.dwellScore ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.entryScore ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.squareHeadingScore ?? "—"))}</td>
+                    <td>${escapeHtml(String(candidate.samples ?? "—"))}</td>
+                </tr>`).join("")
+            : '<tr><td colspan="6" class="text-muted">Нет кандидатов</td></tr>';
+    }
+
+    function renderReplayFrame(index = state.replayIndex) {
+        if (!canAdmin) return;
+        const frames = getReplayFrames();
+        if (!frames.length) {
+            if (replayPanel) replayPanel.classList.add("d-none");
+            return;
+        }
+        if (replayPanel) replayPanel.classList.remove("d-none");
+        const safeIndex = Math.max(0, Math.min(Number(index) || 0, frames.length - 1));
+        state.replayIndex = safeIndex;
+        const frame = frames[safeIndex];
+        if (replaySlider) {
+            replaySlider.max = String(frames.length - 1);
+            replaySlider.value = String(safeIndex);
+        }
+        setText(replayTime, formatTime(frame.timestamp));
+        setText(replayHostZone, replayZoneLabel(frame.host));
+        setText(replayLoaderZone, frame.loader ? replayZoneLabel(frame.loader) : "нет RTK");
+        setText(replayEffectiveZone, `${frame.effective?.source || "host"}: ${replayZoneLabel(frame.effective)}`);
+        setText(replayStatus, `Кадр ${safeIndex + 1} / ${frames.length} · host ${formatDebugSpeed(frame.filteredSpeedKmh)}`);
+        renderReplayScoreboard(frame.scoreboard);
+
+        if (!batchTrackMap || !window.ymaps) return;
+        clearReplayMapObjects();
+        const markerSpecs = [
+            { point: frame.host, title: "Host", preset: "islands#blueCircleDotIcon" },
+            { point: frame.loader, title: "Погрузчик", preset: "islands#redCircleDotIcon" },
+        ];
+        markerSpecs.forEach(({ point, title, preset }) => {
+            const lat = Number(point?.lat);
+            const lon = Number(point?.lon);
+            if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            const marker = new window.ymaps.Placemark([lat, lon], {
+                hintContent: `${title}: ${formatTime(frame.timestamp)}`,
+                balloonContent: `<strong>${escapeHtml(title)}</strong><br>${escapeHtml(formatDateTime(frame.timestamp))}<br>Зона: ${escapeHtml(replayZoneLabel(point))}`,
+            }, { preset });
+            batchTrackMap.geoObjects.add(marker);
+            batchReplayObjects.push(marker);
+        });
+    }
+
+    function stopReplay() {
+        state.replayPlaying = false;
+        window.clearInterval(replayTimer);
+        replayTimer = null;
+        if (replayPlayButton) {
+            replayPlayButton.setAttribute("aria-pressed", "false");
+            replayPlayButton.innerHTML = '<i class="fas fa-play mr-1"></i><span>Пуск</span>';
+        }
+    }
+
+    function startReplay() {
+        const frames = getReplayFrames();
+        if (!frames.length) return;
+        if (state.replayIndex >= frames.length - 1) state.replayIndex = 0;
+        state.replayPlaying = true;
+        if (replayPlayButton) {
+            replayPlayButton.setAttribute("aria-pressed", "true");
+            replayPlayButton.innerHTML = '<i class="fas fa-pause mr-1"></i><span>Пауза</span>';
+        }
+        window.clearInterval(replayTimer);
+        replayTimer = window.setInterval(() => {
+            const step = Math.max(1, Number(replaySpeed?.value || 5));
+            const nextIndex = Math.min(state.replayIndex + step, frames.length - 1);
+            renderReplayFrame(nextIndex);
+            if (nextIndex >= frames.length - 1) stopReplay();
+        }, 250);
+    }
+
+    function initializeReplay() {
+        stopReplay();
+        state.replayIndex = 0;
+        renderReplayFrame(0);
+    }
+
+    function formatDebugWeight(value) {
+        const numeric = getFiniteNumber(value);
+        return numeric === null ? "—" : `${weightFormatter.format(numeric)} кг`;
+    }
+
+    function formatDebugSignedWeight(value) {
+        const numeric = getFiniteNumber(value);
+        if (numeric === null) return "—";
+        return `${numeric > 0 ? "+" : ""}${weightFormatter.format(numeric)} кг`;
+    }
+
+    function formatDebugDuration(value) {
+        const milliseconds = getFiniteNumber(value);
+        return milliseconds === null ? "—" : weightFormatter.format(Math.round(milliseconds / 1000));
+    }
+
+    function formatDebugPercent(value) {
+        const numeric = getFiniteNumber(value);
+        return numeric === null ? "—" : `${weightFormatter.format(Math.round(numeric))}%`;
+    }
+
+    function formatDebugSpeed(value) {
+        const numeric = getFiniteNumber(value);
+        return numeric === null ? "—" : `${numeric.toFixed(1)} км/ч`;
+    }
+
+    function getPostprocessDebugFieldInput(field) {
+        return document.getElementById(`postprocessDebugOption-${field.key}`);
+    }
+
+    function renderPostprocessDebugFields() {
+        if (!postprocessDebugMainOptions || !postprocessDebugAdvancedOptions) {
+            return;
+        }
+
+        const renderField = (field) => {
+            const inputId = `postprocessDebugOption-${field.key}`;
+            if (field.type === "checkbox") {
+                return `
+                    <div class="col-xl-3 col-lg-4 col-md-6 postprocess-debug-option postprocess-debug-option--switch">
+                        <div class="custom-control custom-switch">
+                            <input id="${inputId}" class="custom-control-input" type="checkbox" data-postprocess-debug-option="${field.key}">
+                            <label class="custom-control-label" for="${inputId}">${escapeHtml(field.label)}</label>
+                        </div>
+                    </div>
+                `;
+            }
+
+            return `
+                <div class="col-xl-3 col-lg-4 col-md-6 postprocess-debug-option">
+                    <label for="${inputId}">${escapeHtml(field.label)}</label>
+                    <input id="${inputId}" class="form-control" type="number" min="${field.min}" max="${field.max}" step="${field.step}" data-postprocess-debug-option="${field.key}">
+                </div>
+            `;
+        };
+
+        postprocessDebugMainOptions.innerHTML = POSTPROCESS_DEBUG_FIELDS
+            .filter((field) => field.group === "main")
+            .map(renderField)
+            .join("");
+        postprocessDebugAdvancedOptions.innerHTML = POSTPROCESS_DEBUG_FIELDS
+            .filter((field) => field.group === "advanced")
+            .map(renderField)
+            .join("");
+    }
+
+    function syncPostprocessDebugFields(options) {
+        const source = options && typeof options === "object" ? options : {};
+
+        POSTPROCESS_DEBUG_FIELDS.forEach((field) => {
+            const input = getPostprocessDebugFieldInput(field);
+            if (!input || source[field.key] === undefined || source[field.key] === null) {
+                return;
+            }
+
+            if (field.type === "checkbox") {
+                input.checked = asBoolean(source[field.key]);
+                return;
+            }
+
+            const numeric = getFiniteNumber(source[field.key]);
+            if (numeric === null) {
+                return;
+            }
+
+            input.value = String(field.divisor ? numeric / field.divisor : numeric);
+        });
+    }
+
+    function collectPostprocessDebugOptions() {
+        return POSTPROCESS_DEBUG_FIELDS.reduce((result, field) => {
+            const input = getPostprocessDebugFieldInput(field);
+            if (!input) {
+                return result;
+            }
+
+            if (field.type === "checkbox") {
+                result[field.key] = input.checked;
+                return result;
+            }
+
+            const numeric = getFiniteNumber(input.value);
+            if (numeric !== null) {
+                result[field.key] = field.divisor ? numeric * field.divisor : numeric;
+            }
+            return result;
+        }, {});
+    }
+
+    function setPostprocessDebugState(message, tone = "info") {
+        if (!postprocessDebugState) {
+            return;
+        }
+
+        postprocessDebugState.textContent = message || "";
+        postprocessDebugState.classList.remove("d-none", "postprocess-debug-state--info", "postprocess-debug-state--danger");
+        if (!message) {
+            postprocessDebugState.classList.add("d-none");
+            return;
+        }
+
+        postprocessDebugState.classList.add(tone === "danger" ? "postprocess-debug-state--danger" : "postprocess-debug-state--info");
+    }
+
+    function setPostprocessDebugControlsDisabled(disabled) {
+        if (postprocessDebugCard) {
+            postprocessDebugCard.querySelectorAll("button, input").forEach((element) => {
+                element.disabled = Boolean(disabled);
+            });
+        }
+    }
+
+    function buildPostprocessDebugRequestUrl(options = {}) {
+        const url = new URL(postprocessDebugUrl, window.location.href);
+        url.searchParams.set("loaderLookbackSeconds", "180");
+
+        Object.entries(options).forEach(([key, value]) => {
+            if (value === undefined || value === null || value === "") {
+                return;
+            }
+            url.searchParams.set(key, String(value));
+        });
+
+        return url.toString();
+    }
+
+    function renderPostprocessDebugToggles() {
+        if (!postprocessDebugToggles) {
+            return;
+        }
+
+        postprocessDebugToggles.innerHTML = POSTPROCESS_DEBUG_TOGGLES.map((toggle) => `
+            <label class="postprocess-debug-toggle">
+                <input type="checkbox" data-postprocess-debug-toggle="${toggle.key}" ${state.postprocessDebugView[toggle.key] ? "checked" : ""}>
+                <span class="postprocess-debug-toggle__swatch" style="background:${toggle.color}"></span>
+                ${escapeHtml(toggle.label)}
+            </label>
+        `).join("");
+    }
+
+    function renderPostprocessDebugSummary(debug) {
+        if (!postprocessDebugSummary) {
+            return;
+        }
+
+        const summary = debug?.summary || {};
+        const metrics = [
+            ["Загружено ступеньками", formatDebugWeight(summary.loaded)],
+            ["Выгружено ступеньками", formatDebugWeight(summary.unloaded)],
+            ["Загрузка − выгрузка", formatDebugSignedWeight(summary.net)],
+            ["Конец − старт графика", formatDebugSignedWeight(summary.observedNet)],
+            ["Ступенек зачтено", String(Number(summary.eventCount || 0))],
+            ["Размах графика", formatDebugWeight(summary.range)],
+        ];
+
+        postprocessDebugSummary.innerHTML = metrics.map(([label, value]) => `
+            <div class="col-xl-2 col-lg-3 col-md-4 col-sm-6">
+                <div class="postprocess-debug-kpi">
+                    <div class="postprocess-debug-kpi__label">${escapeHtml(label)}</div>
+                    <div class="postprocess-debug-kpi__value">${escapeHtml(value)}</div>
+                </div>
+            </div>
+        `).join("");
+    }
+
+    function getPostprocessArtifactLabel(event) {
+        if (!event?.artifact) {
+            return event?.kind === "load" ? "загрузка" : "выгрузка";
+        }
+
+        const labels = {
+            "moving-load-percent": "ход%?",
+            "moving-load-drift": "дрейф?",
+            "moving-dip": "просадка?",
+            rebound: "отскок?",
+            "before-first-load": "до загрузки?",
+            "after-last-unload": "после выгрузки?",
+            "small-load-after-unload": "мелк. после выгрузки?",
+            "small-load-before-unload": "мелк. перед выгрузкой?",
+        };
+
+        return labels[event.artifactReason] || "исключено?";
+    }
+
+    function renderPostprocessDebugEvents(events) {
+        if (!postprocessDebugEventsBody) {
+            return;
+        }
+
+        const rows = Array.isArray(events) ? events : [];
+        if (!rows.length) {
+            postprocessDebugEventsBody.innerHTML = '<tr><td colspan="10" class="batch-detail-empty">Ступеньки не определились</td></tr>';
+            return;
+        }
+
+        postprocessDebugEventsBody.innerHTML = rows.map((event) => {
+            const type = `${getPostprocessArtifactLabel(event)}${Number(event?.mergedCount || 1) > 1 ? ` ×${Number(event.mergedCount)}` : ""}${event?.edgeTrimmed ? " · trim" : ""}`;
+            const rowClass = event?.artifact ? "is-artifact" : "";
+            return `
+                <tr class="${rowClass}">
+                    <td>${escapeHtml(event?.id ?? "—")}</td>
+                    <td>${escapeHtml(type)}</td>
+                    <td>${escapeHtml(`${formatTime(event?.startTime)} — ${formatTime(event?.endTime)}`)}</td>
+                    <td class="text-right">${escapeHtml(formatDebugSignedWeight(event?.delta))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugWeight(event?.beforeLevel))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugWeight(event?.afterLevel))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugDuration(event?.transitionMs))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugPercent(event?.movingPct))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugSpeed(event?.speedAvg))}</td>
+                    <td class="text-right">${escapeHtml(formatDebugSpeed(event?.speedMax))}</td>
+                </tr>
+            `;
+        }).join("");
+    }
+
+    function destroyPostprocessDebugCharts() {
+        if (postprocessDebugHostChart) {
+            postprocessDebugHostChart.destroy();
+            postprocessDebugHostChart = null;
+        }
+        if (postprocessDebugHostSpeedChart) {
+            postprocessDebugHostSpeedChart.destroy();
+            postprocessDebugHostSpeedChart = null;
+        }
+        if (postprocessDebugRtkSpeedChart) {
+            postprocessDebugRtkSpeedChart.destroy();
+            postprocessDebugRtkSpeedChart = null;
+        }
+    }
+
+    function getClosestDebugPointIndex(points, value) {
+        const target = parseTimestampMs(value);
+        if (!Number.isFinite(target) || !Array.isArray(points) || !points.length) {
+            return null;
+        }
+
+        let closestIndex = 0;
+        let closestDistance = Number.POSITIVE_INFINITY;
+        points.forEach((point, index) => {
+            const timestamp = parseTimestampMs(point?.timestamp);
+            const distance = Number.isFinite(timestamp) ? Math.abs(timestamp - target) : Number.POSITIVE_INFINITY;
+            if (distance < closestDistance) {
+                closestDistance = distance;
+                closestIndex = index;
+            }
+        });
+        return closestIndex;
+    }
+
+    function buildPostprocessDebugOverlayPlugin(points, events, bounds, options = {}) {
+        const rows = Array.isArray(points) ? points : [];
+        const debugEvents = Array.isArray(events) ? events : [];
+        const debugBounds = bounds && typeof bounds === "object" ? bounds : null;
+        const showEventLabels = options.showEventLabels !== false;
+
+        const getX = (scale, value) => {
+            const index = getClosestDebugPointIndex(rows, value);
+            return index === null ? null : (scale.getPixelForTick ? scale.getPixelForTick(index) : scale.getPixelForValue(null, index));
+        };
+
+        return {
+            beforeDatasetsDraw: function (chart) {
+                const xScale = chart.scales?.["x-axis-0"];
+                const chartArea = chart.chartArea;
+                const context = chart.chart?.ctx;
+                if (!xScale || !chartArea || !context) {
+                    return;
+                }
+
+                context.save();
+                if (debugBounds) {
+                    const start = getX(xScale, debugBounds.startTime);
+                    const end = getX(xScale, debugBounds.endTime);
+                    if (start !== null && end !== null) {
+                        context.fillStyle = "rgba(100, 116, 139, 0.05)";
+                        context.fillRect(Math.min(start, end), chartArea.top, Math.max(1, Math.abs(end - start)), chartArea.bottom - chartArea.top);
+                    }
+                }
+
+                if (!state.postprocessDebugView.showEvents) {
+                    context.restore();
+                    return;
+                }
+
+                debugEvents.forEach((event) => {
+                    const start = getX(xScale, event?.startTime);
+                    const end = getX(xScale, event?.endTime);
+                    if (start === null || end === null) {
+                        return;
+                    }
+                    const left = Math.min(start, end);
+                    const width = Math.max(3, Math.abs(end - start));
+                    context.fillStyle = event?.artifact
+                        ? "rgba(124, 135, 151, 0.13)"
+                        : event?.kind === "load"
+                            ? "rgba(22, 138, 74, 0.14)"
+                            : "rgba(220, 38, 38, 0.13)";
+                    context.fillRect(left, chartArea.top, width, chartArea.bottom - chartArea.top);
+                });
+                context.restore();
+            },
+            afterDatasetsDraw: function (chart) {
+                if (!state.postprocessDebugView.showEvents || !showEventLabels) {
+                    return;
+                }
+
+                const xScale = chart.scales?.["x-axis-0"];
+                const yScale = chart.scales?.["y-axis-0"];
+                const chartArea = chart.chartArea;
+                const context = chart.chart?.ctx;
+                if (!xScale || !yScale || !chartArea || !context) {
+                    return;
+                }
+
+                context.save();
+                debugEvents.forEach((event, index) => {
+                    const start = getX(xScale, event?.startTime);
+                    const end = getX(xScale, event?.endTime);
+                    if (start === null || end === null) {
+                        return;
+                    }
+
+                    const color = event?.artifact ? "#7c8797" : event?.kind === "load" ? "#168a4a" : "#dc2626";
+                    const center = (start + end) / 2;
+                    context.strokeStyle = color;
+                    context.lineWidth = event?.artifact ? 1 : 1.5;
+                    context.setLineDash(event?.artifact ? [4, 4] : []);
+                    context.beginPath();
+                    context.moveTo(center, chartArea.top);
+                    context.lineTo(center, chartArea.bottom);
+                    context.stroke();
+                    context.setLineDash([]);
+
+                    const beforeLevel = getFiniteNumber(event?.beforeLevel);
+                    const afterLevel = getFiniteNumber(event?.afterLevel);
+                    if (beforeLevel !== null && afterLevel !== null) {
+                        context.beginPath();
+                        context.moveTo(getX(xScale, event?.beforePlateauStartTime) ?? start, yScale.getPixelForValue(beforeLevel));
+                        context.lineTo(getX(xScale, event?.beforePlateauEndTime) ?? start, yScale.getPixelForValue(beforeLevel));
+                        context.moveTo(getX(xScale, event?.afterPlateauStartTime) ?? end, yScale.getPixelForValue(afterLevel));
+                        context.lineTo(getX(xScale, event?.afterPlateauEndTime) ?? end, yScale.getPixelForValue(afterLevel));
+                        context.stroke();
+
+                        const label = formatDebugSignedWeight(event?.delta);
+                        const labelX = Math.max(chartArea.left + 3, Math.min(chartArea.right - 60, center - 24));
+                        const labelY = Math.max(chartArea.top + 13, Math.min(chartArea.bottom - 4, yScale.getPixelForValue(afterLevel) - 8 - (index % 3) * 14));
+                        context.fillStyle = color;
+                        context.font = event?.artifact ? "11px Arial" : "bold 12px Arial";
+                        context.fillText(label, labelX, labelY);
+                    }
+                });
+                context.restore();
+            },
+        };
+    }
+
+    function buildPostprocessDebugTimeline(hostPoints, rtkPoints) {
+        const byTimestamp = new Map();
+        const ensure = (timestamp) => {
+            const milliseconds = parseTimestampMs(timestamp);
+            if (!Number.isFinite(milliseconds)) return null;
+            if (!byTimestamp.has(milliseconds)) {
+                byTimestamp.set(milliseconds, { timestamp: milliseconds, hostPoint: null, hostSpeedPoint: null, rtkPoint: null });
+            }
+            return byTimestamp.get(milliseconds);
+        };
+
+        (Array.isArray(hostPoints) ? hostPoints : []).forEach((point) => {
+            const row = ensure(point?.timestamp);
+            if (row) row.hostPoint = point;
+            const speedRow = ensure(point?.speedTimestamp || point?.timestamp);
+            if (speedRow) speedRow.hostSpeedPoint = point;
+        });
+        (Array.isArray(rtkPoints) ? rtkPoints : []).forEach((point) => {
+            const row = ensure(point?.timestamp);
+            if (row) row.rtkPoint = point;
+        });
+
+        return Array.from(byTimestamp.values()).sort((left, right) => left.timestamp - right.timestamp);
+    }
+
+    function buildPostprocessDebugContinuousDatasets({ timeline, label, valueForRow, color, backgroundColor = "transparent", borderWidth = 1.5, fill = false }) {
+        const segments = [];
+        let currentSegment = null;
+        let previousPointTime = null;
+
+        timeline.forEach((row, index) => {
+            const value = getFiniteNumber(valueForRow(row));
+            if (value === null) {
+                return;
+            }
+
+            if (
+                !currentSegment ||
+                (previousPointTime !== null && row.timestamp - previousPointTime > TRACK_MAX_GAP_MS)
+            ) {
+                currentSegment = new Map();
+                segments.push(currentSegment);
+            }
+
+            currentSegment.set(index, value);
+            previousPointTime = row.timestamp;
+        });
+
+        return segments.map((segment, segmentIndex) => ({
+            label,
+            data: timeline.map((_, index) => segment.has(index) ? segment.get(index) : null),
+            borderColor: color,
+            backgroundColor,
+            borderWidth,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            fill,
+            spanGaps: true,
+            lineTension: 0.12,
+            order: segmentIndex,
+        }));
+    }
+
+    function buildPostprocessDebugSparseDatasets({ timeline, label, valueForRow, xValueForRow = (_row, index) => index, color, backgroundColor = "transparent", borderWidth = 1.5, fill = false }) {
+        const segments = [];
+        let currentSegment = null;
+        let previousPointTime = null;
+
+        timeline.forEach((row, index) => {
+            const value = getFiniteNumber(valueForRow(row));
+            if (value === null) {
+                return;
+            }
+
+            if (
+                !currentSegment ||
+                (previousPointTime !== null && row.timestamp - previousPointTime > TRACK_MAX_GAP_MS)
+            ) {
+                currentSegment = { points: [], timestamps: [] };
+                segments.push(currentSegment);
+            }
+
+            currentSegment.points.push({ x: xValueForRow(row, index), y: value });
+            currentSegment.timestamps.push(row.timestamp);
+            previousPointTime = row.timestamp;
+        });
+
+        return segments.map((segment, segmentIndex) => ({
+            label,
+            data: segment.points,
+            tooltipTimestamps: segment.timestamps,
+            borderColor: color,
+            backgroundColor,
+            borderWidth,
+            pointRadius: 0,
+            pointHoverRadius: 3,
+            fill,
+            spanGaps: false,
+            lineTension: 0.12,
+            order: segmentIndex,
+        }));
+    }
+
+    function buildPostprocessDebugComponentDatasets(timeline, ingredientRows) {
+        const ingredients = (Array.isArray(ingredientRows) ? ingredientRows : [])
+            .map((row, index) => {
+                const windowRange = buildIngredientTrackWindow(row, ingredientRows, { requireId: false });
+                if (!windowRange) return null;
+                return {
+                    name: getIngredientDisplayName(row?.ingredientName || row?.name),
+                    startMs: windowRange.startMs,
+                    endMs: windowRange.ingredientEndMs || windowRange.endMs,
+                    actualWeight: getFiniteNumber(row?.actualWeight ?? row?.fact),
+                    color: INGREDIENT_CHART_COLORS[index % INGREDIENT_CHART_COLORS.length],
+                };
+            })
+            .filter(Boolean);
+
+        return ingredients.map((ingredient) => ({
+            label: ingredient.name,
+            ingredientName: ingredient.name,
+            componentStartMs: ingredient.startMs,
+            componentEndMs: ingredient.endMs,
+            actualWeight: ingredient.actualWeight,
+            backgroundColor: ingredient.color,
+            borderColor: "rgba(0, 0, 0, 0)",
+            borderWidth: 0,
+            showLine: false,
+            pointRadius: 0,
+            pointHoverRadius: 0,
+            pointHitRadius: 18,
+            fill: false,
+            spanGaps: true,
+            order: 0,
+            data: timeline.map((row) => {
+                if (!row.hostPoint || row.timestamp < ingredient.startMs || row.timestamp > ingredient.endMs) {
+                    return null;
+                }
+                return getFiniteNumber(row.hostPoint.filteredWeight ?? row.hostPoint.weight);
+            }),
+        })).filter((dataset) => dataset.data.some((value) => value !== null));
+    }
+
+    function renderPostprocessDebugHostChart(timeline) {
+        if (!postprocessDebugHostCanvas || !postprocessDebugHostEmpty) {
+            return;
+        }
+
+        const debug = state.postprocessDebug?.debug;
+        if (!timeline.length || !timeline.some((row) => row.hostPoint)) {
+            if (postprocessDebugHostChart) {
+                postprocessDebugHostChart.destroy();
+                postprocessDebugHostChart = null;
+            }
+            postprocessDebugHostCanvas.classList.add("d-none");
+            postprocessDebugHostEmpty.classList.remove("d-none");
+            return;
+        }
+
+        postprocessDebugHostCanvas.classList.remove("d-none");
+        postprocessDebugHostEmpty.classList.add("d-none");
+        if (postprocessDebugHostChart) {
+            postprocessDebugHostChart.destroy();
+            postprocessDebugHostChart = null;
+        }
+
+        const timelinePoints = timeline.map((row) => ({
+            ...(row.hostPoint || {}),
+            timestamp: new Date(row.timestamp).toISOString(),
+            weight: row.hostPoint ? getFiniteNumber(row.hostPoint.filteredWeight ?? row.hostPoint.weight) : null,
+        }));
+        const view = state.postprocessDebugView;
+        const datasets = [];
+        if (view.showRaw) {
+            datasets.push(...buildPostprocessDebugContinuousDatasets({
+                label: "rawWeight",
+                timeline,
+                valueForRow: (row) => row.hostPoint?.rawWeight,
+                color: "#dc2626",
+                borderWidth: 1,
+            }));
+        }
+        if (view.showTelemetryWeight) {
+            datasets.push(...buildPostprocessDebugContinuousDatasets({
+                label: "Telemetry.weight",
+                timeline,
+                valueForRow: (row) => row.hostPoint?.telemetryWeight,
+                color: "#16a34a",
+                borderWidth: 1,
+            }));
+        }
+        if (view.showFiltered) {
+            datasets.push(...buildPostprocessDebugContinuousDatasets({
+                label: "filtered rawWeight",
+                timeline,
+                valueForRow: (row) => row.hostPoint?.filteredWeight ?? row.hostPoint?.weight,
+                color: "#2563eb",
+                backgroundColor: "rgba(37, 99, 235, 0.1)",
+                borderWidth: 2,
+                fill: true,
+            }));
+        }
+        if (view.showPlateaus) {
+            const plateauDataset = buildPlateauTelemetryDataset(timelinePoints, debug?.plateaus);
+            if (plateauDataset) {
+                plateauDataset.label = "Плато";
+                datasets.push(plateauDataset);
+            }
+        }
+        if (view.showIngredients) {
+            datasets.push(...buildPostprocessDebugComponentDatasets(timeline, state.batch?.actualIngredients || []));
+        }
+
+        postprocessDebugHostChart = new Chart(postprocessDebugHostCanvas.getContext("2d"), {
+            type: "line",
+            data: {
+                labels: timeline.map((row) => formatTime(row.timestamp)),
+                datasets,
+            },
+            plugins: [
+                buildPostprocessDebugOverlayPlugin(timelinePoints, debug?.events, debug?.bounds),
+                buildComponentZonePlugin(),
+            ],
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                legend: { display: false },
+                tooltips: {
+                    mode: "nearest",
+                    intersect: false,
+                    callbacks: {
+                        label: function (tooltipItem, data) {
+                            const dataset = data.datasets?.[tooltipItem.datasetIndex] || {};
+                            if (dataset.isPlateauDataset) return `Плато: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                            if (dataset.ingredientName) return `${dataset.ingredientName}: ${weightFormatter.format(dataset.actualWeight)} кг`;
+                            return `${dataset.label || "Вес"}: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                        },
+                    },
+                },
+                scales: {
+                    xAxes: [{ gridLines: { display: false }, ticks: { maxTicksLimit: 8 } }],
+                    yAxes: [{ ticks: { callback: (value) => `${weightFormatter.format(value)} кг` } }],
+                },
+            },
+        });
+    }
+
+    function renderPostprocessDebugSpeedChart({ canvas, empty, previousChart, timeline, debug, label, color, valueForRow }) {
+        if (!canvas || !empty) {
+            return null;
+        }
+
+        if (previousChart) {
+            previousChart.destroy();
+        }
+
+        const values = timeline.map(valueForRow);
+        if (!values.some((value) => value !== null)) {
+            canvas.classList.add("d-none");
+            empty.classList.remove("d-none");
+            return null;
+        }
+
+        canvas.classList.remove("d-none");
+        empty.classList.add("d-none");
+        const timelinePoints = timeline.map((row) => ({ timestamp: new Date(row.timestamp).toISOString() }));
+        const timelineLabels = timeline.map((row) => new Date(row.timestamp).toISOString());
+        return new Chart(canvas.getContext("2d"), {
+            type: "line",
+            data: {
+                labels: timelineLabels,
+                datasets: buildPostprocessDebugSparseDatasets({
+                    timeline,
+                    label,
+                    valueForRow,
+                    xValueForRow: (row) => new Date(row.timestamp).toISOString(),
+                    color,
+                    backgroundColor: `${color}14`,
+                    borderWidth: 1.8,
+                }),
+            },
+            plugins: [buildPostprocessDebugOverlayPlugin(timelinePoints, debug?.events, debug?.bounds, { showEventLabels: false })],
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                legend: { display: false },
+                tooltips: {
+                    mode: "nearest",
+                    intersect: false,
+                    callbacks: {
+                        title: function (tooltipItems, data) {
+                            const item = tooltipItems?.[0];
+                            const dataset = data.datasets?.[item?.datasetIndex] || {};
+                            const timestamp = dataset.tooltipTimestamps?.[item?.index];
+                            return timestamp ? formatTime(timestamp) : "";
+                        },
+                    },
+                },
+                scales: {
+                    xAxes: [{
+                        gridLines: { display: false },
+                        ticks: {
+                            maxTicksLimit: 8,
+                            callback: (value) => formatTime(value),
+                        },
+                    }],
+                    yAxes: [{ ticks: { beginAtZero: true, callback: (value) => `${weightFormatter.format(value)} км/ч` } }],
+                },
+            },
+        });
+    }
+
+    function renderPostprocessDebugSpeedCharts(timeline, debug) {
+        postprocessDebugHostSpeedChart = renderPostprocessDebugSpeedChart({
+            canvas: postprocessDebugHostSpeedCanvas,
+            empty: postprocessDebugHostSpeedEmpty,
+            previousChart: postprocessDebugHostSpeedChart,
+            timeline,
+            debug,
+            label: `Скорость host · Hampel r${debug?.speedFilter?.hampelRadius ?? 32}, σ${debug?.speedFilter?.hampelSigma ?? 10} → median r${debug?.speedFilter?.rollingMedianRadius ?? 6}`,
+            color: "#6f42c1",
+            valueForRow: (row) => getFiniteNumber(row.hostSpeedPoint?.speedKmh),
+        });
+        postprocessDebugRtkSpeedChart = renderPostprocessDebugSpeedChart({
+            canvas: postprocessDebugRtkSpeedCanvas,
+            empty: postprocessDebugRtkSpeedEmpty,
+            previousChart: postprocessDebugRtkSpeedChart,
+            timeline,
+            debug,
+            label: "Скорость RTK",
+            color: "#f59e0b",
+            valueForRow: (row) => getFiniteNumber(row.rtkPoint?.speed),
+        });
+    }
+
+    function renderPostprocessDebug() {
+        if (!canAdmin || !postprocessDebugCard) {
+            return;
+        }
+
+        const payload = state.postprocessDebug;
+        const debug = payload?.debug;
+        if (!debug) {
+            renderPostprocessDebugSummary(null);
+            renderPostprocessDebugEvents([]);
+            destroyPostprocessDebugCharts();
+            return;
+        }
+
+        const filter = debug.filter || {};
+        const speedFilter = debug.speedFilter || {};
+        if (postprocessDebugFilterMeta) {
+            postprocessDebugFilterMeta.textContent = `Вес: rawWeight → Hampel r${filter.hampelRadius ?? "—"}, σ${filter.hampelSigma ?? "—"} → median r${filter.rollingMedianRadius ?? "—"} → ${filter.roundToKg ?? "—"} кг · Скорость host: Hampel r${speedFilter.hampelRadius ?? "—"}, σ${speedFilter.hampelSigma ?? "—"} → median r${speedFilter.rollingMedianRadius ?? "—"}`;
+        }
+        if (postprocessDebugGeneratedAt) {
+            postprocessDebugGeneratedAt.textContent = debug.generatedAt ? `Обновлено: ${formatDateTime(debug.generatedAt)}` : "";
+        }
+
+        renderPostprocessDebugSummary(debug);
+        renderPostprocessDebugEvents(debug.events);
+        const timeline = buildPostprocessDebugTimeline(debug.points, payload?.rtkTrack);
+        renderPostprocessDebugHostChart(timeline);
+        renderPostprocessDebugSpeedCharts(timeline, debug);
+    }
+
+    async function loadPostprocessDebug(useFormOptions = false) {
+        if (!canAdmin || !batchId || state.postprocessDebugLoading) {
+            return;
+        }
+
+        const requestId = ++state.postprocessDebugRequestId;
+        state.postprocessDebugLoading = true;
+        setPostprocessDebugControlsDisabled(true);
+        setPostprocessDebugState("Считаем отладочный предпросмотр без сохранения…");
+
+        try {
+            const options = useFormOptions ? collectPostprocessDebugOptions() : {};
+            const payload = await fetchJson(buildPostprocessDebugRequestUrl(options));
+            if (requestId !== state.postprocessDebugRequestId) {
+                return;
+            }
+
+            state.postprocessDebug = payload;
+            syncPostprocessDebugFields(payload?.debug?.options);
+            setPostprocessDebugState("", "info");
+            renderPostprocessDebug();
+            initializeReplay();
+            renderIngredientList(Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : []);
+        } catch (error) {
+            if (requestId !== state.postprocessDebugRequestId) {
+                return;
+            }
+            setPostprocessDebugState(error?.message || "Не удалось получить отладку постпроцессинга", "danger");
+        } finally {
+            if (requestId === state.postprocessDebugRequestId) {
+                state.postprocessDebugLoading = false;
+                setPostprocessDebugControlsDisabled(false);
+            }
         }
     }
 
@@ -2881,6 +3957,9 @@ $(document).ready(function () {
             renderTelemetry(telemetryPayload.hostTrack);
             await renderBatchTrack(telemetryPayload, actualRows);
             renderBatchEditor(batch);
+            if (canAdmin) {
+                loadPostprocessDebug();
+            }
             return true;
         } catch (error) {
             if (requestId !== state.loadRequestId) {
@@ -3028,6 +4107,59 @@ $(document).ready(function () {
 
     if (telemetryPanRightButton) {
         telemetryPanRightButton.addEventListener("click", () => panTelemetryChart(1));
+    }
+
+    if (canAdmin) {
+        setPostprocessDebugCollapsed(getPostprocessDebugCollapsedPreference(), { persist: false });
+        renderPostprocessDebugFields();
+        renderPostprocessDebugToggles();
+    }
+
+    if (postprocessDebugCollapseButton) {
+        postprocessDebugCollapseButton.addEventListener("click", () => {
+            setPostprocessDebugCollapsed(!postprocessDebugBody?.classList.contains("d-none"));
+        });
+    }
+
+    if (postprocessDebugApplyButton) {
+        postprocessDebugApplyButton.addEventListener("click", () => loadPostprocessDebug(true));
+    }
+
+    if (postprocessDebugResetButton) {
+        postprocessDebugResetButton.addEventListener("click", () => loadPostprocessDebug(false));
+    }
+
+    if (postprocessDebugRefreshButton) {
+        postprocessDebugRefreshButton.addEventListener("click", () => loadPostprocessDebug(true));
+    }
+
+    if (postprocessDebugToggles) {
+        postprocessDebugToggles.addEventListener("change", (event) => {
+            const input = event.target?.closest?.("[data-postprocess-debug-toggle]");
+            if (!(input instanceof HTMLInputElement)) {
+                return;
+            }
+            const key = input.dataset.postprocessDebugToggle;
+            if (!Object.prototype.hasOwnProperty.call(state.postprocessDebugView, key)) {
+                return;
+            }
+            state.postprocessDebugView[key] = input.checked;
+            renderPostprocessDebug();
+        });
+    }
+
+    if (replaySlider) {
+        replaySlider.addEventListener("input", () => {
+            stopReplay();
+            renderReplayFrame(Number(replaySlider.value));
+        });
+    }
+
+    if (replayPlayButton) {
+        replayPlayButton.addEventListener("click", () => {
+            if (state.replayPlaying) stopReplay();
+            else startReplay();
+        });
     }
 
     if (canWrite) {

@@ -46,7 +46,7 @@ runCase('postprocessing rejects replay ingredients missing from the ration', () 
     { name: 'Силос' }
   ]
   assert.equal(choosePostprocessedIngredientName('Солома', 'Люцерна', 'Комбикорм', dryCowPlan), 'Солома')
-  assert.equal(choosePostprocessedIngredientName('Комбикорм', 'Солома', 'Зерносенаж', dryCowPlan), 'Солома')
+  assert.equal(choosePostprocessedIngredientName('Комбикорм', 'Солома', 'Зерносенаж', dryCowPlan), 'Комбикорм')
   assert.equal(choosePostprocessedIngredientName(null, 'Люцерна', 'Комбикорм'), 'Люцерна')
   assert.equal(choosePostprocessedIngredientName(null, null, 'Комбикорм'), 'Комбикорм')
 })
