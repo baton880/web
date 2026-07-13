@@ -32,16 +32,16 @@ In Arduino IDE:
 Sketch -> Export Compiled Binary
 ```
 
-After export, check that a `.bin` appeared near the sketch:
+After export, check that a `.bin` appeared under the sketch build folder:
 
 ```powershell
-Get-ChildItem -LiteralPath "c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a" -Filter "*.bin"
+Get-ChildItem -LiteralPath "c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a\build" -Recurse -Filter "jun30a.ino.bin"
 ```
 
-The expected file is usually named like:
+The expected file is usually:
 
 ```text
-jun30a.ino.bin
+c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a\build\esp32.esp32.nodemcu-32s\jun30a.ino.bin
 ```
 
 ### 2. Find `espota.py` on the laptop
@@ -64,7 +64,7 @@ These commands assume Raspberry Pi is reachable over Amnezia at `10.8.1.2` and t
 ```powershell
 ssh isrk@10.8.1.2 "mkdir -p /home/isrk/esp32-ota"
 
-scp "c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a\jun30a.ino.bin" `
+scp "c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a\build\esp32.esp32.nodemcu-32s\jun30a.ino.bin" `
   isrk@10.8.1.2:/home/isrk/esp32-ota/jun30a.ino.bin
 
 scp "$espota" isrk@10.8.1.2:/home/isrk/esp32-ota/espota.py
@@ -94,29 +94,31 @@ jun30a.ino.bin
 
 ### 5. Check that ESP32 is connected to Raspberry Pi AP
 
-On Raspberry Pi:
+On the tested Raspberry Pi setup, the loader was visible as:
 
-```bash
-sudo hostapd_cli -i wlan0 all_sta
+```text
+rtk-loader-01.local -> 10.42.0.166
 ```
 
-Also check DHCP leases:
+Check by hostname first:
 
 ```bash
-cat /var/lib/misc/dnsmasq.leases
+ping -c 3 rtk-loader-01.local
 ```
 
-If `rtk-loader-01.local` is resolvable, this should print its IP:
-
-```bash
-avahi-resolve -n rtk-loader-01.local
-```
-
-If `.local` is not resolvable, look for ESP32 IP in:
+If hostname works, use that name for OTA. If hostname does not work, find the IP:
 
 ```bash
 arp -a
 ip neigh show dev wlan0
+```
+
+Depending on how the Raspberry Pi access point is configured, these commands may fail and that is OK:
+
+```bash
+sudo hostapd_cli -i wlan0 all_sta
+cat /var/lib/misc/dnsmasq.leases
+avahi-resolve -n rtk-loader-01.local
 ```
 
 ### 6. Flash by OTA
@@ -141,6 +143,8 @@ python3 /home/isrk/esp32-ota/espota.py \
 
 Replace `192.168.X.X` with the ESP32 IP found in step 5.
 
+Do not use `nc -vz ... 3232` as the main readiness check. With ArduinoOTA on ESP32 it can print `Connection refused` before OTA starts, while `espota.py` can still flash successfully because it first sends an OTA invitation.
+
 ### 7. Expected result
 
 During OTA, ESP32 should print in Serial Monitor:
@@ -159,6 +163,15 @@ OTA ready: rtk-loader-01 at 192.168.x.x
 
 Telemetry and buffering are paused while OTA is running. After the ESP32 reboots, telemetry starts again.
 
+If there is no Serial Monitor, check that ESP32 is alive again:
+
+```bash
+ping -c 3 rtk-loader-01.local
+ip neigh show dev wlan0
+```
+
+It is normal if `nc -vz rtk-loader-01.local 3232` still prints `Connection refused` after reboot. The important signs are: `espota.py` finished without an error, ESP32 came back to ping, and RTK telemetry resumed on the server.
+
 ## Troubleshooting
 
 If `rtk-loader-01.local` does not resolve:
@@ -169,18 +182,22 @@ arp -a
 ip neigh show dev wlan0
 ```
 
-If OTA cannot connect:
+If OTA cannot connect, first try flashing directly with `espota.py` and read its exact error:
 
 ```bash
-ping rtk-loader-01.local
-nc -vz rtk-loader-01.local 3232
+python3 /home/isrk/esp32-ota/espota.py \
+  -i rtk-loader-01.local \
+  -p 3232 \
+  -f /home/isrk/esp32-ota/jun30a.ino.bin
 ```
 
 Or by IP:
 
 ```bash
-ping 192.168.X.X
-nc -vz 192.168.X.X 3232
+python3 /home/isrk/esp32-ota/espota.py \
+  -i 192.168.X.X \
+  -p 3232 \
+  -f /home/isrk/esp32-ota/jun30a.ino.bin
 ```
 
 If `nc` is missing:
