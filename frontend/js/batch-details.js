@@ -64,6 +64,9 @@ $(document).ready(function () {
     const postprocessDebugGeneratedAt = document.getElementById("postprocessDebugGeneratedAt");
     const postprocessDebugMainOptions = document.getElementById("postprocessDebugMainOptions");
     const postprocessDebugAdvancedOptions = document.getElementById("postprocessDebugAdvancedOptions");
+    const postprocessDebugRestOptions = document.getElementById("postprocessDebugRestOptions");
+    const postprocessDebugRestRememberButton = document.getElementById("postprocessDebugRestRemember");
+    const postprocessDebugRestRememberState = document.getElementById("postprocessDebugRestRememberState");
     const postprocessDebugApplyButton = document.getElementById("postprocessDebugApply");
     const postprocessDebugResetButton = document.getElementById("postprocessDebugReset");
     const postprocessDebugRefreshButton = document.getElementById("postprocessDebugRefresh");
@@ -86,6 +89,7 @@ $(document).ready(function () {
     const zonesUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/zones") || "/api/telemetry/zones";
     const FARM_TIME_ZONE = "Asia/Novosibirsk";
     const POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY = "vikorm:batch-postprocess-debug-collapsed";
+    const POSTPROCESS_DEBUG_REST_OPTIONS_STORAGE_KEY = "vikorm:batch-postprocess-rest-options";
     const INGREDIENT_CHART_COLORS = [
         "#4e73df",
         "#1cc88a",
@@ -103,6 +107,7 @@ $(document).ready(function () {
         { key: "minUnloadStepKg", label: "Мин. выгрузка, кг", min: 0, max: 500, step: 5, group: "main" },
         { key: "stableRadius", label: "Стаб. окно", min: 1, max: 30, step: 1, group: "main" },
         { key: "stableRangeKg", label: "Шум плато, кг", min: 5, max: 150, step: 5, group: "main" },
+        { key: "restPlateauEnabled", label: "Фильтр включён", type: "checkbox", group: "rest" },
         { key: "maxLoadTransitionSec", label: "Макс. загрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
         { key: "maxUnloadTransitionSec", label: "Макс. выгрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
         { key: "anchorSec", label: "Плато-якорь, с", min: 5, max: 90, step: 5, group: "main" },
@@ -115,6 +120,16 @@ $(document).ready(function () {
         { key: "maxPlateauSec", label: "Макс. плато, с", min: 0, max: 900, step: 5, group: "advanced" },
         { key: "loadMergeGapSec", label: "Склейка загрузок, с", min: 0, max: 120, step: 1, group: "advanced" },
         { key: "stableMinPoints", label: "Мин. точек плато", min: 2, max: 30, step: 1, group: "advanced" },
+        { key: "restPlateauRadius", label: "Стаб. окно", min: 1, max: 60, step: 1, group: "rest" },
+        { key: "restPlateauRangeKg", label: "Шум плато, кг", min: 0, max: 500, step: 5, group: "rest" },
+        { key: "restPlateauMinPoints", label: "Мин. точек", min: 2, max: 60, step: 1, group: "rest" },
+        { key: "restPlateauMaxSec", label: "Макс. длина, с", min: 0, max: 900, step: 5, group: "rest" },
+        { key: "restPlateauMergeGapSec", label: "Склейка, с", min: 0, max: 120, step: 1, group: "rest" },
+        { key: "restPlateauSameKg", label: "Порог склейки, кг", min: 0, max: 100, step: 5, group: "rest" },
+        { key: "restPlateauMinDurationSec", label: "Мин. длина, с", min: 0, max: 900, step: 1, group: "rest" },
+        { key: "restPlateauLookbackMinutes", label: "Контекст слева, мин", min: 0, max: 120, step: 1, group: "rest" },
+        { key: "restPlateauReturnToleranceKg", label: "Допустимый возврат, кг", min: 0, max: 300, step: 5, group: "rest" },
+        { key: "restPlateauPreBatchMinLeadSec", label: "Не применять ближе к началу, с", min: 0, max: 1800, step: 10, group: "rest" },
         { key: "plateauMergeGapSec", label: "Склейка плато, с", min: 0, max: 120, step: 1, group: "advanced" },
         { key: "samePlateauKg", label: "Порог склейки, кг", min: 0, max: 100, step: 5, group: "advanced" },
         { key: "boundaryMinExtendMs", label: "Расширение, мин", min: 0, max: 20, step: 1, divisor: 60000, group: "advanced" },
@@ -139,6 +154,7 @@ $(document).ready(function () {
         { key: "showRaw", label: "rawWeight", color: "#dc2626" },
         { key: "showTelemetryWeight", label: "Telemetry.weight", color: "#16a34a" },
         { key: "showPlateaus", label: "плато", color: "#111827" },
+        { key: "showRestPlateaus", label: "плато покоя", color: "#7c3aed" },
         { key: "showEvents", label: "ступеньки", color: "#168a4a" },
         { key: "showIngredients", label: "линии ингредиентов", color: "#64748b" },
     ];
@@ -187,6 +203,7 @@ $(document).ready(function () {
             showRaw: false,
             showTelemetryWeight: false,
             showPlateaus: true,
+            showRestPlateaus: true,
             showEvents: true,
             showIngredients: false,
         },
@@ -224,6 +241,7 @@ $(document).ready(function () {
     let trackMapFitTimer = null;
     let replayTimer = null;
     let batchReplayObjects = [];
+    let replayLoaderArrowLayout = null;
     const DEFAULT_ZONE_RADIUS = 20;
     const DEFAULT_SQUARE_SIDE = 40;
     const ZONE_TYPE_BARN = "BARN";
@@ -525,6 +543,10 @@ $(document).ready(function () {
         `;
     }
 
+    function renderLowConfidenceBadge() {
+        return '<span class="dashboard-bool-badge is-warning">Низкая уверенность</span>';
+    }
+
     function getPostprocessStatus(batch) {
         return String(batch?.postprocess?.status || (batch?.endTime ? "complete" : "in_progress")).toLowerCase();
     }
@@ -675,17 +697,30 @@ $(document).ready(function () {
         );
     }
 
-    function findIngredientDetermination(row) {
-        if (!canAdmin) return null;
-        const decisions = Array.isArray(state.postprocessDebug?.debug?.ingredients)
+    function findPostprocessIngredient(row) {
+        const debugIngredients = Array.isArray(state.postprocessDebug?.debug?.ingredients)
             ? state.postprocessDebug.debug.ingredients
             : [];
+        const telemetryIngredients = Array.isArray(state.telemetryPayload?.postprocessIngredients)
+            ? state.telemetryPayload.postprocessIngredients
+            : [];
+        const decisions = debugIngredients.length ? debugIngredients : telemetryIngredients;
         const rowStartMs = parseTimestampMs(row?.startTime || row?.startedAt || row?.time);
         if (!Number.isFinite(rowStartMs)) return null;
         return decisions
             .map((item) => ({ item, distance: Math.abs(parseTimestampMs(item?.startedAt) - rowStartMs) }))
             .filter((entry) => Number.isFinite(entry.distance) && entry.distance <= 5000)
-            .sort((left, right) => left.distance - right.distance)[0]?.item?.determination || null;
+            .sort((left, right) => left.distance - right.distance)[0]?.item || null;
+    }
+
+    function findIngredientDetermination(row) {
+        if (!canAdmin) return null;
+        return findPostprocessIngredient(row)?.determination || null;
+    }
+
+    function isLowConfidenceIngredient(row) {
+        const ingredient = findPostprocessIngredient(row);
+        return asBoolean(ingredient?.lowConfidence ?? ingredient?.determination?.lowConfidence);
     }
 
     function getDeterminationSourceLabel(source) {
@@ -703,28 +738,62 @@ $(document).ready(function () {
         const decision = findIngredientDetermination(row);
         if (!decision) return "";
         const scoreboard = Array.isArray(decision.scoreboard) ? decision.scoreboard : [];
-        const scoreboardRows = scoreboard.length
-            ? scoreboard.map((candidate) => `
+        const positionDebug = decision.positionDebug || {};
+        const fallbackReasonLabel = {
+            loader_far: "погрузчик слишком далеко от HOST",
+            loader_offline: "нет свежей точки погрузчика",
+            host_position_missing: "нет корректной координаты HOST"
+        };
+        const loaderDistance = Number(positionDebug.loaderDistanceMeters);
+        const loaderLimit = Number(positionDebug.loaderMaxDistanceMeters);
+        const formatAge = (value) => Number.isFinite(Number(value))
+            ? `${(Number(value) / 1000).toFixed(1)} с`
+            : "—";
+        const scoreboardAgeLimit = Number(decision.visitedZoneMaxAgeMs ?? positionDebug.visitedZoneMaxAgeMs);
+        const loaderDebug = positionDebug.loader
+            ? `
+                <div><strong>RTK погрузчика:</strong> ${escapeHtml(formatDateTime(positionDebug.loader.timestamp))}</div>
+                <div>Возраст RTK-пакета: ${escapeHtml(formatAge(positionDebug.loader.ageMs))} (лимит свежести ${escapeHtml(formatAge(positionDebug.loaderFreshnessLimitMs))})</div>
+                <div>Зона погрузчика: ${escapeHtml(positionDebug.loader.zone?.name || "—")}</div>
+                <div>Расстояние HOST↔погрузчик: ${Number.isFinite(loaderDistance) ? escapeHtml(`${loaderDistance.toFixed(1)} м`) : "—"}${Number.isFinite(loaderLimit) ? escapeHtml(` / лимит ${loaderLimit} м`) : ""}</div>
+                <div>RTK принят как позиция: ${positionDebug.loaderEligible ? "да" : "нет"}${positionDebug.fallbackReason ? ` (${escapeHtml(fallbackReasonLabel[positionDebug.fallbackReason] || positionDebug.fallbackReason)})` : ""}</div>`
+            : `<div><strong>RTK погрузчика:</strong> нет свежей точки${positionDebug.fallbackReason ? ` (${escapeHtml(fallbackReasonLabel[positionDebug.fallbackReason] || positionDebug.fallbackReason)})` : ""}</div>`;
+        const hostDebug = `<div>HOST-пакет: ${escapeHtml(formatDateTime(positionDebug.hostPacketTimestamp))}, возраст ${escapeHtml(formatAge(positionDebug.hostPacketAgeMs))}</div>`;
+        const scoreboardTable = scoreboard.length
+            ? `<div class="mt-2"><strong>Scoreboard погрузчика</strong> <span class="text-muted">(диагностика; лимит возраста ${escapeHtml(formatAge(scoreboardAgeLimit))})</span></div><table><thead><tr><th>Кандидат</th><th>Возраст</th><th>Score</th><th>Dwell</th><th>Въезд</th><th>Heading</th></tr></thead><tbody>${scoreboard.map((candidate) => `
                 <tr>
                     <td>${escapeHtml(candidate.ingredient || candidate.name || "—")}</td>
+                    <td>${escapeHtml(formatAge(Number.isFinite(Date.parse(candidate.lastSeenAt)) && decision.timestamp ? Math.max(0, Date.parse(decision.timestamp) - Date.parse(candidate.lastSeenAt)) : null))}</td>
                     <td>${escapeHtml(String(candidate.score ?? "—"))}</td>
                     <td>${escapeHtml(String(candidate.dwellScore ?? "—"))}</td>
                     <td>${escapeHtml(String(candidate.entryScore ?? "—"))}</td>
                     <td>${escapeHtml(String(candidate.squareHeadingScore ?? "—"))}</td>
-                </tr>`).join("")
-            : '<tr><td colspan="5" class="text-muted">Scoreboard пуст</td></tr>';
+                </tr>`).join("")}</tbody></table>`
+            : "";
         return `
             <span class="ingredient-determination-badge"><i class="fas fa-info-circle"></i> как определён</span>
             <div class="ingredient-determination-popover" role="tooltip">
                 <strong>${escapeHtml(getDeterminationSourceLabel(decision.source))}</strong>
                 <div>Результат: ${escapeHtml(decision.ingredientName || "Unknown")}</div>
+                ${decision.lowConfidence ? `<div class="text-warning"><strong>Низкая уверенность:</strong> ${escapeHtml(decision.originalIngredientName || "—")} → ${escapeHtml(decision.ingredientName || "—")}</div>` : ""}
                 <div>Effective: ${escapeHtml(decision.effectivePositionSource || "host")}</div>
                 <div>Активная зона: ${escapeHtml(decision.activeZone?.name || "—")}</div>
+                ${hostDebug}
+                <div>Причина выбора: ${escapeHtml(
+                    decision.source === "host_current_zone"
+                        ? "HOST попал в зону; RTK используется только если он принят как позиция"
+                        : decision.source === "loader_current_zone"
+                            ? "текущая зона принятого RTK погрузчика"
+                            : decision.source === "loader_scoreboard"
+                                ? "кандидат scoreboard погрузчика"
+                                : getDeterminationSourceLabel(decision.source)
+                )}</div>
+                ${loaderDebug}
                 ${Number.isFinite(Number(decision.currentZoneEvidenceAgeMs))
                     ? `<div>Возраст RTK: ${escapeHtml((Number(decision.currentZoneEvidenceAgeMs) / 1000).toFixed(1))} с</div>`
                     : ""}
                 <div>Время: ${escapeHtml(formatDateTime(decision.timestamp))}</div>
-                <table><thead><tr><th>Кандидат</th><th>Score</th><th>Dwell</th><th>Въезд</th><th>Heading</th></tr></thead><tbody>${scoreboardRows}</tbody></table>
+                ${scoreboardTable}
             </div>`;
     }
 
@@ -820,6 +889,9 @@ $(document).ready(function () {
         const isComponentViolation = asBoolean(componentViolationByKey.get(key));
 
         if (!isComponentViolation) {
+            if (isLowConfidenceIngredient(row)) {
+                return renderLowConfidenceBadge();
+            }
             return renderViolationBadge(false);
         }
 
@@ -1149,6 +1221,7 @@ $(document).ready(function () {
                 loaderTrack: [],
                 events: [],
                 plateaus: [],
+                restPlateaus: [],
                 postprocessIngredients: [],
                 postprocess: null,
                 meta: null,
@@ -1161,6 +1234,7 @@ $(document).ready(function () {
             loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
             events: Array.isArray(payload?.events) ? payload.events : [],
             plateaus: Array.isArray(payload?.plateaus) ? payload.plateaus : [],
+            restPlateaus: Array.isArray(payload?.restPlateaus) ? payload.restPlateaus : [],
             postprocessIngredients: Array.isArray(payload?.postprocessIngredients)
                 ? payload.postprocessIngredients
                 : (Array.isArray(payload?.ingredients) ? payload.ingredients : []),
@@ -1957,6 +2031,46 @@ $(document).ready(function () {
         return point?.zone?.name || "вне зоны";
     }
 
+    function normalizeHeadingDegrees(value) {
+        const heading = Number(value);
+        if (!Number.isFinite(heading)) return null;
+        return ((heading % 360) + 360) % 360;
+    }
+
+    function calculateBearingDegrees(from, to) {
+        const lat1 = Number(from?.lat) * Math.PI / 180;
+        const lat2 = Number(to?.lat) * Math.PI / 180;
+        const lonDelta = (Number(to?.lon) - Number(from?.lon)) * Math.PI / 180;
+        if (![lat1, lat2, lonDelta].every(Number.isFinite)) return null;
+        const y = Math.sin(lonDelta) * Math.cos(lat2);
+        const x = Math.cos(lat1) * Math.sin(lat2) - Math.sin(lat1) * Math.cos(lat2) * Math.cos(lonDelta);
+        return normalizeHeadingDegrees(Math.atan2(y, x) * 180 / Math.PI);
+    }
+
+    function resolveReplayLoaderHeading(frames, index) {
+        const current = frames[index]?.loader;
+        const packetHeading = normalizeHeadingDegrees(current?.course ?? current?.heading);
+        if (packetHeading !== null) return { heading: packetHeading, source: "RTK" };
+        if (!current) return { heading: null, source: null };
+
+        for (let previousIndex = index - 1; previousIndex >= 0; previousIndex -= 1) {
+            const previous = frames[previousIndex]?.loader;
+            if (!previous) continue;
+            const distance = calculateDistanceMeters(previous, current);
+            if (distance < 1) continue;
+            return { heading: calculateBearingDegrees(previous, current), source: "по движению" };
+        }
+        return { heading: null, source: null };
+    }
+
+    function getReplayLoaderArrowLayout() {
+        if (replayLoaderArrowLayout || !window.ymaps?.templateLayoutFactory) return replayLoaderArrowLayout;
+        replayLoaderArrowLayout = window.ymaps.templateLayoutFactory.createClass(
+            '<div class="batch-replay-loader-arrow" style="transform: rotate({{properties.rotation}}deg)" aria-label="Направление погрузчика"><span></span></div>'
+        );
+        return replayLoaderArrowLayout;
+    }
+
     function renderReplayScoreboard(rows) {
         if (!replayScoreboard) return;
         const candidates = Array.isArray(rows) ? rows : [];
@@ -1997,18 +2111,27 @@ $(document).ready(function () {
 
         if (!batchTrackMap || !window.ymaps) return;
         clearReplayMapObjects();
+        const loaderDirection = resolveReplayLoaderHeading(frames, safeIndex);
         const markerSpecs = [
-            { point: frame.host, title: "Host", preset: "islands#blueCircleDotIcon" },
-            { point: frame.loader, title: "Погрузчик", preset: "islands#redCircleDotIcon" },
+            { point: frame.host, title: "Host", preset: "islands#blueCircleDotIcon", kind: "host" },
+            { point: frame.loader, title: "Погрузчик", preset: "islands#redCircleDotIcon", kind: "loader" },
         ];
-        markerSpecs.forEach(({ point, title, preset }) => {
+        markerSpecs.forEach(({ point, title, preset, kind }) => {
             const lat = Number(point?.lat);
             const lon = Number(point?.lon);
             if (!Number.isFinite(lat) || !Number.isFinite(lon)) return;
+            const isDirectionalLoader = kind === "loader" && loaderDirection.heading !== null;
             const marker = new window.ymaps.Placemark([lat, lon], {
                 hintContent: `${title}: ${formatTime(frame.timestamp)}`,
-                balloonContent: `<strong>${escapeHtml(title)}</strong><br>${escapeHtml(formatDateTime(frame.timestamp))}<br>Зона: ${escapeHtml(replayZoneLabel(point))}`,
-            }, { preset });
+                balloonContent: `<strong>${escapeHtml(title)}</strong><br>${escapeHtml(formatDateTime(frame.timestamp))}<br>Зона: ${escapeHtml(replayZoneLabel(point))}${isDirectionalLoader ? `<br>Направление: ${escapeHtml(loaderDirection.heading.toFixed(0))}° (${escapeHtml(loaderDirection.source)})` : ""}`,
+                rotation: isDirectionalLoader ? loaderDirection.heading.toFixed(1) : "0",
+            }, isDirectionalLoader ? {
+                iconLayout: "default#imageWithContent",
+                iconContentLayout: getReplayLoaderArrowLayout(),
+                iconImageSize: [34, 34],
+                iconImageOffset: [-17, -17],
+                zIndex: 650,
+            } : { preset });
             batchTrackMap.geoObjects.add(marker);
             batchReplayObjects.push(marker);
         });
@@ -2079,7 +2202,7 @@ $(document).ready(function () {
     }
 
     function renderPostprocessDebugFields() {
-        if (!postprocessDebugMainOptions || !postprocessDebugAdvancedOptions) {
+        if (!postprocessDebugMainOptions || !postprocessDebugAdvancedOptions || !postprocessDebugRestOptions) {
             return;
         }
 
@@ -2110,6 +2233,10 @@ $(document).ready(function () {
             .join("");
         postprocessDebugAdvancedOptions.innerHTML = POSTPROCESS_DEBUG_FIELDS
             .filter((field) => field.group === "advanced")
+            .map(renderField)
+            .join("");
+        postprocessDebugRestOptions.innerHTML = POSTPROCESS_DEBUG_FIELDS
+            .filter((field) => field.group === "rest")
             .map(renderField)
             .join("");
     }
@@ -2155,6 +2282,54 @@ $(document).ready(function () {
             }
             return result;
         }, {});
+    }
+
+    function getRestPostprocessDebugFields() {
+        return POSTPROCESS_DEBUG_FIELDS.filter((field) => field.group === "rest");
+    }
+
+    function readRememberedRestPostprocessOptions() {
+        try {
+            const raw = window.localStorage.getItem(POSTPROCESS_DEBUG_REST_OPTIONS_STORAGE_KEY);
+            if (!raw) return null;
+            const parsed = JSON.parse(raw);
+            if (!parsed || typeof parsed !== "object") return null;
+
+            return getRestPostprocessDebugFields().reduce((result, field) => {
+                if (parsed[field.key] === undefined || parsed[field.key] === null) return result;
+                if (field.type === "checkbox") {
+                    result[field.key] = asBoolean(parsed[field.key]);
+                    return result;
+                }
+                const numeric = getFiniteNumber(parsed[field.key]);
+                if (numeric !== null) result[field.key] = numeric;
+                return result;
+            }, {});
+        } catch (_error) {
+            return null;
+        }
+    }
+
+    function collectRestPostprocessOptions() {
+        const allOptions = collectPostprocessDebugOptions();
+        return getRestPostprocessDebugFields().reduce((result, field) => {
+            if (allOptions[field.key] !== undefined) result[field.key] = allOptions[field.key];
+            return result;
+        }, {});
+    }
+
+    function rememberRestPostprocessOptions() {
+        const options = collectRestPostprocessOptions();
+        try {
+            window.localStorage.setItem(POSTPROCESS_DEBUG_REST_OPTIONS_STORAGE_KEY, JSON.stringify(options));
+            if (postprocessDebugRestRememberState) {
+                postprocessDebugRestRememberState.textContent = "Сохранено для остальных замесов";
+            }
+        } catch (_error) {
+            if (postprocessDebugRestRememberState) {
+                postprocessDebugRestRememberState.textContent = "Браузер не разрешил сохранить";
+            }
+        }
     }
 
     function setPostprocessDebugState(message, tone = "info") {
@@ -2247,6 +2422,7 @@ $(document).ready(function () {
             "after-last-unload": "после выгрузки?",
             "small-load-after-unload": "мелк. после выгрузки?",
             "small-load-before-unload": "мелк. перед выгрузкой?",
+            "rest-plateau-return": "покой: возврат?",
         };
 
         return labels[event.artifactReason] || "исключено?";
@@ -2627,11 +2803,12 @@ $(document).ready(function () {
             }));
         }
         if (view.showPlateaus) {
-            const plateauDataset = buildPlateauTelemetryDataset(timelinePoints, debug?.plateaus);
-            if (plateauDataset) {
-                plateauDataset.label = "Плато";
-                datasets.push(plateauDataset);
-            }
+            const plateauDataset = buildPlateauTelemetryDataset(timelinePoints, debug?.plateaus, "standard");
+            if (plateauDataset) datasets.push(plateauDataset);
+        }
+        if (view.showRestPlateaus) {
+            const restPlateauDataset = buildPlateauTelemetryDataset(timelinePoints, debug?.restPlateaus, "rest");
+            if (restPlateauDataset) datasets.push(restPlateauDataset);
         }
         if (view.showIngredients) {
             datasets.push(...buildPostprocessDebugComponentDatasets(timeline, state.batch?.actualIngredients || []));
@@ -2657,7 +2834,7 @@ $(document).ready(function () {
                     callbacks: {
                         label: function (tooltipItem, data) {
                             const dataset = data.datasets?.[tooltipItem.datasetIndex] || {};
-                            if (dataset.isPlateauDataset) return `Плато: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                            if (dataset.isPlateauDataset) return `${dataset.label}: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
                             if (dataset.ingredientName) return `${dataset.ingredientName}: ${weightFormatter.format(dataset.actualWeight)} кг`;
                             return `${dataset.label || "Вес"}: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
                         },
@@ -2789,7 +2966,7 @@ $(document).ready(function () {
         renderPostprocessDebugSpeedCharts(timeline, debug);
     }
 
-    async function loadPostprocessDebug(useFormOptions = false) {
+    async function loadPostprocessDebug(useFormOptions = false, useRememberedOptions = true) {
         if (!canAdmin || !batchId || state.postprocessDebugLoading) {
             return;
         }
@@ -2800,7 +2977,12 @@ $(document).ready(function () {
         setPostprocessDebugState("Считаем отладочный предпросмотр без сохранения…");
 
         try {
-            const options = useFormOptions ? collectPostprocessDebugOptions() : {};
+            const rememberedOptions = !useFormOptions && useRememberedOptions
+                ? readRememberedRestPostprocessOptions()
+                : null;
+            const options = useFormOptions
+                ? collectPostprocessDebugOptions()
+                : (rememberedOptions || {});
             const payload = await fetchJson(buildPostprocessDebugRequestUrl(options));
             if (requestId !== state.postprocessDebugRequestId) {
                 return;
@@ -2808,6 +2990,11 @@ $(document).ready(function () {
 
             state.postprocessDebug = payload;
             syncPostprocessDebugFields(payload?.debug?.options);
+            if (postprocessDebugRestRememberState) {
+                postprocessDebugRestRememberState.textContent = rememberedOptions
+                    ? "Применён сохранённый выбор"
+                    : "";
+            }
             setPostprocessDebugState("", "info");
             renderPostprocessDebug();
             initializeReplay();
@@ -2854,7 +3041,10 @@ $(document).ready(function () {
 
         const componentDatasets = buildComponentTelemetryDatasets(visibleRows, chartIngredientRows);
         const plateauDataset = canAdmin
-            ? buildPlateauTelemetryDataset(visibleRows, state.telemetryPayload?.plateaus)
+            ? buildPlateauTelemetryDataset(visibleRows, state.telemetryPayload?.plateaus, "standard")
+            : null;
+        const restPlateauDataset = canAdmin
+            ? buildPlateauTelemetryDataset(visibleRows, state.telemetryPayload?.restPlateaus, "rest")
             : null;
         const componentZonePlugin = buildComponentZonePlugin();
         const isInvalidWeightPoint = (point) =>
@@ -2892,6 +3082,7 @@ $(document).ready(function () {
                         order: 1,
                     },
                     ...(plateauDataset ? [plateauDataset] : []),
+                    ...(restPlateauDataset ? [restPlateauDataset] : []),
                     ...componentDatasets,
                 ],
             },
@@ -2912,7 +3103,7 @@ $(document).ready(function () {
                                 return "weightValid=false";
                             }
                             if (dataset.isPlateauDataset) {
-                                return `Плато: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
+                                return `${dataset.label}: ${weightFormatter.format(tooltipItem.yLabel)} кг`;
                             }
 
                             if (dataset.ingredientName) {
@@ -2955,15 +3146,17 @@ $(document).ready(function () {
         });
     }
 
-    function buildPlateauTelemetryDataset(points, plateaus) {
+    function buildPlateauTelemetryDataset(points, plateaus, kind = "standard") {
         const rows = Array.isArray(points) ? points : [];
         const plateauRows = (Array.isArray(plateaus) ? plateaus : [])
             .map((plateau) => ({
                 startMs: parseTimestampMs(plateau?.startTime),
                 endMs: parseTimestampMs(plateau?.endTime),
                 level: Number(plateau?.level),
+                kind: plateau?.kind || "standard",
             }))
             .filter((plateau) =>
+                plateau.kind === kind &&
                 Number.isFinite(plateau.startMs) &&
                 Number.isFinite(plateau.endMs) &&
                 plateau.endMs >= plateau.startMs &&
@@ -2989,13 +3182,14 @@ $(document).ready(function () {
         }
 
         return {
-            label: "Плато",
+            label: kind === "rest" ? "Плато покоя" : "Плато",
             isPlateauDataset: true,
+            plateauKind: kind,
             data,
-            borderColor: "#111827",
-            backgroundColor: "rgba(17, 24, 39, 0.08)",
+            borderColor: kind === "rest" ? "#7c3aed" : "#111827",
+            backgroundColor: kind === "rest" ? "rgba(124, 58, 237, 0.08)" : "rgba(17, 24, 39, 0.08)",
             borderWidth: 2,
-            borderDash: [6, 4],
+            borderDash: kind === "rest" ? [2, 3] : [6, 4],
             pointRadius: 0,
             pointHoverRadius: 3,
             lineTension: 0,
@@ -4126,7 +4320,11 @@ $(document).ready(function () {
     }
 
     if (postprocessDebugResetButton) {
-        postprocessDebugResetButton.addEventListener("click", () => loadPostprocessDebug(false));
+        postprocessDebugResetButton.addEventListener("click", () => loadPostprocessDebug(false, false));
+    }
+
+    if (postprocessDebugRestRememberButton) {
+        postprocessDebugRestRememberButton.addEventListener("click", rememberRestPostprocessOptions);
     }
 
     if (postprocessDebugRefreshButton) {

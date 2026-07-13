@@ -1,4 +1,4 @@
-import { detectZoneObject } from '../../../../module-1/geo.js'
+import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
 import { roundWeight } from '../../../../module-2/weightRounding.js'
 import { TelemetryProcessor } from '../../../../module-3/telemetryProcessor.js'
@@ -7,6 +7,8 @@ import { buildPostprocessedHostTrack, detectWeightStepMarkup, resolveWeightStepO
 import { resolveEffectiveCoordinatesFromRtkPoint } from '../telemetry/telemetry-helpers.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
+const STRAW_INGREDIENT_KEY = normalizeIngredientName('Солома')
+const ALFALFA_INGREDIENT_KEY = normalizeIngredientName('Люцерна')
 const DEFAULT_FALLBACK_LEFT_BOUNDARY_MS = 10 * 60 * 1000
 const MAX_DYNAMIC_LEFT_BOUNDARY_GAP_MS = 3 * 60 * 60 * 1000
 const POSTPROCESS_CACHE = new Map()
@@ -470,6 +472,52 @@ async function loadPostprocessRtk(prismaClient, telemetryRows, telemetrySettings
   })
 }
 
+export function applyHostPlanIngredientFallbacks(ingredients = [], expectedIngredients = []) {
+  const rows = Array.isArray(ingredients) ? ingredients : []
+  const planRows = Array.isArray(expectedIngredients) ? expectedIngredients : []
+  const planByKey = new Map(planRows.map((item) => [normalizeIngredientName(item?.name), item]))
+  const detectedKeys = new Set(rows.map((item) => normalizeIngredientName(item?.ingredientName)))
+
+  if (
+    !planByKey.has(STRAW_INGREDIENT_KEY) ||
+    planByKey.has(ALFALFA_INGREDIENT_KEY) ||
+    detectedKeys.has(STRAW_INGREDIENT_KEY) ||
+    !detectedKeys.has(ALFALFA_INGREDIENT_KEY)
+  ) {
+    return rows
+  }
+
+  const strawName = String(planByKey.get(STRAW_INGREDIENT_KEY)?.name || 'Солома').trim() || 'Солома'
+  return rows.map((ingredient) => {
+    const isHostAlfalfa = normalizeIngredientName(ingredient?.ingredientName) === ALFALFA_INGREDIENT_KEY &&
+      ingredient?.determination?.source === 'host_current_zone'
+    if (!isHostAlfalfa) return ingredient
+
+    const originalIngredientName = ingredient.ingredientName
+    return {
+      ...ingredient,
+      ingredientName: strawName,
+      originalIngredientName,
+      confidence: 'low',
+      lowConfidence: true,
+      confidenceReason: 'host-plan-straw-fallback',
+      determination: {
+        ...ingredient.determination,
+        ingredientName: strawName,
+        originalIngredientName,
+        confidence: 'low',
+        lowConfidence: true,
+        confidenceReason: 'host-plan-straw-fallback',
+        planFallback: {
+          fromIngredientName: originalIngredientName,
+          toIngredientName: strawName,
+          reason: 'plan-has-straw-no-alfalfa-and-straw-was-missing'
+        }
+      }
+    }
+  })
+}
+
 async function buildPostprocessedIngredients(prismaClient, batch, analysis, telemetrySettings, telemetryRows = [], rtkRows = []) {
   const loadEvents = (analysis.includedEvents || []).filter((event) => event.delta > 0)
 
@@ -535,7 +583,10 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
       const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
       processor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
-        skipZoneVisit: effective.source === 'rtk',
+        // Zone scoreboard belongs exclusively to loader RTK telemetry.
+        // replayRtkUntil() feeds those points through processLoaderPacket();
+        // host packets must never create scoreboard candidates of their own.
+        skipZoneVisit: true,
         allowVisitedZoneIngredient: effective.source === 'rtk',
         preferCurrentZoneIngredient: effective.source === 'rtk',
         currentZoneEvidenceAgeMs,
@@ -547,6 +598,7 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
       const loaderZone = rtkPoint
         ? detectZoneObject(Number(rtkPoint.lat), Number(rtkPoint.lon), loadingZones)
         : null
+      const loaderRaw = rtkPoint ? parseRawPayload(rtkPoint.rawPayload) : {}
       replayFrames.push({
         timestamp: hostPoint.timestamp,
         filteredSpeedKmh: Number(hostPoint.speedKmh || 0),
@@ -559,7 +611,9 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
           lat: Number(rtkPoint.lat),
           lon: Number(rtkPoint.lon),
           speedKmh: finiteNumberOrNull(rtkPoint.speed),
-          course: finiteNumberOrNull(rtkPoint.course),
+          course: finiteNumberOrNull(
+            rtkPoint.course ?? readRawValue(loaderRaw, ['heading', 'course', 'azimuth', 'headingDeg', 'heading_deg'])
+          ),
           zone: serializeReplayZone(loaderZone)
         } : null,
         effective: {
@@ -593,7 +647,7 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
       speedKmh: Number(startHost?.speedKmh || 0),
       weight: 0
     }
-    const determination = loadingZones.length
+    const baseDetermination = loadingZones.length
       ? processor.resolveIngredientAtKnownLoadingStart({ ...startPacket, timestamp: new Date(startMs) }, loadingZones, telemetrySettings, {
         deviceId,
         allowVisitedZoneIngredient: lastReplayPacket?.effective?.source === 'rtk',
@@ -608,6 +662,39 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
         returnDecisionDetails: true
       })
       : null
+    const startRtk = startHost
+      ? resolveReplayRtkPoint(startHost, rtkIndex, telemetrySettings)
+      : null
+    const loaderDistanceMeters = startRtk && startHost
+      ? calculateHaversine(Number(startHost.lat), Number(startHost.lon), Number(startRtk.lat), Number(startRtk.lon))
+      : null
+    const loaderMaxDistanceMeters = Number(telemetrySettings.loaderMaxDistanceMeters) > 0
+      ? Number(telemetrySettings.loaderMaxDistanceMeters)
+      : 150
+    const determination = baseDetermination ? {
+      ...baseDetermination,
+      positionDebug: {
+        hostZone: baseDetermination.activeZone || null,
+        effectiveSource: lastReplayPacket?.effective?.source || 'host',
+        fallbackReason: lastReplayPacket?.effective?.ignoredReason || null,
+        hostPacketTimestamp: startHost?.timestamp || null,
+        hostPacketAgeMs: startHost
+          ? Math.abs(startMs - timestampMs(startHost.timestamp))
+          : null,
+        loaderMaxDistanceMeters,
+        loaderFreshnessLimitMs: Number(telemetrySettings.loaderOfflineTimeoutMinutes || 4) * 60 * 1000,
+        visitedZoneMaxAgeMs: baseDetermination.visitedZoneMaxAgeMs ?? null,
+        loaderDistanceMeters: finiteNumberOrNull(loaderDistanceMeters),
+        loaderEligible: Boolean(startRtk) && Number(loaderDistanceMeters) <= loaderMaxDistanceMeters,
+        loader: startRtk ? {
+          timestamp: startRtk.timestamp,
+          ageMs: Math.max(0, startMs - timestampMs(startRtk.timestamp)),
+          lat: Number(startRtk.lat),
+          lon: Number(startRtk.lon),
+          zone: serializeReplayZone(detectZoneObject(Number(startRtk.lat), Number(startRtk.lon), loadingZones))
+        } : null
+      }
+    } : null
     const processorName = determination?.ingredientName || null
     const ingredientName = processorName || 'Unknown'
     const ingredientKey = normalizeIngredientName(ingredientName)
@@ -651,7 +738,10 @@ async function buildPostprocessedIngredients(prismaClient, batch, analysis, tele
     replayHostUntil(replayEndMs)
     replayRtkUntil(replayEndMs)
   }
-  return { ingredients: results, replayFrames }
+  return {
+    ingredients: applyHostPlanIngredientFallbacks(results, expectedIngredients),
+    replayFrames
+  }
 }
 
 export function buildPostprocessMeta(result) {
@@ -689,8 +779,10 @@ export async function buildBatchPostprocess(prismaClient, batch, telemetrySettin
   const initialLeftBoundaryMs = previousBatchIsRecent
     ? previousBatchEndMs
     : defaultLeftBoundaryMs
+  const restLookbackMs = Math.max(0, Number(resolvedOptions.restPlateauLookbackMinutes) || 0) * 60 * 1000
+  const telemetryLoadStartMs = Math.min(initialLeftBoundaryMs, batchStartMs - restLookbackMs)
   const telemetryRows = options.telemetryRows || await loadBatchPostprocessTelemetry(prismaClient, batch, {
-    analysisStartMs: initialLeftBoundaryMs
+    analysisStartMs: telemetryLoadStartMs
   })
   const rtkRows = options.rtkRows || await loadPostprocessRtk(prismaClient, telemetryRows, telemetrySettings)
   const cacheKey = buildCacheKey(batch, telemetryRows, rtkRows, resolvedOptions, telemetrySettings)

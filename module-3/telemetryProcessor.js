@@ -1,4 +1,4 @@
-import { calculateHaversine, detectZoneObject } from '../module-1/geo.js';
+import { calculateHaversine, detectZoneObject, detectZoneWithinRadius } from '../module-1/geo.js';
 import { isValidLocation } from '../module-1/validator.js';
 import { normalizeIngredientName } from '../module-2/rationManager.js';
 import { roundNonNegativeWeight, roundWeight } from '../module-2/weightRounding.js';
@@ -42,8 +42,8 @@ const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
 const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
 const DEFAULT_LOADING_ZONE_STICKY_SECONDS = 180;
 const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4;
-const LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS = 10000;
-const NEAREST_HOST_ZONE_FALLBACK_MAX_METERS = 15;
+const LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS = 120000;
+const HOST_ZONE_INTERSECTION_RADIUS_METERS = 20;
 const MIN_TRACKABLE_WEIGHT_KG = -100;
 const MAX_TRACKABLE_WEIGHT_KG = 8000;
 const RAW_WEIGHT_LEAD_THRESHOLD_KG = 80;
@@ -79,27 +79,12 @@ function detectZoneWithRadiusFallback(lat, lon, zonesConfig = [], fallbackLat = 
   const nearestLon = Number(fallbackLon);
   if (!isValidLocation(nearestLat, nearestLon)) return null;
 
-  let closestZone = null;
-  let closestDistance = Number.POSITIVE_INFINITY;
-
-  for (const zone of zonesConfig) {
-    const zoneLat = Number(zone?.lat);
-    const zoneLon = Number(zone?.lon);
-    if (
-      !Number.isFinite(zoneLat) ||
-      !Number.isFinite(zoneLon)
-    ) {
-      continue;
-    }
-
-    const distance = calculateHaversine(nearestLat, nearestLon, zoneLat, zoneLon);
-    if (distance <= NEAREST_HOST_ZONE_FALLBACK_MAX_METERS && distance < closestDistance) {
-      closestZone = zone;
-      closestDistance = distance;
-    }
-  }
-
-  return closestZone;
+  return detectZoneWithinRadius(
+    nearestLat,
+    nearestLon,
+    zonesConfig,
+    HOST_ZONE_INTERSECTION_RADIUS_METERS
+  );
 }
 
 function calculateBearingDeg(lat1, lon1, lat2, lon2) {
@@ -1638,7 +1623,9 @@ export class TelemetryProcessor {
       lat: Number.isFinite(lat) ? lat : null,
       lon: Number.isFinite(lon) ? lon : null,
       visitedZoneMaxAgeMs,
-      currentZoneEvidenceAgeMs: Number.isFinite(Number(options.currentZoneEvidenceAgeMs))
+      currentZoneEvidenceAgeMs: options.currentZoneEvidenceAgeMs !== null &&
+        options.currentZoneEvidenceAgeMs !== undefined &&
+        Number.isFinite(Number(options.currentZoneEvidenceAgeMs))
         ? Number(options.currentZoneEvidenceAgeMs)
         : null,
       scoreboard

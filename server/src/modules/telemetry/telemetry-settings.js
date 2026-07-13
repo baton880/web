@@ -37,7 +37,7 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   rtkTrackResetTime: '03:00',
   rtkHeadingOffsetDeg: 0,
   weightCalibrationFactor: 1,
-  loaderMaxDistanceMeters: 20,
+  loaderMaxDistanceMeters: 30,
   loaderOfflineTimeoutMinutes: 4
 }
 

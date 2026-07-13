@@ -133,7 +133,7 @@ model TelemetrySettings {
   rtkTrackResetTime         String @default("03:00")
   rtkHeadingOffsetDeg       Float  @default(0)
   weightCalibrationFactor   Float  @default(1)
-  loaderMaxDistanceMeters   Int    @default(4)
+  loaderMaxDistanceMeters   Int    @default(30)
   loaderOfflineTimeoutMinutes Int   @default(4)
   createdAt              DateTime @default(now())
   updatedAt              DateTime @updatedAt

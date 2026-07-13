@@ -1001,6 +1001,33 @@
     font-size: 0.78rem;
 }
 
+.batch-replay-loader-arrow {
+    position: relative;
+    width: 34px;
+    height: 34px;
+    transform-origin: 17px 17px;
+    filter: drop-shadow(0 2px 3px rgba(0, 0, 0, 0.35));
+}
+
+.batch-replay-loader-arrow::before {
+    content: "";
+    position: absolute;
+    inset: 3px;
+    border-radius: 50%;
+    background: rgba(255, 255, 255, 0.94);
+    border: 2px solid #b83232;
+}
+
+.batch-replay-loader-arrow span {
+    position: absolute;
+    left: 9px;
+    top: 5px;
+    width: 16px;
+    height: 22px;
+    background: #d73a3a;
+    clip-path: polygon(50% 0, 100% 64%, 66% 58%, 66% 100%, 34% 100%, 34% 58%, 0 64%);
+}
+
 .batch-ingredient-component-cell {
     position: relative;
 }

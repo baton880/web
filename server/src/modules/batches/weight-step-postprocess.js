@@ -19,6 +19,17 @@ export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   minUnloadStepKg: 70,
   stableRadius: 10,
   stableRangeKg: 50,
+  restPlateauEnabled: true,
+  restPlateauRadius: 10,
+  restPlateauRangeKg: 55,
+  restPlateauMinPoints: 4,
+  restPlateauMaxSec: 0,
+  restPlateauMergeGapSec: 45,
+  restPlateauSameKg: 5,
+  restPlateauMinDurationSec: 300,
+  restPlateauLookbackMinutes: 15,
+  restPlateauReturnToleranceKg: 30,
+  restPlateauPreBatchMinLeadSec: 180,
   maxLoadTransitionSec: 100000,
   maxUnloadTransitionSec: 545000,
   anchorSec: 15,
@@ -27,6 +38,9 @@ export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   loadForceKg: 120,
   loadMovingSpeedKmh: 0,
   loadMovingMaxPct: 60,
+  loadBoundaryStopWindowSec: 20,
+  loadBoundaryStopSpeedKmh: 0.5,
+  loadBoundaryStopMinPoints: 2,
   maxPlateauSec: 60,
   loadMergeGapSec: 10,
   boundaryMinExtendMs: 3 * 60 * 1000,
@@ -79,6 +93,12 @@ export function resolveWeightStepOptions(overrides = {}) {
   }
   if (!(Number(options.stableRadius) >= 1)) {
     options.stableRadius = DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS.stableRadius
+  }
+  if (!(Number(options.restPlateauRadius) >= 1)) {
+    options.restPlateauRadius = DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS.restPlateauRadius
+  }
+  if (!(Number(options.restPlateauMinPoints) >= 2)) {
+    options.restPlateauMinPoints = DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS.restPlateauMinPoints
   }
 
   const analysisStartMs = timestampMs(source.analysisStartTime ?? source.analysisStartMs)
@@ -437,6 +457,25 @@ function buildPlateaus(points, opts) {
   return decoratePlateaus(merged, opts)
 }
 
+export function buildRestPlateaus(points, opts) {
+  if (!opts.restPlateauEnabled) return []
+
+  const restOptions = {
+    ...opts,
+    stableRadius: opts.restPlateauRadius,
+    stableRangeKg: opts.restPlateauRangeKg,
+    stableMinPoints: opts.restPlateauMinPoints,
+    maxPlateauSec: opts.restPlateauMaxSec,
+    plateauMergeGapSec: opts.restPlateauMergeGapSec,
+    samePlateauKg: opts.restPlateauSameKg
+  }
+  const minDurationMs = Math.max(0, Number(opts.restPlateauMinDurationSec) || 0) * 1000
+
+  return buildPlateaus(points, restOptions)
+    .filter((plateau) => plateau.endMs - plateau.startMs >= minDurationMs)
+    .map((plateau, index) => ({ ...plateau, index, kind: 'rest' }))
+}
+
 function buildTransitionPlateaus(points, from, to, opts, batchStartMs = null) {
   const transitionPoints = points.filter((point) => point.x > from.endMs && point.x < to.startMs)
   if (transitionPoints.length < opts.stableMinPoints) return []
@@ -602,6 +641,36 @@ function speedSummary(points, fromMs, toMs, movingSpeedKmh = 0.1) {
   }
 }
 
+function stationaryPointCount(points, fromMs, toMs, maxSpeedKmh) {
+  return points.reduce((count, point) => {
+    const speedX = Number.isFinite(point.speedX) ? point.speedX : point.x
+    const speed = Math.abs(Number(point.speed))
+    return speedX >= fromMs &&
+      speedX <= toMs &&
+      Number.isFinite(speed) &&
+      speed <= maxSpeedKmh
+      ? count + 1
+      : count
+  }, 0)
+}
+
+function loadBoundaryStopEvidence(points, startMs, endMs, opts) {
+  const windowMs = Math.max(0, Number(opts.loadBoundaryStopWindowSec) || 0) * 1000
+  const maxSpeedKmh = Math.max(0, Number(opts.loadBoundaryStopSpeedKmh) || 0)
+  const minPoints = Math.max(1, Math.trunc(Number(opts.loadBoundaryStopMinPoints) || 1))
+  if (!windowMs) {
+    return { before: false, after: false, beforePoints: 0, afterPoints: 0 }
+  }
+
+  const afterPoints = stationaryPointCount(points, endMs, endMs + windowMs, maxSpeedKmh)
+  return {
+    before: false,
+    after: afterPoints >= minPoints,
+    beforePoints: 0,
+    afterPoints
+  }
+}
+
 function eventKind(delta) {
   if (delta > 0) return 'load'
   if (delta < 0) return 'unload'
@@ -748,16 +817,19 @@ function findAnalysisBounds(points, batchStartMs, batchEndMs, opts) {
 function markBounceArtifacts(events, opts) {
   const marked = events.map((event) => {
     const forceLoad = event.delta > 0 && event.absKg >= opts.loadForceKg
+    const boundaryStopConfirmed = event.delta > 0 && Boolean(event.boundaryStopAfter)
     const movingSmallDrop = event.delta < 0 &&
       event.absKg <= opts.movementDipKg &&
       Number.isFinite(event.speedAvg) &&
       event.speedAvg >= opts.movementDipSpeedKmh
     const mostlyMovingLoad = event.delta > 0 &&
       !forceLoad &&
+      !boundaryStopConfirmed &&
       Number.isFinite(event.movingPct) &&
       event.movingPct > opts.loadMovingMaxPct
     const movingSmallLoad = event.delta > 0 &&
       !forceLoad &&
+      !boundaryStopConfirmed &&
       event.absKg <= opts.loadDriftMaxKg &&
       Number.isFinite(event.movingPct) &&
       event.movingPct > Math.min(40, opts.loadMovingMaxPct)
@@ -771,6 +843,7 @@ function markBounceArtifacts(events, opts) {
     return {
       ...event,
       forceLoad,
+      boundaryStopConfirmed,
       artifact: movingSmallDrop || movingSmallLoad || mostlyMovingLoad,
       artifactReason
     }
@@ -826,6 +899,65 @@ function markBatchLifecycleArtifacts(events) {
       seenStrongUnload = true
     }
     return event
+  })
+}
+
+function markRestPlateauArtifacts(events, restPlateaus, opts, batchStartMs) {
+  if (!opts.restPlateauEnabled || !Array.isArray(restPlateaus) || !restPlateaus.length) {
+    return events
+  }
+
+  const returnToleranceKg = Math.max(0, Number(opts.restPlateauReturnToleranceKg) || 0)
+  const maxGapMs = Math.max(0, Number(opts.restPlateauMergeGapSec) || 0) * 1000
+  const minLeadMs = Math.max(0, Number(opts.restPlateauPreBatchMinLeadSec) || 0) * 1000
+
+  return events.map((event) => {
+    if (event.artifact || event.kind !== 'load') return event
+    if (!Number.isFinite(batchStartMs) || event.endMs > batchStartMs - minLeadMs) return event
+
+    const coveringPlateau = restPlateaus.find((plateau) => (
+      plateau.startMs <= event.startMs && plateau.endMs >= event.endMs
+    ))
+    if (coveringPlateau) {
+      return {
+        ...event,
+        artifact: true,
+        artifactReason: 'rest-plateau-return',
+        restBeforeLevel: eventLevel(coveringPlateau.level),
+        restAfterLevel: eventLevel(coveringPlateau.level),
+        restReturnDeltaKg: 0,
+        restGapMs: 0
+      }
+    }
+
+    let before = null
+    let after = null
+    for (const plateau of restPlateaus) {
+      if (plateau.endMs <= event.startMs) before = plateau
+      if (!after && plateau.startMs >= event.endMs) after = plateau
+    }
+    if (!before || !after) return event
+
+    const gapMs = after.startMs - before.endMs
+    const returnDeltaKg = Math.abs(Number(after.level) - Number(before.level))
+    if (
+      gapMs < 0 ||
+      gapMs > maxGapMs ||
+      !Number.isFinite(returnDeltaKg) ||
+      returnDeltaKg > returnToleranceKg
+    ) {
+      return event
+    }
+
+    return {
+      ...event,
+      artifact: true,
+      artifactReason: 'rest-plateau-return',
+      restBeforeLevel: eventLevel(before.level),
+      restAfterLevel: eventLevel(after.level),
+      restReturnDeltaKg: eventLevel(returnDeltaKg),
+      restGapMs: gapMs
+    }
   })
 }
 
@@ -966,6 +1098,15 @@ function serializeEvent(event) {
     speedAvg: event.speedAvg,
     speedMax: event.speedMax,
     movingPct: event.movingPct,
+    boundaryStopBefore: Boolean(event.boundaryStopBefore),
+    boundaryStopAfter: Boolean(event.boundaryStopAfter),
+    boundaryStopBeforePoints: Number(event.boundaryStopBeforePoints || 0),
+    boundaryStopAfterPoints: Number(event.boundaryStopAfterPoints || 0),
+    boundaryStopConfirmed: Boolean(event.boundaryStopConfirmed),
+    restBeforeLevel: Number.isFinite(event.restBeforeLevel) ? event.restBeforeLevel : null,
+    restAfterLevel: Number.isFinite(event.restAfterLevel) ? event.restAfterLevel : null,
+    restReturnDeltaKg: Number.isFinite(event.restReturnDeltaKg) ? event.restReturnDeltaKg : null,
+    restGapMs: Number.isFinite(event.restGapMs) ? event.restGapMs : null,
     artifact: Boolean(event.artifact),
     artifactReason: event.artifactReason || '',
     mergedCount: Number(event.mergedCount || 1),
@@ -984,6 +1125,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       options: resolveWeightStepOptions(rawOptions),
       points: [],
       plateaus: [],
+      restPlateaus: [],
       events: [],
       includedEvents: []
     }
@@ -998,6 +1140,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       options: resolveWeightStepOptions(rawOptions),
       points: [],
       plateaus: [],
+      restPlateaus: [],
       events: [],
       includedEvents: []
     }
@@ -1017,6 +1160,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       options: opts,
       points: points.map(serializePoint),
       plateaus: [],
+      restPlateaus: [],
       events: [],
       includedEvents: []
     }
@@ -1033,12 +1177,17 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       options: opts,
       points: points.map(serializePoint),
       plateaus: [],
+      restPlateaus: [],
       events: [],
       includedEvents: []
     }
   }
 
   const detectedPlateaus = buildPlateaus(inBatch, opts)
+  const restLookbackMs = Math.max(0, Number(opts.restPlateauLookbackMinutes) || 0) * 60 * 1000
+  const restStartMs = Math.max(points[0]?.x ?? batchStartMs, batchStartMs - restLookbackMs)
+  const restPoints = points.filter((point) => point.x >= restStartMs && point.x <= bounds.endMs)
+  const restPlateaus = buildRestPlateaus(restPoints, opts)
   const plateaus = insertTransitionPlateaus(
     inBatch,
     addBoundaryPlateaus(inBatch, detectedPlateaus, bounds.startMs, bounds.endMs, opts),
@@ -1064,6 +1213,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
     if (kind === 'flat' || Math.abs(delta) < minStepKg || transitionMs > maxTransitionSec * 1000) continue
 
     const speeds = speedSummary(inBatch, trimmed.startMs, trimmed.endMs, opts.loadMovingSpeedKmh)
+    const boundaryStop = loadBoundaryStopEvidence(inBatch, trimmed.startMs, trimmed.endMs, opts)
     events.push({
       id: events.length + 1,
       startMs: trimmed.startMs,
@@ -1083,6 +1233,10 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       speedAvg: speeds.avg,
       speedMax: speeds.max,
       movingPct: speeds.movingPct,
+      boundaryStopBefore: boundaryStop.before,
+      boundaryStopAfter: boundaryStop.after,
+      boundaryStopBeforePoints: boundaryStop.beforePoints,
+      boundaryStopAfterPoints: boundaryStop.afterPoints,
       edgeTrimmed: Boolean(trimmed.edgeStart || trimmed.edgeEnd),
       fromPlateau: from.index,
       toPlateau: to.index
@@ -1090,7 +1244,9 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
   }
 
   const mergedEvents = mergeCloseLoadEvents(events, inBatch, opts)
-  const markedEvents = markBatchLifecycleArtifacts(markBounceArtifacts(mergedEvents, opts))
+  const bounceMarkedEvents = markBounceArtifacts(mergedEvents, opts)
+  const restMarkedEvents = markRestPlateauArtifacts(bounceMarkedEvents, restPlateaus, opts, batchStartMs)
+  const markedEvents = markBatchLifecycleArtifacts(restMarkedEvents)
   const finalEvents = markedEvents.map((event, index) => ({ ...event, id: index + 1 }))
   const includedEvents = finalEvents.filter((event) => !event.artifact)
   const loaded = includedEvents.filter((event) => event.delta > 0).reduce((sum, event) => sum + event.delta, 0)
@@ -1112,9 +1268,14 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
       minStartTime: new Date(bounds.minStart),
       minEndTime: new Date(bounds.minEnd)
     },
+    restBounds: {
+      startTime: new Date(restStartMs),
+      endTime: new Date(bounds.endMs)
+    },
     points: points.map(serializePoint),
     inBatchPoints: inBatch.map(serializePoint),
     plateaus: plateaus.map(serializePlateau),
+    restPlateaus: restPlateaus.map((plateau) => ({ ...serializePlateau(plateau), kind: 'rest' })),
     events: finalEvents.map(serializeEvent),
     includedEvents: includedEvents.map(serializeEvent),
     loaded: eventLevel(loaded),

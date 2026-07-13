@@ -20,6 +20,9 @@ const PRELUDE_BATCH_MAX_DURATION_MS = 3 * 60 * 1000
 const PRELUDE_BATCH_MAX_GAP_MS = 4 * 60 * 1000
 const PRELUDE_BATCH_MAX_INGREDIENTS = 1
 const PRELUDE_BATCH_MAX_WEIGHT_BUFFER_KG = 30
+const ORPHAN_PRELUDE_CHAIN_MAX_DURATION_MS = 5 * 60 * 1000
+const ORPHAN_PRELUDE_CHAIN_MAX_GAP_MS = 4 * 60 * 1000
+const ORPHAN_PRELUDE_CHAIN_MAX_EDGE_WEIGHT_BUFFER_KG = 100
 const BATCH_START_INGREDIENT_LOOKBACK_MS = 10 * 60 * 1000
 const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
@@ -752,6 +755,77 @@ async function removeOrphanMicroBatches(batchIdsToRecalculate, settings = {}) {
   return removed
 }
 
+async function removeOrphanPreludeChains(batchIdsToRecalculate, settings = {}) {
+  const emptyThresholdKg = Number(settings.emptyVehicleThresholdKg) > 0
+    ? Number(settings.emptyVehicleThresholdKg)
+    : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
+  const maxEdgeWeightKg = emptyThresholdKg + ORPHAN_PRELUDE_CHAIN_MAX_EDGE_WEIGHT_BUFFER_KG
+  const batches = await prisma.batch.findMany({
+    orderBy: [
+      { deviceId: 'asc' },
+      { startTime: 'asc' },
+      { id: 'asc' }
+    ],
+    select: {
+      id: true,
+      deviceId: true,
+      startTime: true,
+      endTime: true,
+      startWeight: true,
+      endWeight: true,
+      rationId: true,
+      groupId: true
+    }
+  })
+
+  const removableIds = new Set()
+  let chain = []
+
+  const isOrphanPrelude = (batch) => {
+    if (!batch || batch.rationId || batch.groupId || !batch.endTime) return false
+    const startMs = timestampMs(batch.startTime)
+    const endMs = timestampMs(batch.endTime)
+    if (!Number.isFinite(startMs) || !Number.isFinite(endMs)) return false
+    if (endMs < startMs || endMs - startMs > ORPHAN_PRELUDE_CHAIN_MAX_DURATION_MS) return false
+    return roundNonNegativeWeight(batch.startWeight) <= maxEdgeWeightKg &&
+      roundNonNegativeWeight(batch.endWeight) <= maxEdgeWeightKg
+  }
+
+  for (const batch of batches) {
+    if (chain.length) {
+      const previous = chain[chain.length - 1]
+      const gapMs = timestampMs(batch.startTime) - timestampMs(previous.endTime)
+      const connected = batch.deviceId === previous.deviceId &&
+        Number.isFinite(gapMs) &&
+        gapMs >= 0 &&
+        gapMs <= ORPHAN_PRELUDE_CHAIN_MAX_GAP_MS
+
+      if (!connected) chain = []
+    }
+
+    if (isOrphanPrelude(batch)) {
+      chain.push(batch)
+      continue
+    }
+
+    if (chain.length && batch.rationId && batch.groupId) {
+      for (const prelude of chain) removableIds.add(prelude.id)
+    }
+    chain = []
+  }
+
+  for (const batchId of removableIds) {
+    await prisma.$transaction([
+      prisma.violation.deleteMany({ where: { batchId } }),
+      prisma.batchIngredient.deleteMany({ where: { batchId } }),
+      prisma.batch.delete({ where: { id: batchId } })
+    ])
+    batchIdsToRecalculate.delete(batchId)
+  }
+
+  return removableIds.size
+}
+
 async function postprocessReplayedBatches(telemetrySettings = {}) {
   const completedBatches = await prisma.batch.findMany({
     where: { endTime: { not: null } },
@@ -948,7 +1022,9 @@ async function main() {
         : null
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
-        skipZoneVisit: effectivePosition.source === 'rtk',
+        // RTK replay above is the only source of loader scoreboard visits.
+        // Never build a scoreboard from HOST coordinates.
+        skipZoneVisit: true,
         allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
         preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
         currentZoneEvidenceAgeMs,
@@ -1294,6 +1370,10 @@ async function main() {
   if (removedMicroBatches > 0) {
     console.log(`Removed orphan micro batches: ${removedMicroBatches}`)
   }
+  const removedPreludeChains = await removeOrphanPreludeChains(batchIdsToRecalculate, telemetrySettings)
+  if (removedPreludeChains > 0) {
+    console.log(`Removed orphan prelude-chain batches: ${removedPreludeChains}`)
+  }
   const alignedStarts = await alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate)
   if (alignedStarts > 0) {
     console.log(`Aligned batch starts with first ingredient: ${alignedStarts}`)
@@ -1341,6 +1421,7 @@ async function main() {
     stats,
     postprocessStats,
     removedMicroBatches,
+    removedPreludeChains,
     batchCount,
     ingredientCount,
     openBatchCount,

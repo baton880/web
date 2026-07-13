@@ -444,7 +444,9 @@ router.post('/', async (req, res) => {
     // Вся валидация координат, смена зон и расчет дельт
     const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
       suppressLoading,
-      skipZoneVisit: effectivePosition.source === 'rtk',
+      // Loader RTK packets maintain the scoreboard in rtk.routes.js.
+      // HOST has no heading and only contributes its direct zone hit.
+      skipZoneVisit: true,
       allowVisitedZoneIngredient: effectivePosition.source === 'rtk',
       preferCurrentZoneIngredient: effectivePosition.source === 'rtk',
       currentZoneEvidenceAgeMs,
