@@ -37,6 +37,10 @@ let replayQueued = false
 let pendingReason = null
 let pendingMeta = null
 
+export function isCalculatedBatchReplayRunning() {
+  return replayRunning
+}
+
 function summarizeMeta(meta = {}) {
   return Object.fromEntries(
     Object.entries(meta)

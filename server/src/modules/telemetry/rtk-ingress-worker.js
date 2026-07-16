@@ -5,6 +5,7 @@ import {
   recordRtkIngestResult,
   recordRtkMalformedRequest
 } from './rtk-ingest-monitor.js'
+import { isCalculatedBatchReplayRunning } from './replay-scheduler.js'
 
 const DEFAULT_POLL_MS = 200
 const MAX_BACKOFF_MS = 60 * 1000
@@ -27,6 +28,10 @@ export function startRtkIngressWorker(processBody, options = {}) {
 
   async function tick() {
     if (stopped || running) return
+    if (isCalculatedBatchReplayRunning()) {
+      timer = setTimeout(tick, pollMs)
+      return
+    }
     running = true
     try {
       if (Date.now() >= cleanupAt) {

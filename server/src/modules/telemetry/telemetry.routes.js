@@ -11,7 +11,7 @@ import { roundNonNegativeWeight, roundOptionalWeight, roundWeight } from '../../
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
-import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import { isCalculatedBatchReplayRunning, scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 
 const router = Router()
@@ -371,6 +371,14 @@ async function inferMachineStateFromDatabase(
 // POST / - ПРИЕМ ТЕЛЕМЕТРИИ
 // ============================================================================
 router.post('/', async (req, res) => {
+  if (isCalculatedBatchReplayRunning()) {
+    res.set('Retry-After', '5')
+    return res.status(503).json({
+      error: 'Calculated batch replay is running; retry telemetry later',
+      retryable: true
+    })
+  }
+
   try {
     const receivedAt = new Date()
     let packet = normalizeTelemetryPacket(req.body);
