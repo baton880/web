@@ -8,6 +8,7 @@
 #include <SD.h>
 #include <time.h>
 #include <math.h>
+#include <esp_system.h>
 
 HardwareSerial RTK(2);
 String line = "";
@@ -20,6 +21,7 @@ const char* WIFI_FALLBACK_PASS = "223334444";
 const char* TELEMETRY_URL = "https://vi-korm.ru/api/telemetry/rtk";
 const char* DEVICE_ID = "rtk_loader_01";
 const char* OTA_HOSTNAME = "rtk-loader-01";
+const char* FIRMWARE_VERSION = "2026.07.15-reliable-1";
 
 // --- UART pins for Ardusimple ---
 const int RTK_RX_PIN = 17;
@@ -59,9 +61,17 @@ const unsigned long SPEED_FRESH_MS = 3000;
 const unsigned long TIME_SKIP_LOG_INTERVAL_MS = 5000;
 const char* QUEUE_FILE = "/telemetry_queue.jsonl";
 const char* QUEUE_TMP_FILE = "/telemetry_queue.tmp";
-const uint32_t SD_SPEEDS[] = {400000, 1000000, 4000000, 8000000};
+const char* QUEUE_BACKUP_FILE = "/telemetry_queue.bak";
+const char* QUEUE_META_FILE = "/telemetry_queue.meta";
+const char* QUEUE_META_TMP_FILE = "/telemetry_queue.meta.tmp";
+const uint32_t SD_SPEEDS[] = {8000000, 4000000, 1000000, 400000};
 const int SD_SPEEDS_COUNT = sizeof(SD_SPEEDS) / sizeof(SD_SPEEDS[0]);
 const int UBX_PAYLOAD_MAX = 128;
+const int RTK_RX_BUFFER_BYTES = 8192;
+const int SENDER_TASK_STACK_BYTES = 16384;
+const int QUEUE_COMPACT_AFTER_ACK_ROWS = 256;
+const uint32_t QUEUE_COMPACT_MIN_PREFIX_BYTES = 64UL * 1024UL;
+const double STATIONARY_WAKE_SPEED_KMH = 1.0;
 
 enum SendResult {
   SEND_RESULT_OK,
@@ -107,9 +117,9 @@ unsigned long flushBackoffMs = FLUSH_BACKOFF_MIN_MS;
 unsigned long liveSendBlockedUntilMs = 0;
 unsigned long liveSendBackoffMs = LIVE_SEND_BACKOFF_MIN_MS;
 unsigned long lastLiveSendOkMs = 0;
-bool sdReady = false;
-bool otaStarted = false;
-bool otaInProgress = false;
+volatile bool sdReady = false;
+volatile bool otaStarted = false;
+volatile bool otaInProgress = false;
 unsigned long lastTelemetryMs = 0;
 unsigned long lastTimeSkipLogMs = 0;
 unsigned long stationaryAnchorMs = 0;
@@ -122,12 +132,28 @@ String ramQueue[RAM_QUEUE_MAX];
 int ramQueueHead = 0;
 int ramQueueCount = 0;
 int sdQueueCount = 0;
+uint32_t sdQueueHeadOffset = 0;
+int sdRowsAckedSinceCompact = 0;
 String lastRmcDateYmd = "";
 bool lastRmcDateValid = false;
+String maintainedDateYmd = "";
+bool maintainedDateValid = false;
+int lastGgaSecondOfDay = -1;
+uint32_t nmeaSentenceSequence = 0;
+uint32_t lastGgaNmeaSequence = 0;
+uint32_t lastRmcNmeaSequence = 0;
+time_t lastFormattedEpoch = 0;
+int movingSpeedSamples = 0;
 double latestHaccM = NAN;
 double latestSpeedKmh = NAN;
 unsigned long latestSpeedReceivedMs = 0;
 WiFiClientSecure telemetryClient;
+HTTPClient telemetryHttp;
+bool telemetryHttpReady = false;
+QueueHandle_t telemetryWorkQueue = nullptr;
+TaskHandle_t telemetrySenderTaskHandle = nullptr;
+char bootId[17] = {0};
+uint32_t packetSequence = 0;
 
 uint8_t ubxState = UBX_WAIT_SYNC1;
 uint8_t ubxClass = 0;
@@ -181,6 +207,7 @@ RelPosData latestRelPos = {
 
 struct GpsData {
   String timestamp;
+  String timeSource;
   double lat;
   double lon;
   double haccM;
@@ -304,18 +331,63 @@ String formatSystemIsoUtc(const struct tm& tmUtc) {
   return String(buf);
 }
 
-bool formatNmeaTime(const String& nmeaTime, String& out) {
+bool parseYmd(const String& ymd, int& year, int& month, int& day) {
+  if (ymd.length() != 10 || ymd[4] != '-' || ymd[7] != '-') return false;
+  String yyyy = ymd.substring(0, 4);
+  String mm = ymd.substring(5, 7);
+  String dd = ymd.substring(8, 10);
+  if (!isDigitsOnly(yyyy) || !isDigitsOnly(mm) || !isDigitsOnly(dd)) return false;
+  year = yyyy.toInt();
+  month = mm.toInt();
+  day = dd.toInt();
+  return year >= 2024 && year <= 2099 && month >= 1 && month <= 12 && day >= 1 && day <= 31;
+}
+
+String formatYmd(int year, int month, int day) {
+  char buf[11];
+  snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, month, day);
+  return String(buf);
+}
+
+bool incrementYmd(String& ymd) {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  if (!parseYmd(ymd, year, month, day)) return false;
+  const int monthDays[] = {31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31};
+  int days = monthDays[month - 1];
+  bool leap = (year % 4 == 0 && year % 100 != 0) || (year % 400 == 0);
+  if (month == 2 && leap) days = 29;
+  day++;
+  if (day > days) {
+    day = 1;
+    month++;
+    if (month > 12) {
+      month = 1;
+      year++;
+    }
+  }
+  ymd = formatYmd(year, month, day);
+  return true;
+}
+
+time_t epochFromYmdHms(const String& ymd, int hour, int minute, int second) {
+  int year = 0;
+  int month = 0;
+  int day = 0;
+  if (!parseYmd(ymd, year, month, day)) return 0;
+  year -= month <= 2;
+  const int era = (year >= 0 ? year : year - 399) / 400;
+  const unsigned yearOfEra = (unsigned)(year - era * 400);
+  const unsigned dayOfYear = (153U * (unsigned)(month + (month > 2 ? -3 : 9)) + 2U) / 5U + (unsigned)day - 1U;
+  const unsigned dayOfEra = yearOfEra * 365U + yearOfEra / 4U - yearOfEra / 100U + dayOfYear;
+  int64_t daysSinceEpoch = (int64_t)era * 146097LL + (int64_t)dayOfEra - 719468LL;
+  return (time_t)(daysSinceEpoch * 86400LL + hour * 3600LL + minute * 60LL + min(second, 59));
+}
+
+bool formatNmeaTime(const String& nmeaTime, String& out, String& sourceOut) {
   struct tm tmUtc;
   bool systemTimeValid = readSystemUtc(tmUtc);
-  String dateYmd = "";
-
-  if (lastRmcDateValid && lastRmcDateYmd.length() == 10) {
-    dateYmd = lastRmcDateYmd;
-  } else if (systemTimeValid) {
-    char dateBuf[11];
-    snprintf(dateBuf, sizeof(dateBuf), "%04d-%02d-%02d", tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday);
-    dateYmd = String(dateBuf);
-  }
 
   // Expected format: hhmmss.sss. If GGA time is absent but NTP is valid,
   // send with current system time instead of inventing 00:00:00Z.
@@ -324,11 +396,9 @@ bool formatNmeaTime(const String& nmeaTime, String& out) {
       return false;
     }
     out = formatSystemIsoUtc(tmUtc);
+    sourceOut = "ntp";
+    lastFormattedEpoch = time(nullptr);
     return true;
-  }
-
-  if (dateYmd.length() != 10) {
-    return false;
   }
 
   String hh = nmeaTime.substring(0, 2);
@@ -341,6 +411,50 @@ bool formatNmeaTime(const String& nmeaTime, String& out) {
   if (hhI < 0 || hhI > 23 || mmI < 0 || mmI > 59 || ssI < 0 || ssI > 60) {
     return false;
   }
+
+  int secondOfDay = hhI * 3600 + mmI * 60 + min(ssI, 59);
+  if (maintainedDateValid && lastGgaSecondOfDay >= 23 * 3600 && secondOfDay <= 3600) {
+    bool rmcUpdatedSincePreviousGga = lastRmcNmeaSequence != 0 &&
+      (int32_t)(lastRmcNmeaSequence - lastGgaNmeaSequence) > 0;
+    if (rmcUpdatedSincePreviousGga && lastRmcDateValid) {
+      maintainedDateYmd = lastRmcDateYmd;
+      sourceOut = "rmc_rollover";
+    } else if (incrementYmd(maintainedDateYmd)) {
+      sourceOut = "gga_rollover";
+    }
+  }
+
+  String dateYmd = maintainedDateValid ? maintainedDateYmd : "";
+  if (dateYmd.length() != 10 && lastRmcDateValid) {
+    dateYmd = lastRmcDateYmd;
+    sourceOut = "rmc";
+  }
+  if (dateYmd.length() != 10 && systemTimeValid) {
+    dateYmd = formatYmd(tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday);
+    sourceOut = "ntp_date";
+  }
+  if (dateYmd.length() != 10) return false;
+
+  if (sourceOut.length() == 0) {
+    sourceOut = (lastRmcDateValid && maintainedDateYmd == lastRmcDateYmd) ? "rmc" : "maintained";
+  }
+
+  time_t candidateEpoch = epochFromYmdHms(dateYmd, hhI, mmI, ssI);
+  if (systemTimeValid && candidateEpoch > 0 && fabs(difftime(candidateEpoch, time(nullptr))) > 12.0 * 3600.0) {
+    dateYmd = formatYmd(tmUtc.tm_year + 1900, tmUtc.tm_mon + 1, tmUtc.tm_mday);
+    candidateEpoch = epochFromYmdHms(dateYmd, hhI, mmI, ssI);
+    sourceOut = "ntp_date_repair";
+  }
+
+  if (candidateEpoch <= 0 || (lastFormattedEpoch > 0 && candidateEpoch + 300 < lastFormattedEpoch)) {
+    return false;
+  }
+
+  maintainedDateYmd = dateYmd;
+  maintainedDateValid = true;
+  lastGgaSecondOfDay = secondOfDay;
+  lastGgaNmeaSequence = nmeaSentenceSequence;
+  lastFormattedEpoch = candidateEpoch;
 
   if (nmeaTime.length() > 7 && nmeaTime[6] == '.') {
     String frac = nmeaTime.substring(7);
@@ -438,6 +552,21 @@ double stationaryRadiusM(double haccM) {
 bool updateStationaryMode(const GpsData& data, unsigned long nowMs) {
   if (!stationaryAnchorValid) {
     stationaryAnchorValid = true;
+    stationaryAnchorLat = data.lat;
+    stationaryAnchorLon = data.lon;
+    stationaryAnchorMs = nowMs;
+    stationaryModeActive = false;
+    return false;
+  }
+
+  if (isSpeedFresh() && latestSpeedKmh >= STATIONARY_WAKE_SPEED_KMH) {
+    movingSpeedSamples = min(movingSpeedSamples + 1, 2);
+  } else {
+    movingSpeedSamples = 0;
+  }
+
+  if (movingSpeedSamples >= 2) {
+    if (stationaryModeActive) Serial.println("Stationary mode off, speed confirmed");
     stationaryAnchorLat = data.lat;
     stationaryAnchorLon = data.lon;
     stationaryAnchorMs = nowMs;
@@ -556,9 +685,9 @@ const char* wifiProfileNameByIndex(int idx) {
   return "unknown";
 }
 
-const char* currentWifiProfileName() {
+String currentWifiNetworkName() {
   if (WiFi.status() != WL_CONNECTED) return "disconnected";
-  return wifiProfileNameByIndex(detectWifiProfileIndex(WiFi.SSID()));
+  return WiFi.SSID();
 }
 
 void startWifiAttempt(int profileIndex) {
@@ -578,19 +707,23 @@ void startWifiAttempt(int profileIndex) {
   Serial.println(")");
 }
 
-String buildPayload(const GpsData& data) {
+String buildPayload(const GpsData& data, uint32_t sequence) {
   bool wifiConnected = (WiFi.status() == WL_CONNECTED);
   long wifiRssi = wifiConnected ? WiFi.RSSI() : 0;
   int totalQueueLen = ramQueueCount + sdQueueCount;
   bool hasRelPos = isRelPosFresh();
 
   String payload;
-  payload.reserve(560);
+  payload.reserve(720);
 
   payload += "{";
   payload += "\"packetType\":\"" + String(hasRelPos ? "moving_base" : "pvt") + "\",";
   payload += "\"deviceId\":\"" + escapeJson(String(DEVICE_ID)) + "\",";
+  payload += "\"firmware_version\":\"" + escapeJson(String(FIRMWARE_VERSION)) + "\",";
+  payload += "\"boot_id\":\"" + escapeJson(String(bootId)) + "\",";
+  payload += "\"packet_id\":\"" + escapeJson(String(bootId) + ":" + String(sequence)) + "\",";
   payload += "\"timestamp\":\"" + escapeJson(data.timestamp) + "\",";
+  payload += "\"time_source\":\"" + escapeJson(data.timeSource) + "\",";
   payload += "\"lat\":" + formatDoubleOrNull(data.lat, 7) + ",";
   payload += "\"lon\":" + formatDoubleOrNull(data.lon, 7) + ",";
   payload += "\"hacc\":" + formatDoubleOrNull(data.haccM, 3) + ",";
@@ -609,7 +742,8 @@ String buildPayload(const GpsData& data) {
     payload += "\"rel_pos_flags\":" + String(latestRelPos.flags) + ",";
   }
 
-  payload += "\"wifi_profile\":\"" + escapeJson(String(currentWifiProfileName())) + "\",";
+  // Report the actual connected SSID, not the internal primary/fallback label.
+  payload += "\"wifi_profile\":\"" + escapeJson(currentWifiNetworkName()) + "\",";
   payload += "\"rssi_dbm\":" + formatLongOrNull(wifiRssi, wifiConnected) + ",";
   payload += "\"sd_queue_len\":" + String(sdQueueCount) + ",";
   payload += "\"ram_queue_len\":" + String(ramQueueCount) + ",";
@@ -631,24 +765,28 @@ SendResult sendPayload(const String& payload) {
     return SEND_RESULT_RETRY;
   }
 
-  HTTPClient http;
-  http.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
-  http.setTimeout(HTTP_TOTAL_TIMEOUT_MS);
-  http.setReuse(false);
-
-  if (!http.begin(telemetryClient, TELEMETRY_URL)) {
-    Serial.print("HTTP begin failed: ");
-    Serial.println(TELEMETRY_URL);
-    return SEND_RESULT_RETRY;
+  if (!telemetryHttpReady) {
+    telemetryHttp.setConnectTimeout(HTTP_CONNECT_TIMEOUT_MS);
+    telemetryHttp.setTimeout(HTTP_TOTAL_TIMEOUT_MS);
+    telemetryHttp.setReuse(true);
+    if (!telemetryHttp.begin(telemetryClient, TELEMETRY_URL)) {
+      Serial.print("HTTP begin failed: ");
+      Serial.println(TELEMETRY_URL);
+      return SEND_RESULT_RETRY;
+    }
+    telemetryHttp.addHeader("Content-Type", "application/json");
+    telemetryHttp.addHeader("Connection", "keep-alive");
+    telemetryHttpReady = true;
   }
 
-  http.addHeader("Content-Type", "application/json");
-  int code = http.POST(payload);
+  int code = telemetryHttp.POST(payload);
   bool ok = (code >= 200 && code < 300);
-  String responseBody = (!ok && code > 0) ? http.getString() : "";
+  String responseBody = (!ok && code > 0) ? telemetryHttp.getString() : "";
   SendResult result = SEND_RESULT_RETRY;
 
   if (!ok) {
+    telemetryHttp.end();
+    telemetryHttpReady = false;
     Serial.print("HTTP send failed, code=");
     Serial.println(code);
     if (responseBody.length() > 0) {
@@ -664,8 +802,33 @@ SendResult sendPayload(const String& payload) {
     result = SEND_RESULT_OK;
   }
 
-  http.end();
   return result;
+}
+
+bool persistQueueHeadOffset() {
+  if (!sdReady) return false;
+  SD.remove(QUEUE_META_TMP_FILE);
+  File out = SD.open(QUEUE_META_TMP_FILE, FILE_WRITE);
+  if (!out) return false;
+  out.println(sdQueueHeadOffset);
+  out.close();
+  SD.remove(QUEUE_META_FILE);
+  return SD.rename(QUEUE_META_TMP_FILE, QUEUE_META_FILE);
+}
+
+void loadQueueHeadOffset() {
+  sdQueueHeadOffset = 0;
+  if (!sdReady || !SD.exists(QUEUE_FILE) || !SD.exists(QUEUE_META_FILE)) return;
+  File meta = SD.open(QUEUE_META_FILE, FILE_READ);
+  if (!meta) return;
+  String raw = meta.readStringUntil('\n');
+  meta.close();
+  uint32_t parsed = (uint32_t)strtoul(raw.c_str(), nullptr, 10);
+  File queue = SD.open(QUEUE_FILE, FILE_READ);
+  if (!queue) return;
+  uint32_t size = (uint32_t)queue.size();
+  queue.close();
+  if (parsed <= size) sdQueueHeadOffset = parsed;
 }
 
 int countSdQueueRows() {
@@ -673,6 +836,10 @@ int countSdQueueRows() {
 
   File in = SD.open(QUEUE_FILE, FILE_READ);
   if (!in) return 0;
+  if (sdQueueHeadOffset > 0 && !in.seek(sdQueueHeadOffset)) {
+    in.close();
+    return 0;
+  }
 
   int count = 0;
   while (in.available()) {
@@ -686,6 +853,106 @@ int countSdQueueRows() {
   return count;
 }
 
+bool readQueuedRowsAtHead(String rows[], uint32_t offsetsAfter[], int maxRows, int& rowsOut) {
+  rowsOut = 0;
+  if (!sdReady || !SD.exists(QUEUE_FILE) || maxRows <= 0) return false;
+  maxRows = min(maxRows, FLUSH_BATCH_MAX);
+  File in = SD.open(QUEUE_FILE, FILE_READ);
+  if (!in) return false;
+  if (sdQueueHeadOffset > 0 && !in.seek(sdQueueHeadOffset)) {
+    in.close();
+    return false;
+  }
+
+  while (in.available() && rowsOut < maxRows) {
+    String row = in.readStringUntil('\n');
+    uint32_t nextOffset = (uint32_t)in.position();
+    row.trim();
+    if (row.length() == 0) continue;
+    rows[rowsOut] = row;
+    offsetsAfter[rowsOut] = nextOffset;
+    rowsOut++;
+  }
+  in.close();
+  return rowsOut > 0;
+}
+
+bool replaceQueueFileWithTemp() {
+  SD.remove(QUEUE_BACKUP_FILE);
+  if (SD.exists(QUEUE_FILE) && !SD.rename(QUEUE_FILE, QUEUE_BACKUP_FILE)) return false;
+  if (!SD.rename(QUEUE_TMP_FILE, QUEUE_FILE)) {
+    if (SD.exists(QUEUE_BACKUP_FILE)) SD.rename(QUEUE_BACKUP_FILE, QUEUE_FILE);
+    return false;
+  }
+  SD.remove(QUEUE_BACKUP_FILE);
+  return true;
+}
+
+bool compactAcknowledgedQueue(bool forceCompact = false) {
+  if (!sdReady || !SD.exists(QUEUE_FILE) || sdQueueHeadOffset == 0) return true;
+  File in = SD.open(QUEUE_FILE, FILE_READ);
+  if (!in) return false;
+  uint32_t totalBytes = (uint32_t)in.size();
+  bool shouldCompact = forceCompact ||
+    (sdQueueHeadOffset >= QUEUE_COMPACT_MIN_PREFIX_BYTES &&
+     (sdRowsAckedSinceCompact >= QUEUE_COMPACT_AFTER_ACK_ROWS || sdQueueHeadOffset >= totalBytes / 2));
+  if (!shouldCompact) {
+    in.close();
+    return true;
+  }
+  if (!in.seek(sdQueueHeadOffset)) {
+    in.close();
+    return false;
+  }
+
+  SD.remove(QUEUE_TMP_FILE);
+  File out = SD.open(QUEUE_TMP_FILE, FILE_WRITE);
+  if (!out) {
+    in.close();
+    return false;
+  }
+  uint8_t buffer[512];
+  while (in.available()) {
+    size_t count = in.read(buffer, sizeof(buffer));
+    if (count == 0 || out.write(buffer, count) != count) {
+      in.close();
+      out.close();
+      SD.remove(QUEUE_TMP_FILE);
+      return false;
+    }
+    yield();
+  }
+  in.close();
+  out.close();
+  SD.remove(QUEUE_META_FILE);
+  SD.remove(QUEUE_META_TMP_FILE);
+  if (!replaceQueueFileWithTemp()) {
+    persistQueueHeadOffset();
+    return false;
+  }
+  sdQueueHeadOffset = 0;
+  sdRowsAckedSinceCompact = 0;
+  return persistQueueHeadOffset();
+}
+
+bool acknowledgeSdRows(uint32_t nextOffset, int rows) {
+  if (rows <= 0 || rows > sdQueueCount) return false;
+  sdQueueHeadOffset = nextOffset;
+  sdQueueCount -= rows;
+  sdRowsAckedSinceCompact += rows;
+  if (sdQueueCount == 0) {
+    SD.remove(QUEUE_FILE);
+    SD.remove(QUEUE_TMP_FILE);
+    SD.remove(QUEUE_META_FILE);
+    SD.remove(QUEUE_META_TMP_FILE);
+    sdQueueHeadOffset = 0;
+    sdRowsAckedSinceCompact = 0;
+    return true;
+  }
+  if (!persistQueueHeadOffset()) return false;
+  return compactAcknowledgedQueue(false);
+}
+
 bool readFirstQueuedRows(String& batchJson, int maxRows, int& rowsOut) {
   batchJson = "";
   rowsOut = 0;
@@ -693,6 +960,10 @@ bool readFirstQueuedRows(String& batchJson, int maxRows, int& rowsOut) {
 
   File in = SD.open(QUEUE_FILE, FILE_READ);
   if (!in) return false;
+  if (sdQueueHeadOffset > 0 && !in.seek(sdQueueHeadOffset)) {
+    in.close();
+    return false;
+  }
 
   batchJson.reserve(maxRows * 580);
   batchJson = "[";
@@ -772,6 +1043,10 @@ bool rewriteQueueSkippingFirstRows(int skipRows) {
 
   File in = SD.open(QUEUE_FILE, FILE_READ);
   if (!in) return false;
+  if (sdQueueHeadOffset > 0 && !in.seek(sdQueueHeadOffset)) {
+    in.close();
+    return false;
+  }
 
   SD.remove(QUEUE_TMP_FILE);
   File out = SD.open(QUEUE_TMP_FILE, FILE_WRITE);
@@ -799,13 +1074,20 @@ bool rewriteQueueSkippingFirstRows(int skipRows) {
   in.close();
   out.close();
 
-  SD.remove(QUEUE_FILE);
   if (rowsWritten > 0) {
-    SD.rename(QUEUE_TMP_FILE, QUEUE_FILE);
+    SD.remove(QUEUE_META_FILE);
+    SD.remove(QUEUE_META_TMP_FILE);
+    if (!replaceQueueFileWithTemp()) return false;
   } else {
+    SD.remove(QUEUE_FILE);
     SD.remove(QUEUE_TMP_FILE);
+    SD.remove(QUEUE_META_FILE);
+    SD.remove(QUEUE_META_TMP_FILE);
   }
   sdQueueCount = rowsWritten;
+  sdQueueHeadOffset = 0;
+  sdRowsAckedSinceCompact = 0;
+  if (rowsWritten > 0) persistQueueHeadOffset();
 
   return true;
 }
@@ -848,10 +1130,10 @@ bool rewriteQueueSkippingLastRows(int skipRows) {
   in.close();
   out.close();
 
-  SD.remove(QUEUE_FILE);
   if (rowsWritten > 0) {
-    SD.rename(QUEUE_TMP_FILE, QUEUE_FILE);
+    if (!replaceQueueFileWithTemp()) return false;
   } else {
+    SD.remove(QUEUE_FILE);
     SD.remove(QUEUE_TMP_FILE);
   }
   sdQueueCount = rowsWritten;
@@ -867,7 +1149,12 @@ bool resetSdQueueFile(const char* reason) {
 
   SD.remove(QUEUE_TMP_FILE);
   SD.remove(QUEUE_FILE);
+  SD.remove(QUEUE_BACKUP_FILE);
+  SD.remove(QUEUE_META_FILE);
+  SD.remove(QUEUE_META_TMP_FILE);
   sdQueueCount = 0;
+  sdQueueHeadOffset = 0;
+  sdRowsAckedSinceCompact = 0;
   return true;
 }
 
@@ -1091,6 +1378,13 @@ bool ensureSpaceForQueueWrite(size_t payloadBytes) {
 bool appendToQueue(const String& payload) {
   if (!sdReady) return false;
 
+  if (!SD.exists(QUEUE_FILE)) {
+    sdQueueHeadOffset = 0;
+    sdRowsAckedSinceCompact = 0;
+    SD.remove(QUEUE_META_FILE);
+    SD.remove(QUEUE_META_TMP_FILE);
+  }
+
   if (!trimSdQueueToHardLimit()) {
     resetSdQueueFile("hard-limit trim failed");
   }
@@ -1158,6 +1452,14 @@ bool initSdCard() {
           t.println("ok");
           t.close();
           SD.remove("/sd_test.tmp");
+          sdReady = true;
+          if (!SD.exists(QUEUE_FILE) && SD.exists(QUEUE_BACKUP_FILE)) {
+            SD.rename(QUEUE_BACKUP_FILE, QUEUE_FILE);
+          } else if (SD.exists(QUEUE_FILE)) {
+            SD.remove(QUEUE_BACKUP_FILE);
+          }
+          SD.remove(QUEUE_TMP_FILE);
+          loadQueueHeadOffset();
           sdQueueCount = countSdQueueRows();
           trimSdQueueToHardLimit();
           return true;
@@ -1167,6 +1469,7 @@ bool initSdCard() {
       delay(150);
     }
   }
+  sdReady = false;
   return false;
 }
 
@@ -1186,8 +1489,26 @@ void ensureSdReady() {
   Serial.println(sdReady ? "OK" : "FAILED");
 }
 
+String buildTransportEnvelope(const String& itemsJson, const char* deliveryKind, int remainingAfterAck) {
+  String envelope;
+  envelope.reserve(itemsJson.length() + 128);
+  envelope = "{\"items\":";
+  envelope += itemsJson;
+  envelope += ",\"transport\":{\"delivery_kind\":\"";
+  envelope += deliveryKind;
+  envelope += "\",\"buffer_remaining_after_ack\":";
+  envelope += String(max(0, remainingAfterAck));
+  envelope += "}}";
+  return envelope;
+}
+
+String buildSingleItemEnvelope(const String& itemJson, const char* deliveryKind, int remainingAfterAck) {
+  return buildTransportEnvelope("[" + itemJson + "]", deliveryKind, remainingAfterAck);
+}
+
 void flushQueueIfPossible() {
   if (WiFi.status() != WL_CONNECTED) return;
+  if (otaInProgress || (telemetryWorkQueue && uxQueueMessagesWaiting(telemetryWorkQueue) > 0)) return;
 
   unsigned long now = millis();
   if (lastLiveSendOkMs == 0 || now - lastLiveSendOkMs > QUEUE_FLUSH_AFTER_LIVE_OK_MS) {
@@ -1207,11 +1528,12 @@ void flushQueueIfPossible() {
   while (rowsLeft > 0 && ramQueueCount > 0) {
     String batchPayload;
     int batchRows = 0;
-    if (!buildRamNewestBatch(batchPayload, rowsLeft, batchRows)) break;
+    if (!buildRamBatch(batchPayload, rowsLeft, batchRows)) break;
 
-    SendResult result = sendPayload(batchPayload);
+    int remainingAfterAck = ramQueueCount + sdQueueCount - batchRows;
+    SendResult result = sendPayload(buildTransportEnvelope(batchPayload, "buffer", remainingAfterAck));
     if (result == SEND_RESULT_OK) {
-      if (!popRamNewestRows(batchRows)) {
+      if (!popRamRows(batchRows)) {
         failed = true;
         break;
       }
@@ -1228,11 +1550,12 @@ void flushQueueIfPossible() {
     int rowsChecked = 0;
     while (rowsChecked < batchRows && rowsLeft > 0 && ramQueueCount > 0) {
       String queuedPayload;
-      if (!peekRamNewestAtOffset(0, queuedPayload)) break;
+      if (!peekRam(queuedPayload)) break;
 
-      SendResult singleResult = sendPayload(queuedPayload);
+      int singleRemaining = ramQueueCount + sdQueueCount - 1;
+      SendResult singleResult = sendPayload(buildSingleItemEnvelope(queuedPayload, "buffer", singleRemaining));
       if (singleResult == SEND_RESULT_OK) {
-        if (!popRamNewestRows(1)) {
+        if (!popRam()) {
           failed = true;
           break;
         }
@@ -1240,7 +1563,7 @@ void flushQueueIfPossible() {
         rowsChecked++;
         rowsLeft--;
       } else if (singleResult == SEND_RESULT_REJECTED) {
-        if (!popRamNewestRows(1)) {
+        if (!popRam()) {
           failed = true;
           break;
         }
@@ -1257,16 +1580,19 @@ void flushQueueIfPossible() {
     if (failed || rowsChecked < batchRows) break;
   }
 
-  while (!failed && rowsLeft > 0 && sdReady && SD.exists(QUEUE_FILE)) {
+  while (!failed && rowsLeft > 0 && sdReady && sdQueueCount > 0 && SD.exists(QUEUE_FILE)) {
+    if (otaInProgress || (telemetryWorkQueue && uxQueueMessagesWaiting(telemetryWorkQueue) > 0)) break;
     String queuedRows[FLUSH_BATCH_MAX];
+    uint32_t offsetsAfter[FLUSH_BATCH_MAX];
     String batchPayload;
     int batchRows = 0;
-    if (!readNewestQueuedRows(queuedRows, rowsLeft, batchRows)) break;
+    if (!readQueuedRowsAtHead(queuedRows, offsetsAfter, rowsLeft, batchRows)) break;
     if (!buildRowsBatch(queuedRows, batchRows, batchPayload)) break;
 
-    SendResult result = sendPayload(batchPayload);
+    int remainingAfterAck = ramQueueCount + sdQueueCount - batchRows;
+    SendResult result = sendPayload(buildTransportEnvelope(batchPayload, "buffer", remainingAfterAck));
     if (result == SEND_RESULT_OK) {
-      if (!rewriteQueueSkippingLastRows(batchRows)) {
+      if (!acknowledgeSdRows(offsetsAfter[batchRows - 1], batchRows)) {
         failed = true;
         break;
       }
@@ -1284,7 +1610,8 @@ void flushQueueIfPossible() {
         queuedPayload.trim();
         if (queuedPayload.length() == 0) break;
 
-        SendResult singleResult = sendPayload(queuedPayload);
+        int singleRemaining = ramQueueCount + sdQueueCount - rowsToDelete - 1;
+        SendResult singleResult = sendPayload(buildSingleItemEnvelope(queuedPayload, "buffer", singleRemaining));
         if (singleResult == SEND_RESULT_OK) {
           sentSd++;
           rowsToDelete++;
@@ -1302,8 +1629,7 @@ void flushQueueIfPossible() {
         }
       }
 
-      // Rewrite the SD queue once for the whole accepted/rejected newest suffix.
-      if (rowsToDelete > 0 && !rewriteQueueSkippingLastRows(rowsToDelete)) {
+      if (rowsToDelete > 0 && !acknowledgeSdRows(offsetsAfter[rowsToDelete - 1], rowsToDelete)) {
         failed = true;
       }
 
@@ -1385,6 +1711,71 @@ bool bufferPayload(const String& payload) {
   }
 
   return false;
+}
+
+bool enqueueTelemetryWork(const String& payload) {
+  if (!telemetryWorkQueue) return false;
+  String* queuedPayload = new String(payload);
+  if (!queuedPayload) return false;
+  if (xQueueSend(telemetryWorkQueue, &queuedPayload, 0) != pdTRUE) {
+    delete queuedPayload;
+    return false;
+  }
+  return true;
+}
+
+void telemetrySenderTask(void* parameter) {
+  (void)parameter;
+
+  while (true) {
+    if (otaInProgress) {
+      vTaskDelay(pdMS_TO_TICKS(20));
+      continue;
+    }
+
+    ensureSdReady();
+
+    String* livePayload = nullptr;
+    if (xQueueReceive(telemetryWorkQueue, &livePayload, pdMS_TO_TICKS(20)) == pdTRUE) {
+      String* newerPayload = nullptr;
+      while (xQueueReceive(telemetryWorkQueue, &newerPayload, 0) == pdTRUE) {
+        if (livePayload) {
+          if (!bufferPayload(*livePayload)) {
+            Serial.println("Telemetry dropped while prioritizing newer live packet");
+          }
+          delete livePayload;
+        }
+        livePayload = newerPayload;
+        newerPayload = nullptr;
+      }
+
+      if (livePayload) {
+        if (otaInProgress) {
+          if (!bufferPayload(*livePayload)) Serial.println("Telemetry dropped during OTA");
+        } else if (shouldTryLiveSend()) {
+          int remaining = ramQueueCount + sdQueueCount;
+          SendResult result = sendPayload(buildSingleItemEnvelope(*livePayload, "live", remaining));
+          if (result == SEND_RESULT_OK) {
+            noteLiveSendOk();
+            Serial.println("Live telemetry sent");
+          } else if (result == SEND_RESULT_REJECTED) {
+            noteLiveSendOk();
+            Serial.println("Live telemetry rejected by server, dropped");
+          } else {
+            noteLiveSendFailed();
+            if (!bufferPayload(*livePayload)) Serial.println("Telemetry dropped (no SD/RAM)");
+          }
+        } else if (!bufferPayload(*livePayload)) {
+          Serial.println("Telemetry dropped (no SD/RAM)");
+        }
+        delete livePayload;
+      }
+    } else {
+      flushQueueIfPossible();
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(10));
+  }
 }
 
 void ensureOtaReady() {
@@ -1510,6 +1901,9 @@ void updateDateFromRmc(const String& sentence) {
   snprintf(buf, sizeof(buf), "%04d-%02d-%02d", year, mmI, ddI);
   lastRmcDateYmd = String(buf);
   lastRmcDateValid = true;
+  lastRmcNmeaSequence = nmeaSentenceSequence;
+  maintainedDateYmd = lastRmcDateYmd;
+  maintainedDateValid = true;
 }
 
 void updateSpeedFromSentence(const String& sentence) {
@@ -1939,7 +2333,8 @@ bool parseGga(const String& sentence, GpsData& out) {
   }
 
   String timestamp;
-  if (!formatNmeaTime(utcRaw, timestamp)) {
+  String timeSource;
+  if (!formatNmeaTime(utcRaw, timestamp, timeSource)) {
     unsigned long nowMs = millis();
     if (nowMs - lastTimeSkipLogMs >= TIME_SKIP_LOG_INTERVAL_MS) {
       lastTimeSkipLogMs = nowMs;
@@ -1952,6 +2347,7 @@ bool parseGga(const String& sentence, GpsData& out) {
   }
 
   out.timestamp = timestamp;
+  out.timeSource = timeSource;
   out.lat = latDecimal;
   out.lon = lonDecimal;
   out.haccM = latestHaccM;
@@ -2012,28 +2408,10 @@ void handleGpsSentence(const String& sentence) {
     Serial.println("  RELPOS: none");
   }
 
-  String payload = buildPayload(data);
-  bool triedLiveSend = shouldTryLiveSend();
-
-  if (triedLiveSend) {
-    SendResult result = sendPayload(payload);
-    if (result == SEND_RESULT_OK) {
-      noteLiveSendOk();
-      Serial.println("Telemetry sent");
-      return;
-    }
-
-    if (result == SEND_RESULT_REJECTED) {
-      noteLiveSendOk();
-      Serial.println("Telemetry rejected by server, dropped");
-      return;
-    }
-
-    noteLiveSendFailed();
-  }
-
-  if (!bufferPayload(payload)) {
-    Serial.println("Telemetry dropped (no SD/RAM)");
+  uint32_t sequence = ++packetSequence;
+  String payload = buildPayload(data, sequence);
+  if (!enqueueTelemetryWork(payload)) {
+    Serial.println("Telemetry work queue full, packet dropped");
   }
 }
 
@@ -2043,6 +2421,15 @@ void setup() {
 
   Serial.println("RTK UART + WiFi + SD telemetry started");
 
+  uint32_t bootHigh = esp_random();
+  uint32_t bootLow = esp_random();
+  snprintf(bootId, sizeof(bootId), "%08lx%08lx", (unsigned long)bootHigh, (unsigned long)bootLow);
+  Serial.print("Firmware: ");
+  Serial.print(FIRMWARE_VERSION);
+  Serial.print(" boot_id=");
+  Serial.println(bootId);
+
+  RTK.setRxBufferSize(RTK_RX_BUFFER_BYTES);
   RTK.begin(115200, SERIAL_8N1, RTK_RX_PIN, RTK_TX_PIN);
 
   WiFi.mode(WIFI_STA);
@@ -2055,14 +2442,32 @@ void setup() {
   sdReady = initSdCard();
   Serial.print("SD init: ");
   Serial.println(sdReady ? "OK" : "FAILED");
+
+  telemetryWorkQueue = xQueueCreate(RAM_QUEUE_MAX, sizeof(String*));
+  if (!telemetryWorkQueue) {
+    Serial.println("Telemetry sender queue allocation failed");
+    return;
+  }
+
+  BaseType_t taskCreated = xTaskCreatePinnedToCore(
+    telemetrySenderTask,
+    "telemetry-sender",
+    SENDER_TASK_STACK_BYTES,
+    nullptr,
+    1,
+    &telemetrySenderTaskHandle,
+    0
+  );
+  if (taskCreated != pdPASS) {
+    telemetrySenderTaskHandle = nullptr;
+    Serial.println("Telemetry sender task creation failed");
+  }
 }
 
 void loop() {
   ensureWifiConnected();
   handleOtaIfReady();
   if (otaInProgress) return;
-
-  ensureSdReady();
 
   while (RTK.available()) {
     handleOtaIfReady();
@@ -2074,6 +2479,7 @@ void loop() {
     processUbxByte(b);
 
     if (c == '\n') {
+      nmeaSentenceSequence++;
       updateDateFromRmc(line);
       updateSpeedFromSentence(line);
       updateAccuracyFromSentence(line);
@@ -2092,6 +2498,5 @@ void loop() {
   handleOtaIfReady();
   if (otaInProgress) return;
 
-  flushQueueIfPossible();
   handleOtaIfReady();
 }

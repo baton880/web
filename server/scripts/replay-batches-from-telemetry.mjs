@@ -12,6 +12,11 @@ import { recordLeftoverViolation } from '../src/modules/violations/violation-ser
 import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/loading-zone-correction.js'
 
 const prisma = new PrismaClient()
+
+await prisma.$connect()
+await prisma.$queryRawUnsafe('PRAGMA journal_mode=WAL')
+await prisma.$queryRawUnsafe('PRAGMA busy_timeout=10000')
+await prisma.$queryRawUnsafe('PRAGMA synchronous=NORMAL')
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2

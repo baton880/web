@@ -34,6 +34,7 @@ model Telemetry {
 
 model RtkTelemetry {
   id            Int      @id @default(autoincrement())
+  ingestKey     String?  @unique
   deviceId      String
   timestamp     DateTime
   lat           Float

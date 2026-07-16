@@ -7,8 +7,9 @@ const __dirname = dirname(__filename)
 const SERVER_ROOT = resolve(__dirname, '../../..')
 const REPLAY_SCRIPT = resolve(SERVER_ROOT, 'scripts/replay-batches-from-telemetry.mjs')
 
-const DEFAULT_REPLAY_DEBOUNCE_MS = 90 * 1000
-const DEFAULT_FAST_REPLAY_DEBOUNCE_MS = 5 * 1000
+const DEFAULT_REPLAY_DEBOUNCE_MS = 10 * 60 * 1000
+const DEFAULT_BUFFER_QUIET_DEBOUNCE_MS = 2 * 60 * 1000
+const DEFAULT_BUFFER_DRAINED_DEBOUNCE_MS = 30 * 1000
 const MIN_REPLAY_DEBOUNCE_MS = 1 * 1000
 const MAX_REPLAY_DEBOUNCE_MS = 30 * 60 * 1000
 
@@ -22,7 +23,12 @@ function normalizeDebounceMs(value) {
 }
 
 const REPLAY_DEBOUNCE_MS = normalizeDebounceMs(process.env.RTK_BUFFER_REPLAY_DEBOUNCE_MS)
-const FAST_REPLAY_DEBOUNCE_MS = normalizeDebounceMs(process.env.TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS || DEFAULT_FAST_REPLAY_DEBOUNCE_MS)
+const BUFFER_QUIET_DEBOUNCE_MS = normalizeDebounceMs(
+  process.env.TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS || DEFAULT_BUFFER_QUIET_DEBOUNCE_MS
+)
+const BUFFER_DRAINED_DEBOUNCE_MS = normalizeDebounceMs(
+  process.env.RTK_BUFFER_DRAINED_REPLAY_DEBOUNCE_MS || DEFAULT_BUFFER_DRAINED_DEBOUNCE_MS
+)
 const REPLAY_ENABLED = String(process.env.RTK_BUFFER_REPLAY_ENABLED || '1').trim() !== '0'
 
 let replayTimer = null
@@ -122,6 +128,9 @@ export function scheduleReplayAfterRtkBuffer(reason = 'rtk-buffer', meta = {}) {
   return scheduleQueuedReplay(reason, meta, REPLAY_DEBOUNCE_MS)
 }
 
-export function scheduleReplayAfterBufferedTelemetry(reason = 'telemetry-buffer', meta = {}) {
-  return scheduleQueuedReplay(reason, meta, FAST_REPLAY_DEBOUNCE_MS)
+export function scheduleReplayAfterBufferedTelemetry(reason = 'telemetry-buffer', meta = {}, options = {}) {
+  const delayMs = options.bufferDrained
+    ? BUFFER_DRAINED_DEBOUNCE_MS
+    : BUFFER_QUIET_DEBOUNCE_MS
+  return scheduleQueuedReplay(reason, meta, delayMs)
 }

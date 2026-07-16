@@ -11,6 +11,38 @@ Important values in `jun30a.ino`:
 - Telemetry endpoint: `https://vi-korm.ru/api/telemetry/rtk`
 - Normal telemetry interval: `1000 ms`
 - Stationary telemetry interval: `60000 ms`
+- Firmware version: `2026.07.15-reliable-1`
+
+## Reliable telemetry behavior
+
+- UART2 uses an `8192` byte RX buffer. Parsing and OTA remain in the main loop;
+  TLS, HTTP, SD writes, and backlog draining run in a separate FreeRTOS task.
+- A newly produced live packet is sent before backlog work. Older live packets
+  waiting behind it are preserved in the SD/RAM queue.
+- The SD queue remains capped at `1800` rows and trims to `900`. It is FIFO and
+  acknowledges a durable byte offset; the file is compacted only after a large
+  acknowledged prefix instead of being rewritten after every 16-row batch.
+- SD initialization tries `8 MHz`, `4 MHz`, `1 MHz`, then `400 kHz`.
+- HTTP uses a reusable TLS connection. A response is accepted only for a `2xx`;
+  retryable failures leave the packet buffered.
+- Every packet includes `firmware_version`, random `boot_id`, unique `packet_id`,
+  and `time_source`. Buffer envelopes report `buffer_remaining_after_ack`.
+- UTC date comes from RMC when available, tracks the GGA midnight rollover, is
+  checked against NTP when available, and rejects unexplained backward jumps.
+- Stationary throttling stays at 15 minutes / 60 seconds. Two fresh speed samples
+  at or above `1 km/h`, or movement outside the adaptive radius, wake it early.
+
+## Wi-Fi name in telemetry
+
+The telemetry JSON field `wifi_profile` now contains the actual name (SSID) of
+the Wi-Fi network to which the loader is connected:
+
+- `ISRK_Hozyain` when it is on the primary network;
+- `Sasung` when it is on the fallback network;
+- `disconnected` if there is no Wi-Fi connection.
+
+It no longer sends the internal labels `primary` and `fallback`. The connection
+order and all Wi-Fi credentials are unchanged.
 
 Do not publish this firmware publicly unless Wi-Fi credentials inside `jun30a.ino` are expected to be public.
 
@@ -32,6 +64,12 @@ In Arduino IDE:
 Sketch -> Export Compiled Binary
 ```
 
+Use the same board configuration as the existing loader firmware:
+
+```text
+Board: ESP32 Dev Module / NodeMCU-32S (ESP32)
+```
+
 After export, check that a `.bin` appeared under the sketch build folder:
 
 ```powershell
@@ -42,6 +80,12 @@ The expected file is usually:
 
 ```text
 c:\Users\Windows\projects\site_korovki\!LOADER_CODE\jun30a\build\esp32.esp32.nodemcu-32s\jun30a.ino.bin
+```
+
+Reliable build `2026.07.15-reliable-1` SHA-256:
+
+```text
+E9C54277F583A234BB31E0752296A5ED9B9B37A225D546EE72AB1BB3E54A6AF1
 ```
 
 ### 2. Find `espota.py` on the laptop

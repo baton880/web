@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import crypto from 'node:crypto'
 import prisma from '../../database.js'
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from '../../middleware/auth.js'
 import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
@@ -8,10 +9,9 @@ import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 import {
   getRtkIngestStatus,
-  noteRtkRequestAcknowledged,
-  recordRtkIngestFailure,
-  recordRtkIngestResult
+  noteRtkRequestAcknowledged
 } from './rtk-ingest-monitor.js'
+import { enqueueRtkIngress, getRtkIngressStats } from './rtk-ingress-store.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -464,6 +464,26 @@ function sanitizeRawGga(value) {
   return trimmed ? trimmed : null
 }
 
+function stableJson(value) {
+  if (Array.isArray(value)) {
+    return `[${value.map((item) => stableJson(item)).join(',')}]`
+  }
+  if (value && typeof value === 'object') {
+    return `{${Object.keys(value).sort().map((key) => `${JSON.stringify(key)}:${stableJson(value[key])}`).join(',')}}`
+  }
+  return JSON.stringify(value)
+}
+
+function buildPacketIngestKey(raw, deviceId) {
+  const explicit = readRawValue(raw, ['packet_id', 'packetId'])
+  if (hasRawValue(explicit)) {
+    return `${deviceId}:packet:${String(explicit).trim()}`
+  }
+
+  const digest = crypto.createHash('sha256').update(stableJson(raw)).digest('hex')
+  return `${deviceId}:sha256:${digest}`
+}
+
 function normalizeRtkPacket(raw, settings = {}, receivedAt = new Date()) {
   const timestamp = parseTimestamp(readRawValue(raw, ['timestamp', 'time', 'datetime'], PVT_SECTION_KEYS))
   const lat = parseRawNumber(raw, ['lat', 'latitude'], PVT_SECTION_KEYS)
@@ -475,8 +495,11 @@ function normalizeRtkPacket(raw, settings = {}, receivedAt = new Date()) {
   const fixTypeRaw = readRawValue(raw, ['fixType', 'fix_type', 'mode', 'solutionType', 'solution_type'], PVT_SECTION_KEYS) ?? resolvedQualityLabel ?? qualityNumberRaw
   const heading = applyHeadingOffset(parseHeadingDegrees(raw), settings.rtkHeadingOffsetDeg)
 
+  const deviceId = String(readRawValue(raw, ['deviceId', 'device_id']) || 'host_01').trim() || 'host_01'
+
   return {
-    deviceId: String(readRawValue(raw, ['deviceId', 'device_id']) || 'host_01').trim() || 'host_01',
+    ingestKey: buildPacketIngestKey(raw, deviceId),
+    deviceId,
     timestamp,
     lat,
     lon,
@@ -489,7 +512,8 @@ function normalizeRtkPacket(raw, settings = {}, receivedAt = new Date()) {
     fixType: fixTypeRaw !== undefined && fixTypeRaw !== null && String(fixTypeRaw).trim() !== ''
       ? String(fixTypeRaw).trim()
       : null,
-    rawPayload: JSON.stringify(raw)
+    rawPayload: JSON.stringify(raw),
+    createdAt: receivedAt
   }
 }
 
@@ -545,7 +569,23 @@ async function createManyRtkTelemetryInChunks(packets) {
 
   for (let index = 0; index < packets.length; index += RTK_BULK_INSERT_CHUNK_SIZE) {
     const chunk = packets.slice(index, index + RTK_BULK_INSERT_CHUNK_SIZE)
-    const created = await prisma.rtkTelemetry.createMany({ data: chunk })
+    const keys = chunk.map((packet) => packet.ingestKey).filter(Boolean)
+    const existing = keys.length
+      ? await prisma.rtkTelemetry.findMany({
+          where: { ingestKey: { in: keys } },
+          select: { ingestKey: true }
+        })
+      : []
+    const existingKeys = new Set(existing.map((row) => row.ingestKey))
+    const unseenKeys = new Set()
+    const uniqueChunk = chunk.filter((packet) => {
+      if (!packet.ingestKey) return true
+      if (existingKeys.has(packet.ingestKey) || unseenKeys.has(packet.ingestKey)) return false
+      unseenKeys.add(packet.ingestKey)
+      return true
+    })
+    if (!uniqueChunk.length) continue
+    const created = await prisma.rtkTelemetry.createMany({ data: uniqueChunk })
     createdCount += created.count
   }
 
@@ -910,6 +950,9 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
 
 export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
   const payloads = extractRtkPayloads(body)
+  const transport = body && !Array.isArray(body) && typeof body.transport === 'object'
+    ? body.transport
+    : {}
 
   if (!payloads.length) {
     return {
@@ -973,11 +1016,16 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     .map((entry) => entry.packet)
 
   if (packets.length === 1) {
-    const created = await prisma.rtkTelemetry.create({
-      data: packets[0]
-    })
-    createdCount = 1
-    createdId = created.id
+    const existing = packets[0].ingestKey
+      ? await prisma.rtkTelemetry.findUnique({ where: { ingestKey: packets[0].ingestKey } })
+      : null
+    if (existing) {
+      createdId = existing.id
+    } else {
+      const created = await prisma.rtkTelemetry.create({ data: packets[0] })
+      createdCount = 1
+      createdId = created.id
+    }
   } else if (packets.length > 1) {
     createdCount = await createManyRtkTelemetryInChunks(packets)
   }
@@ -990,13 +1038,17 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
       .filter((date) => Number.isFinite(date.getTime()))
     const from = timestamps.length ? new Date(Math.min(...timestamps.map((date) => date.getTime()))) : null
     const to = timestamps.length ? new Date(Math.max(...timestamps.map((date) => date.getTime()))) : null
+    const remainingAfterAck = parseInteger(
+      transport.buffer_remaining_after_ack ?? transport.bufferRemainingAfterAck
+    )
     const replay = scheduleReplayAfterBufferedTelemetry('rtk-buffer', {
       receivedAt,
       received: payloads.length,
       accepted: createdCount,
       from,
-      to
-    })
+      to,
+      remainingAfterAck
+    }, { bufferDrained: remainingAfterAck === 0 })
     if (replay.scheduled) {
       console.log('[RTK ingest background]: scheduled replay after buffered RTK', {
         delayMs: replay.delayMs,
@@ -1023,37 +1075,29 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
 
 export function handleRtkTelemetryPost(req, res) {
   const receivedAt = new Date()
-  noteRtkRequestAcknowledged(req.body)
-  res.status(201).end()
+  const rawBody = typeof req.rawBody === 'string'
+    ? req.rawBody
+    : JSON.stringify(req.body ?? {})
 
-  setImmediate(() => {
-    processRtkTelemetryBody(req.body, receivedAt)
-      .then((result) => {
-        recordRtkIngestResult(req.body, result, receivedAt).catch((monitorError) => {
-          console.error('[RTK ingest monitor] Failed to record ingest result:', monitorError)
-        })
-        if (result.accepted > 0 || result.dropped > 0) {
-          console.log('[RTK ingest background]:', {
-            received: result.received,
-            accepted: result.accepted,
-            dropped: result.dropped
-          })
-        }
-      })
-      .catch((error) => {
-        console.error('[Ошибка POST /api/telemetry/rtk background]:', error)
-        recordRtkIngestFailure(req.body, error, receivedAt).catch((monitorError) => {
-          console.error('[RTK ingest monitor] Failed to record ingest failure:', monitorError)
-        })
-      })
-  })
+  try {
+    const accepted = enqueueRtkIngress(rawBody, receivedAt)
+    noteRtkRequestAcknowledged(req.body ?? rawBody)
+    res.setHeader('X-RTK-Ingest-Id', accepted.requestHash)
+    return res.status(202).end()
+  } catch (error) {
+    console.error('[RTK ingress] Durable inbox write failed:', error)
+    return res.status(503).json({ error: 'RTK ingress storage unavailable' })
+  }
 }
 
 router.post('/', handleRtkTelemetryPost)
 
 router.get('/admin/ingest-status', authenticate, requireAdmin, async (req, res) => {
   try {
-    res.json(await getRtkIngestStatus())
+    res.json({
+      ...(await getRtkIngestStatus()),
+      durableInbox: getRtkIngressStats()
+    })
   } catch (error) {
     console.error('[Ошибка GET /api/telemetry/rtk/admin/ingest-status]:', error)
     res.status(500).json({ error: 'Internal server error' })

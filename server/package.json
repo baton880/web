@@ -16,13 +16,15 @@
     "create-admin": "node create-admin.js",
     "seed:rtk-jumps": "node scripts/seed-rtk-jumps.mjs",
     "scenario:loading-zones": "node scripts/loading-zone-routes-scenario.mjs",
-    "capacity:test": "node scripts/capacity-test.mjs"
+    "capacity:test": "node scripts/capacity-test.mjs",
+    "test:rtk-ingress": "node scripts/rtk-ingress-store-test.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.8.1",
     "@prisma/adapter-better-sqlite3": "^7.4.2",
     "@prisma/adapter-libsql": "^6.2.1",
     "@prisma/client": "^6.2.1",
+    "better-sqlite3": "^12.8.0",
     "bcrypt": "^6.0.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",

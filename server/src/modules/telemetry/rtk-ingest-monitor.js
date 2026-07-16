@@ -125,9 +125,11 @@ export async function recordRtkIngestFailure(body, error, receivedAt) {
   }))
 }
 
-export async function recordRtkMalformedRequest(rawBody, error, receivedAt = new Date()) {
-  runtime.acknowledgedRequests += 1
-  runtime.acknowledgedPackets += 1
+export async function recordRtkMalformedRequest(rawBody, error, receivedAt = new Date(), options = {}) {
+  if (!options.alreadyAcknowledged) {
+    runtime.acknowledgedRequests += 1
+    runtime.acknowledgedPackets += 1
+  }
   runtime.malformedRequests += 1
   runtime.rejectedPackets += 1
   noteFailure('malformed_json', error?.message || error)
@@ -179,7 +181,7 @@ export async function getRtkIngestStatus() {
   const finalizedPackets = runtime.storedPackets + notStoredPackets
 
   return {
-    responsePolicy: 'always_201_immediate',
+    responsePolicy: 'durable_inbox_202',
     runtime: {
       since: startedAt.toISOString(),
       ...runtime,

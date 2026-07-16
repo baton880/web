@@ -5,8 +5,8 @@
   import path from 'path'
   import { fileURLToPath } from 'url'
   import telemetryRouter from './modules/telemetry/telemetry.routes.js'
-  import rtkTelemetryRouter, { handleRtkTelemetryPost } from './modules/telemetry/rtk.routes.js'
-  import { recordRtkMalformedRequest } from './modules/telemetry/rtk-ingest-monitor.js'
+  import rtkTelemetryRouter, { handleRtkTelemetryPost, processRtkTelemetryBody } from './modules/telemetry/rtk.routes.js'
+  import { startRtkIngressWorker } from './modules/telemetry/rtk-ingress-worker.js'
   import telemetryWarningsRouter from './modules/telemetry/warnings.routes.js'
   import telemetrySettingsRouter from './modules/telemetry/telemetry-settings.routes.js'
   import storageZonesRouter from './modules/storage-zones/storage-zones.routes.js'
@@ -14,7 +14,7 @@
   import { authenticate, extractTokenFromRequest, requireAdmin, requireReadAccess, verifyAccessToken } from './middleware/auth.js'
   import authRouter from './modules/auth/auth.routes.js'
   import rationsRouter from './modules/rations/rations.routes.js'
-  import prisma from './database.js'
+  import prisma, { databaseReady } from './database.js'
   import batchesRoutes from './modules/batches/batches.routes.js'
   import groupsRoutes from './modules/groups/groups.routes.js'
   import usersRoutes from './modules/users/users.routes.js';
@@ -57,17 +57,9 @@
       req.body = JSON.parse(rawBody)
       return next()
     } catch (error) {
-      console.warn('[RTK ingest warning]: malformed raw body acknowledged and recorded before JSON parser', {
-        type: error?.type,
-        status: error?.status,
-        message: error?.message,
-        rawLength: rawBody.length,
-        rawPreview: rawBody.slice(0, 200)
-      })
-      recordRtkMalformedRequest(rawBody, error).catch((monitorError) => {
-        console.error('[RTK ingest monitor] Failed to record malformed body:', monitorError)
-      })
-      return res.status(201).end()
+      req.body = null
+      req.rtkParseError = error
+      return next()
     }
   }
 
@@ -84,17 +76,9 @@
   }))
   app.use((error, req, res, next) => {
     if (req.originalUrl?.startsWith('/api/telemetry/rtk')) {
-      console.warn('[RTK ingest warning]: malformed body acknowledged and recorded before route', {
-        type: error?.type,
-        status: error?.status,
-        message: error?.message,
-        rawLength: req.rawBody?.length ?? null,
-        rawPreview: req.rawBody ? req.rawBody.slice(0, 200) : null
-      })
-      recordRtkMalformedRequest(req.rawBody || '', error).catch((monitorError) => {
-        console.error('[RTK ingest monitor] Failed to record malformed body:', monitorError)
-      })
-      return res.status(201).end()
+      req.body = null
+      req.rtkParseError = error
+      return handleRtkTelemetryPost(req, res)
     }
 
     next(error)
@@ -191,6 +175,8 @@
     res.sendFile(path.join(frontendPath, 'index.html'))
   })
 
+  await databaseReady
+
   app.listen(PORT, '0.0.0.0', () => {
     console.log(`🚀 Server & Website running on http://127.0.0.1:${PORT}`)
   })
@@ -198,6 +184,7 @@
   startDigestScheduler(prisma)
   startRtkTrackScheduler(prisma)
   startDataRetentionScheduler(prisma)
+  startRtkIngressWorker(processRtkTelemetryBody)
 
   // Запуск
   //app.listen(PORT, () => {
