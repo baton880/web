@@ -14,7 +14,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260506e" rel="stylesheet">
+    <link href="css/custom.css?v=20260715a" rel="stylesheet">
     <link href="css/responsive.css" rel="stylesheet">
     <script src="js/auth-route-alias.js?v=20260428b"></script>
     <script src="js/app-auth.js?v=20260428b"></script>
@@ -158,6 +158,17 @@
                                         <i class="fas fa-expand-arrows-alt" aria-hidden="true"></i>
                                         <span class="map-action-button__label">Экран</span>
                                     </button>
+                                </div>
+                                <div class="map-dashed-track-controls" data-requires-admin hidden>
+                                    <div class="map-dashed-track-controls__title">Пунктирные разрывы</div>
+                                    <div class="custom-control custom-switch">
+                                        <input id="dashboardHostDashedTrackToggle" type="checkbox" class="custom-control-input" checked>
+                                        <label class="custom-control-label" for="dashboardHostDashedTrackToggle">Хозяин</label>
+                                    </div>
+                                    <div class="custom-control custom-switch">
+                                        <input id="dashboardLoaderDashedTrackToggle" type="checkbox" class="custom-control-input" checked>
+                                        <label class="custom-control-label" for="dashboardLoaderDashedTrackToggle">Погрузчик</label>
+                                    </div>
                                 </div>
                                 <div class="map-marker-legend" aria-label="Обозначения меток">
                                     <div class="map-marker-legend__item">
@@ -308,7 +319,7 @@
 
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
 
-    <script src="js/dashboard.js?v=20260708b"></script>
+    <script src="js/dashboard.js?v=20260715a"></script>
     <script src="js/dashboard-current-state.js?v=20260708a"></script>
 
 </body>

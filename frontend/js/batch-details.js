@@ -35,6 +35,8 @@ $(document).ready(function () {
     const trackMeta = document.getElementById("batchTrackMeta");
     const trackResetButton = document.getElementById("batchTrackResetButton");
     const trackFullscreenButton = document.getElementById("batchTrackFullscreenButton");
+    const trackHostDashedToggle = document.getElementById("batchHostDashedTrackToggle");
+    const trackLoaderDashedToggle = document.getElementById("batchLoaderDashedTrackToggle");
     const replayPanel = document.getElementById("batchReplayPanel");
     const replayPlayButton = document.getElementById("batchReplayPlay");
     const replaySlider = document.getElementById("batchReplaySlider");
@@ -254,6 +256,49 @@ $(document).ready(function () {
     const HOST_TRACK_COLOR = "#3F6FAE";
     const RTK_GPS_FIX_COLOR = "#B65F55";
     const RTK_FIX_COLOR = "#5F8A6B";
+    const DASHED_TRACK_PREFERENCE_KEYS = {
+        host: "korovki.showDashedHostTrackGaps",
+        rtk: "korovki.showDashedLoaderTrackGaps",
+    };
+    const dashedTrackPreferences = { host: true, rtk: true };
+
+    function getDashedTrackPreference(track) {
+        try {
+            return window.localStorage.getItem(DASHED_TRACK_PREFERENCE_KEYS[track]) !== "false";
+        } catch (error) {
+            return true;
+        }
+    }
+
+    function setDashedTrackPreference(track, enabled) {
+        dashedTrackPreferences[track] = Boolean(enabled);
+        try {
+            window.localStorage.setItem(DASHED_TRACK_PREFERENCE_KEYS[track], String(dashedTrackPreferences[track]));
+        } catch (error) {
+            // The preference is optional; rendering must still work when storage is unavailable.
+        }
+    }
+
+    function canShowDashedTrackGap(track) {
+        return canAdmin && dashedTrackPreferences[track] === true;
+    }
+
+    function syncDashedTrackControls() {
+        dashedTrackPreferences.host = getDashedTrackPreference("host");
+        dashedTrackPreferences.rtk = getDashedTrackPreference("rtk");
+
+        [
+            ["host", trackHostDashedToggle],
+            ["rtk", trackLoaderDashedToggle],
+        ].forEach(([track, input]) => {
+            if (!(input instanceof HTMLInputElement)) {
+                return;
+            }
+
+            input.checked = dashedTrackPreferences[track];
+            input.disabled = !canAdmin;
+        });
+    }
 
     function parsePositiveInteger(value) {
         const parsed = Number.parseInt(value, 10);
@@ -1539,14 +1584,16 @@ $(document).ready(function () {
                     });
                 }
 
-                segments.push({
-                    coords: [
-                        [previousPoint.lat, previousPoint.lon],
-                        [point.lat, point.lon],
-                    ],
-                    points: [previousPoint, point],
-                    dashed: true,
-                });
+                if (canShowDashedTrackGap("host")) {
+                    segments.push({
+                        coords: [
+                            [previousPoint.lat, previousPoint.lon],
+                            [point.lat, point.lon],
+                        ],
+                        points: [previousPoint, point],
+                        dashed: true,
+                    });
+                }
 
                 currentSegment = [point];
                 return;
@@ -1572,6 +1619,11 @@ $(document).ready(function () {
         for (let index = 1; index < trackPoints.length; index += 1) {
             const previousPoint = trackPoints[index - 1];
             const currentPoint = trackPoints[index];
+            const isDashedGap = shouldRenderDashedTrackGap(previousPoint, currentPoint);
+
+            if (isDashedGap && !canShowDashedTrackGap("rtk")) {
+                continue;
+            }
 
             segments.push({
                 coords: [
@@ -1579,7 +1631,7 @@ $(document).ready(function () {
                     [currentPoint.lat, currentPoint.lon],
                 ],
                 points: [previousPoint, currentPoint],
-                dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
+                dashed: isDashedGap,
                 strokeColor: hasRtkHeadingData(currentPoint) ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
             });
         }
@@ -1932,7 +1984,7 @@ $(document).ready(function () {
 
             map.geoObjects.add(marker);
 
-            if (startPoint && endPoint) {
+            if (canAdmin && startPoint && endPoint) {
                 const isSamePoint = Math.abs(startPoint.lat - endPoint.lat) < 1e-6
                     && Math.abs(startPoint.lon - endPoint.lon) < 1e-6;
 
@@ -4267,6 +4319,25 @@ $(document).ready(function () {
         trackFullscreenButton.addEventListener("click", handleBatchTrackFullscreenClick);
         syncBatchTrackFullscreenButton();
     }
+
+    syncDashedTrackControls();
+
+    [
+        ["host", trackHostDashedToggle],
+        ["rtk", trackLoaderDashedToggle],
+    ].forEach(([track, input]) => {
+        if (!(input instanceof HTMLInputElement) || !canAdmin) {
+            return;
+        }
+
+        input.addEventListener("change", () => {
+            setDashedTrackPreference(track, input.checked);
+            void renderBatchTrack(
+                state.telemetryPayload || { hostTrack: [], loaderTrack: [] },
+                Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : []
+            );
+        });
+    });
 
     document.addEventListener("keydown", handleBatchTrackFullscreenKeydown);
     window.addEventListener("resize", scheduleBatchTrackMapFit);

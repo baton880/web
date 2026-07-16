@@ -14,7 +14,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260710b" rel="stylesheet">
+    <link href="css/custom.css?v=20260715a" rel="stylesheet">
     <link href="css/responsive.css?v=20260709a" rel="stylesheet">
     <script src="js/app-auth.js?v=20260419a"></script>
 
@@ -379,6 +379,17 @@
                             <h6 class="m-0 font-weight-bold text-primary">Трек замеса на карте</h6>
                             <div class="batch-track-toolbar mt-2 mt-md-0">
                                 <div id="batchTrackMeta" class="small text-muted">Загрузка трека...</div>
+                                <div class="batch-track-dashed-controls" data-requires-admin hidden>
+                                    <span class="batch-track-dashed-controls__title">Пунктир:</span>
+                                    <div class="custom-control custom-switch">
+                                        <input id="batchHostDashedTrackToggle" type="checkbox" class="custom-control-input" checked>
+                                        <label class="custom-control-label" for="batchHostDashedTrackToggle">Хозяин</label>
+                                    </div>
+                                    <div class="custom-control custom-switch">
+                                        <input id="batchLoaderDashedTrackToggle" type="checkbox" class="custom-control-input" checked>
+                                        <label class="custom-control-label" for="batchLoaderDashedTrackToggle">Погрузчик</label>
+                                    </div>
+                                </div>
                                 <button id="batchTrackResetButton" type="button" class="btn btn-sm btn-outline-secondary d-none" title="Показать весь трек">
                                     <i class="fas fa-route mr-1"></i>
                                     Весь трек
@@ -525,7 +536,7 @@
     <script src="js/sidebar-enhancements.js?v=20260429d"></script>
     <script src="vendor/chart.js/Chart.min.js"></script>
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
-    <script src="js/batch-details.js?v=20260710g"></script>
+    <script src="js/batch-details.js?v=20260715a"></script>
 
 </body>
 

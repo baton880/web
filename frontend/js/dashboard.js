@@ -27,6 +27,10 @@ const RTK_FIX_COLOR = "#5F8A6B";
 const OFFLINE_MARKER_COLOR = "#8A8F93";
 const HOST_MARKER_IMAGE_URL = "img/host.svg";
 const RTK_MARKER_IMAGE_URL = "img/rtk.svg";
+const DASHED_TRACK_PREFERENCE_KEYS = {
+    host: "korovki.showDashedHostTrackGaps",
+    rtk: "korovki.showDashedLoaderTrackGaps",
+};
 
 let map;
 let placemark;
@@ -71,9 +75,59 @@ let pinnedMapActionMenu = null;
 let lastLatestFetchStartedAt = 0;
 let lastHistoryFetchStartedAt = 0;
 let lastZonesFetchStartedAt = 0;
+let latestTrackHistory = { host: [], rtk: [] };
+let dashedTrackPreferences = { host: true, rtk: true };
 
 function isAdmin() {
     return Boolean(window.AppAuth?.isAdmin && window.AppAuth.isAdmin());
+}
+
+function getDashedTrackPreference(track) {
+    try {
+        return window.localStorage.getItem(DASHED_TRACK_PREFERENCE_KEYS[track]) !== "false";
+    } catch (error) {
+        return true;
+    }
+}
+
+function setDashedTrackPreference(track, enabled) {
+    dashedTrackPreferences[track] = Boolean(enabled);
+    try {
+        window.localStorage.setItem(DASHED_TRACK_PREFERENCE_KEYS[track], String(dashedTrackPreferences[track]));
+    } catch (error) {
+        // The preference is optional; rendering must still work when storage is unavailable.
+    }
+}
+
+function canShowDashedTrackGap(track) {
+    return isAdmin() && dashedTrackPreferences[track] === true;
+}
+
+function initDashedTrackControls() {
+    dashedTrackPreferences = {
+        host: getDashedTrackPreference("host"),
+        rtk: getDashedTrackPreference("rtk"),
+    };
+
+    [
+        ["host", document.getElementById("dashboardHostDashedTrackToggle")],
+        ["rtk", document.getElementById("dashboardLoaderDashedTrackToggle")],
+    ].forEach(([track, input]) => {
+        if (!(input instanceof HTMLInputElement)) {
+            return;
+        }
+
+        input.checked = dashedTrackPreferences[track];
+        input.disabled = !isAdmin();
+        input.addEventListener("change", () => {
+            setDashedTrackPreference(track, input.checked);
+            if (track === "host") {
+                renderRoute(latestTrackHistory.host);
+            } else {
+                renderRtkRoute(latestTrackHistory.rtk);
+            }
+        });
+    });
 }
 
 function hasWriteAccess() {
@@ -1578,14 +1632,16 @@ function buildTrackSegments(historyRows) {
                 });
             }
 
-            segments.push({
-                coords: [
-                    [previousPoint.lat, previousPoint.lon],
-                    [point.lat, point.lon],
-                ],
-                points: [previousPoint, point],
-                dashed: true,
-            });
+            if (canShowDashedTrackGap("host")) {
+                segments.push({
+                    coords: [
+                        [previousPoint.lat, previousPoint.lon],
+                        [point.lat, point.lon],
+                    ],
+                    points: [previousPoint, point],
+                    dashed: true,
+                });
+            }
 
             currentSegment = [point];
             return;
@@ -1625,6 +1681,11 @@ function buildRtkTrackSegments(historyRows) {
         const previousPoint = points[index - 1];
         const currentPoint = points[index];
         const currentHasHeading = currentPoint.hasHeading;
+        const isDashedGap = shouldRenderDashedTrackGap(previousPoint, currentPoint);
+
+        if (isDashedGap && !canShowDashedTrackGap("rtk")) {
+            continue;
+        }
 
         segments.push({
             coords: [
@@ -1632,7 +1693,7 @@ function buildRtkTrackSegments(historyRows) {
                 [currentPoint.lat, currentPoint.lon],
             ],
             points: [previousPoint, currentPoint],
-            dashed: shouldRenderDashedTrackGap(previousPoint, currentPoint),
+            dashed: isDashedGap,
             strokeColor: currentHasHeading ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
         });
     }
@@ -1682,6 +1743,7 @@ function createTrackPolylines(segments, options) {
 function renderRoute(historyRows) {
     if (!map) return;
 
+    latestTrackHistory.host = Array.isArray(historyRows) ? historyRows : [];
     rememberTrackHistoryMaxTimestamp("host", historyRows);
     const routeSegments = buildTrackSegments(filterVisibleTrackRows("host", historyRows));
 
@@ -1703,6 +1765,7 @@ function renderRoute(historyRows) {
 function renderRtkRoute(historyRows) {
     if (!map) return;
 
+    latestTrackHistory.rtk = Array.isArray(historyRows) ? historyRows : [];
     rememberTrackHistoryMaxTimestamp("rtk", historyRows);
     const routeSegments = buildRtkTrackSegments(filterVisibleTrackRows("rtk", historyRows));
 
@@ -2498,6 +2561,7 @@ function init() {
 
     initMapTypeSwitch();
     initMapActionControls();
+    initDashedTrackControls();
     applyIdleMapCursor();
     map.events.add("actionbegin", applyDragMapCursor);
     map.events.add("actionend", handleMapActionEnd);

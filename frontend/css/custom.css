@@ -119,6 +119,41 @@
     width: 132px;
 }
 
+.map-dashed-track-controls {
+    position: absolute;
+    top: 150px;
+    right: 8px;
+    z-index: 5;
+    min-width: 132px;
+    padding: 0.55rem 0.7rem;
+    border: 1px solid rgba(209, 211, 226, 0.95);
+    border-radius: 10px;
+    background: rgba(255, 255, 255, 0.96);
+    box-shadow: 0 8px 18px rgba(31, 45, 61, 0.14);
+    color: #4f5d75;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.map-dashed-track-controls__title {
+    margin-bottom: 0.35rem;
+    color: #71809f;
+    font-size: 0.68rem;
+    font-weight: 800;
+    letter-spacing: 0.05em;
+    text-transform: uppercase;
+}
+
+.map-dashed-track-controls .custom-control,
+.batch-track-dashed-controls .custom-control {
+    min-height: 1.3rem;
+}
+
+.map-dashed-track-controls .custom-control-label,
+.batch-track-dashed-controls .custom-control-label {
+    cursor: pointer;
+}
+
 .map-action-menu {
     position: relative;
     display: flex;
@@ -1172,6 +1207,23 @@ body.batch-track-map-fullscreen {
     justify-content: flex-end;
     gap: 0.75rem;
     flex-wrap: wrap;
+}
+
+.batch-track-dashed-controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.55rem;
+    padding: 0.35rem 0.6rem;
+    border: 1px solid #d8e1ee;
+    border-radius: 0.45rem;
+    background: #f8fafc;
+    color: #4f5d75;
+    font-size: 0.78rem;
+    font-weight: 700;
+}
+
+.batch-track-dashed-controls__title {
+    color: #71809f;
 }
 
 .batch-track-toolbar .btn {
