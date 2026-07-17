@@ -128,3 +128,4 @@ node scripts/replay-batches-from-telemetry.mjs
 - Host worker обрабатывает live-записи раньше backlog. Старые записи только обновляют `historyDirtyFrom`; автоматический полный replay на каждый пакет удалён.
 - `TelemetryWriteCoordinator` допускает максимум одного host/RTK-писателя. `/api/health` содержит `hostIngress` и безопасные счётчики очереди.
 - На копии снимка 2026-07-17 принято 5200 пакетов: HTTP p95 21.8 мс, процесс остался жив, SQLite `integrity_check=ok`. Production rollout ещё требует отдельного backup/deploy шага.
+- После первого production drain добавлен fast path для out-of-order host-пакетов: они проходят idempotency, базовую проверку и raw-вставку без геозон, FSM и постпроцессинга. Локальная очередь после live-приоритета обрабатывает около 11 исторических пакетов/с вместо примерно 3/с.

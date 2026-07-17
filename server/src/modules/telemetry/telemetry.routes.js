@@ -379,6 +379,31 @@ export class HostTelemetryValidationError extends Error {
   }
 }
 
+function buildTelemetryCreateData(packet, receivedAt, rawPayload, identity = {}) {
+  return {
+    sourceStreamId: identity.streamId || null,
+    sourcePacketId: Number.isInteger(identity.packetId) ? identity.packetId : null,
+    deviceId: packet.deviceId,
+    timestamp: packet.timestamp,
+    receivedAt,
+    lat: packet.lat,
+    lon: packet.lon,
+    gpsValid: packet.gpsValid,
+    gpsSatellites: packet.gpsSatellites,
+    speedKmh: packet.speedKmh,
+    weight: packet.weight,
+    rawWeight: packet.rawWeight,
+    rawPayload,
+    weightValid: packet.weightValid,
+    gpsQuality: packet.gpsQuality,
+    wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
+    cpuTempC: packet.cpuTempC,
+    lteRssiDbm: packet.lteRssiDbm,
+    lteAccessTech: packet.lteAccessTech,
+    eventsReaderOk: packet.eventsReaderOk
+  }
+}
+
 export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
     let packet = normalizeTelemetryPacket(body);
     if (!(packet.timestamp instanceof Date) || Number.isNaN(packet.timestamp.getTime())) {
@@ -406,14 +431,46 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       }
     }
 
+    const [telemetrySettings, latestStoredTelemetry] = await Promise.all([
+      getTelemetrySettings(prisma),
+      prisma.telemetry.findFirst({
+        where: { deviceId },
+        orderBy: orderBySourceTimestampDesc(),
+        select: { id: true, timestamp: true }
+      })
+    ])
+    packet = applyWeightCalibration(packet, telemetrySettings)
+    const latestStoredTimestampMs = latestStoredTelemetry?.timestamp instanceof Date
+      ? latestStoredTelemetry.timestamp.getTime()
+      : Number.NaN
+    const currentPacketTimestampMs = packet.timestamp.getTime()
+    const isOutOfOrderPacket = Number.isFinite(latestStoredTimestampMs) &&
+      currentPacketTimestampMs < latestStoredTimestampMs
+
+    if (isOutOfOrderPacket) {
+      if (!Number.isFinite(packet.lat) || !Number.isFinite(packet.lon) ||
+          packet.lat < -90 || packet.lat > 90 || packet.lon < -180 || packet.lon > 180) {
+        throw new HostTelemetryValidationError('Invalid coordinates')
+      }
+      const telemetry = await prisma.telemetry.create({
+        data: buildTelemetryCreateData(packet, receivedAt, rawPayload, identity)
+      })
+      return {
+        status: 'ok',
+        id: telemetry.id,
+        banner: null,
+        outOfOrder: true,
+        timestamp: packet.timestamp.toISOString()
+      }
+    }
+
     // 1. Достаем геозоны из базы
-    const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints, latestStoredTelemetry] = await Promise.all([
+    const [activeZones, groupsWithZones, activeBatchForHints] = await Promise.all([
       prisma.storageZone.findMany({ where: { active: true } }),
       prisma.livestockGroup.findMany({
         where: { storageZoneId: { not: null } },
         select: { storageZoneId: true }
       }),
-      getTelemetrySettings(prisma),
       prisma.batch.findFirst({
         where: { deviceId, endTime: null },
         orderBy: { startTime: 'desc' },
@@ -421,11 +478,6 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
           ration: { include: { ingredients: true } },
           group: { include: { ration: { include: { ingredients: true } } } }
         }
-      }),
-      prisma.telemetry.findFirst({
-        where: { deviceId },
-        orderBy: orderBySourceTimestampDesc(),
-        select: { id: true, timestamp: true }
       })
     ]);
     const linkedBarnZoneIds = new Set(
@@ -446,7 +498,6 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       ? Number(telemetrySettings.emptyVehicleThresholdKg)
       : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
-    packet = applyWeightCalibration(packet, telemetrySettings)
     const effectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
       deviceId,
       referenceTime: packet.timestamp,
@@ -494,45 +545,10 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
     let shouldClearDeviceState = false
     let shouldScheduleReplay = false
     const postprocessBatchIds = new Set()
-    const latestStoredTimestampMs = latestStoredTelemetry?.timestamp instanceof Date
-      ? latestStoredTelemetry.timestamp.getTime()
-      : Number.NaN
-    const currentPacketTimestampMs = packet.timestamp instanceof Date
-      ? packet.timestamp.getTime()
-      : Number.NaN
-    const isOutOfOrderPacket = Number.isFinite(latestStoredTimestampMs) &&
-      Number.isFinite(currentPacketTimestampMs) &&
-      currentPacketTimestampMs < latestStoredTimestampMs
     await prisma.$transaction(async (tx) => {
       telemetry = await tx.telemetry.create({
-        data: {
-          sourceStreamId: identity.streamId || null,
-          sourcePacketId: Number.isInteger(identity.packetId) ? identity.packetId : null,
-          deviceId: deviceId,
-          timestamp: packet.timestamp,
-          receivedAt,
-          lat: packet.lat,
-          lon: packet.lon,
-          gpsValid: packet.gpsValid,
-          gpsSatellites: packet.gpsSatellites,
-          speedKmh: packet.speedKmh,
-          weight: packet.weight,
-          rawWeight: packet.rawWeight,
-          rawPayload,
-          weightValid: packet.weightValid,
-          gpsQuality: packet.gpsQuality,
-          wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
-          cpuTempC: packet.cpuTempC,
-          lteRssiDbm: packet.lteRssiDbm,
-          lteAccessTech: packet.lteAccessTech,
-          eventsReaderOk: packet.eventsReaderOk
-        }
+        data: buildTelemetryCreateData(packet, receivedAt, rawPayload, identity)
       })
-
-      if (isOutOfOrderPacket) {
-        shouldScheduleReplay = true
-        return
-      }
 
       let activeBatch = await tx.batch.findFirst({
         where: { deviceId, endTime: null },
