@@ -26,6 +26,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
       return
     }
     running = true
+    let claimedRow = false
     try {
       if (Date.now() >= cleanupAt) {
         store.cleanup()
@@ -33,6 +34,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
       }
       const row = store.claimNext()
       if (!row) return
+      claimedRow = true
       try {
         const payload = JSON.parse(row.raw_body)
         const result = await processPacket(payload, new Date(row.received_at), {
@@ -63,7 +65,9 @@ export function startHostIngressWorker(processPacket, options = {}) {
     } finally {
       lease.release()
       running = false
-      if (!stopped) timer = setTimeout(tick, pollMs)
+      // Drain continuously while work exists, but keep the normal polling
+      // delay when the durable inbox is empty or temporarily unavailable.
+      if (!stopped) timer = setTimeout(tick, claimedRow ? 0 : pollMs)
     }
   }
 
