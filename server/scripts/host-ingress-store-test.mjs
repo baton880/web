@@ -33,6 +33,8 @@ try {
   store.markHistoryDirty('2026-07-17T10:00:00Z')
   store.markHistoryDirty('2026-07-17T10:00:01Z')
   assert.equal(store.stats().historyDirtyFrom, '2026-07-17T10:00:00.000Z')
+  assert.equal(store.clearHistoryDirty(), 1)
+  assert.equal(store.stats().historyDirtyFrom, null)
   store.markRetry(oldest.id, 'database busy', 1000)
   const legacy = { device_id: 'Hozain_01', timestamp: '2026-07-17T10:00:03Z' }
   assert.equal(store.enqueueLegacy(legacy).duplicate, false)

@@ -1,4 +1,5 @@
 import { getHostIngressStore } from './host-ingress-store.js'
+import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 
 const DEFAULT_POLL_MS = 100
@@ -12,11 +13,13 @@ export function startHostIngressWorker(processPacket, options = {}) {
   if (typeof processPacket !== 'function') throw new TypeError('Host ingress worker requires processPacket')
   const store = options.store || getHostIngressStore()
   const coordinator = options.writeCoordinator || getTelemetryWriteCoordinator()
+  const scheduleReplay = options.scheduleReplay || scheduleReplayAfterBufferedTelemetry
   const pollMs = Math.max(25, Number(options.pollMs) || DEFAULT_POLL_MS)
   let stopped = false
   let running = false
   let timer = null
   let cleanupAt = Date.now() + 60 * 60 * 1000
+  let lastScheduledDirtyFrom = null
 
   async function tick() {
     if (stopped || running) return
@@ -33,7 +36,19 @@ export function startHostIngressWorker(processPacket, options = {}) {
         cleanupAt = Date.now() + 60 * 60 * 1000
       }
       const row = store.claimNext()
-      if (!row) return
+      if (!row) {
+        const stats = store.stats()
+        const queueDrained = stats.pending + stats.retry + stats.processing === 0
+        if (!stats.historyDirtyFrom) {
+          lastScheduledDirtyFrom = null
+        } else if (queueDrained && stats.historyDirtyFrom !== lastScheduledDirtyFrom) {
+          scheduleReplay('host-ingress-history', {
+            historyDirtyFrom: stats.historyDirtyFrom
+          }, { bufferDrained: true })
+          lastScheduledDirtyFrom = stats.historyDirtyFrom
+        }
+        return
+      }
       claimedRow = true
       try {
         const payload = JSON.parse(row.raw_body)

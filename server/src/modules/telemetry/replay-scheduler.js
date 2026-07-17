@@ -3,6 +3,7 @@ import { dirname, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
+import { getHostIngressStore } from './host-ingress-store.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -51,6 +52,7 @@ export class CalculatedReplayScheduler {
     this.bufferDrainedDebounceMs = normalizeDelayMs(options.bufferDrainedDebounceMs, DEFAULT_BUFFER_DRAINED_DEBOUNCE_MS, 1)
     this.drainTimeoutMs = normalizeDelayMs(options.drainTimeoutMs, DEFAULT_DRAIN_TIMEOUT_MS, 1)
     this.failureBackoffMs = normalizeDelayMs(options.failureBackoffMs, DEFAULT_FAILURE_BACKOFF_MS, 1)
+    this.onReplaySuccess = options.onReplaySuccess || (() => {})
 
     this.timer = null
     this.state = 'idle'
@@ -163,10 +165,17 @@ export class CalculatedReplayScheduler {
         error: error?.message || String(error)
       }
     }
-    this.coordinator.resume()
     this.lastCompletedAtMs = this.now()
 
     if (result.ok) {
+      try {
+        this.onReplaySuccess()
+      } catch (error) {
+        console.error('[RTK buffer replay] post-replay cleanup failed', {
+          error: error?.message || String(error)
+        })
+      }
+      this.coordinator.resume()
       this.state = 'idle'
       this.failureCount = 0
       this.backoffUntilMs = null
@@ -176,6 +185,7 @@ export class CalculatedReplayScheduler {
       return
     }
 
+    this.coordinator.resume()
     this.state = 'backoff'
     this.lastError = result.error
     this.queueRetry(reason, meta)
@@ -252,7 +262,8 @@ const replayScheduler = new CalculatedReplayScheduler({
   bufferQuietDebounceMs: process.env.TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS,
   bufferDrainedDebounceMs: process.env.RTK_BUFFER_DRAINED_REPLAY_DEBOUNCE_MS,
   drainTimeoutMs: process.env.REPLAY_WRITER_DRAIN_TIMEOUT_MS,
-  failureBackoffMs: process.env.REPLAY_FAILURE_BACKOFF_MS
+  failureBackoffMs: process.env.REPLAY_FAILURE_BACKOFF_MS,
+  onReplaySuccess: () => getHostIngressStore().clearHistoryDirty()
 })
 
 export function isCalculatedBatchReplayRunning() {

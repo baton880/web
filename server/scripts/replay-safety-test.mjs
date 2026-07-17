@@ -40,12 +40,14 @@ function createFakeChild() {
 async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   const coordinator = new TelemetryWriteCoordinator()
   const children = []
+  let replaySuccesses = 0
   const scheduler = new CalculatedReplayScheduler({
     coordinator,
     replayDebounceMs: 10,
     bufferQuietDebounceMs: 10,
     drainTimeoutMs: 500,
     failureBackoffMs: 1000,
+    onReplaySuccess: () => { replaySuccesses += 1 },
     spawnProcess: () => {
       const child = createFakeChild()
       children.push(child)
@@ -69,6 +71,7 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   assert.equal(scheduler.getStatus().state, 'running')
   children[0].emit('close', 0, null)
   await waitFor(() => scheduler.getStatus().state === 'idle')
+  assert.equal(replaySuccesses, 1)
   assert.equal(coordinator.snapshot().accepting, true)
   assert.equal(children.length, 1)
 
@@ -76,6 +79,7 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   await waitFor(() => children.length === 2)
   children[1].emit('close', 1, null)
   await waitFor(() => scheduler.getStatus().state === 'backoff')
+  assert.equal(replaySuccesses, 1, 'failed replay must not clear the dirty marker')
   assert.equal(scheduler.getStatus().queued, true)
   assert.equal(coordinator.snapshot().accepting, true)
   scheduler.stop()

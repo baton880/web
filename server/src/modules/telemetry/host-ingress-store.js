@@ -183,6 +183,10 @@ export class HostIngressStore {
     `).run(value, isoNow())
   }
 
+  clearHistoryDirty() {
+    return this.db.prepare(`DELETE FROM host_ingress_meta WHERE key='history_dirty_from'`).run().changes
+  }
+
   cleanup() {
     const cutoff = new Date(Date.now() - PROCESSED_RETENTION_MS).toISOString()
     return this.db.prepare(`DELETE FROM host_ingress WHERE status='processed' AND processed_at < ?`).run(cutoff).changes
