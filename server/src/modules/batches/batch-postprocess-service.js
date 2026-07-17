@@ -873,7 +873,7 @@ export async function postprocessCompletedBatch(prismaClient, batchId, telemetry
     return result
   }
 
-  await prismaClient.$transaction(async (tx) => {
+  const persistResult = async (tx) => {
     await tx.batchIngredient.deleteMany({ where: { batchId: batch.id } })
 
     for (const ingredient of result.ingredients) {
@@ -899,7 +899,15 @@ export async function postprocessCompletedBatch(prismaClient, batchId, telemetry
         endWeight: result.analysis.last ?? batch.endWeight
       }
     })
-  })
+  }
+
+  if (typeof prismaClient.$transaction === 'function') {
+    await prismaClient.$transaction(persistResult)
+  } else {
+    // Replay already owns one long-lived transaction. Prisma transaction clients
+    // intentionally do not expose $transaction, so reuse the outer transaction.
+    await persistResult(prismaClient)
+  }
 
   await recalculateBatchViolations(prismaClient, batch.id, telemetrySettings)
   const nextEntry = POSTPROCESS_CACHE.get(batch.id)

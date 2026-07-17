@@ -5,7 +5,7 @@ import {
   recordRtkIngestResult,
   recordRtkMalformedRequest
 } from './rtk-ingest-monitor.js'
-import { isCalculatedBatchReplayRunning } from './replay-scheduler.js'
+import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 
 const DEFAULT_POLL_MS = 200
 const MAX_BACKOFF_MS = 60 * 1000
@@ -20,6 +20,9 @@ export function startRtkIngressWorker(processBody, options = {}) {
   }
 
   const store = options.store || getRtkIngressStore()
+  const writeCoordinator = options.writeCoordinator || getTelemetryWriteCoordinator()
+  const recordResult = options.recordResult || recordRtkIngestResult
+  const recordMalformed = options.recordMalformed || recordRtkMalformedRequest
   const pollMs = Math.max(25, Number(options.pollMs) || DEFAULT_POLL_MS)
   let stopped = false
   let running = false
@@ -28,7 +31,8 @@ export function startRtkIngressWorker(processBody, options = {}) {
 
   async function tick() {
     if (stopped || running) return
-    if (isCalculatedBatchReplayRunning()) {
+    const writeLease = writeCoordinator.tryAcquire('rtk')
+    if (!writeLease) {
       timer = setTimeout(tick, pollMs)
       return
     }
@@ -46,7 +50,7 @@ export function startRtkIngressWorker(processBody, options = {}) {
       try {
         body = JSON.parse(row.raw_body)
       } catch (error) {
-        await recordRtkMalformedRequest(row.raw_body, error, new Date(row.received_at), { alreadyAcknowledged: true })
+        await recordMalformed(row.raw_body, error, new Date(row.received_at), { alreadyAcknowledged: true })
         store.markPermanent(row.id, `malformed JSON: ${error.message}`)
         return
       }
@@ -54,7 +58,7 @@ export function startRtkIngressWorker(processBody, options = {}) {
       try {
         const receivedAt = new Date(row.received_at)
         const result = await processBody(body, receivedAt)
-        await recordRtkIngestResult(body, result, receivedAt)
+        await recordResult(body, result, receivedAt)
         if (result.received > 0 && result.accepted === 0 && result.dropped === result.received) {
           const summary = result.validationErrors?.map((entry) => entry.error).join('; ') || 'all packets invalid'
           store.markPermanent(row.id, summary)
@@ -72,6 +76,7 @@ export function startRtkIngressWorker(processBody, options = {}) {
         store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts))
       }
     } finally {
+      writeLease.release()
       running = false
       if (!stopped) timer = setTimeout(tick, pollMs)
     }

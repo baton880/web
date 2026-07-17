@@ -11,10 +11,12 @@ import { roundNonNegativeWeight, roundOptionalWeight, roundWeight } from '../../
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
-import { isCalculatedBatchReplayRunning, scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 
 const router = Router()
+const telemetryWriteCoordinator = getTelemetryWriteCoordinator()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
 const MAX_TELEMETRY_HISTORY_LIMIT = 20000
@@ -371,10 +373,11 @@ async function inferMachineStateFromDatabase(
 // POST / - ПРИЕМ ТЕЛЕМЕТРИИ
 // ============================================================================
 router.post('/', async (req, res) => {
-  if (isCalculatedBatchReplayRunning()) {
+  const writeLease = telemetryWriteCoordinator.tryAcquire('host')
+  if (!writeLease) {
     res.set('Retry-After', '5')
     return res.status(503).json({
-      error: 'Calculated batch replay is running; retry telemetry later',
+      error: 'Calculated batch replay is preparing or running; retry telemetry later',
       retryable: true
     })
   }
@@ -893,6 +896,8 @@ router.post('/', async (req, res) => {
   } catch (error) {
     console.error('[Ошибка POST /]:', error);
     res.status(500).json({ error: 'Internal server error' });
+  } finally {
+    writeLease.release()
   }
 });
 

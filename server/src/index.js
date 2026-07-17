@@ -7,6 +7,9 @@
   import telemetryRouter from './modules/telemetry/telemetry.routes.js'
   import rtkTelemetryRouter, { handleRtkTelemetryPost, processRtkTelemetryBody } from './modules/telemetry/rtk.routes.js'
   import { startRtkIngressWorker } from './modules/telemetry/rtk-ingress-worker.js'
+  import { getRtkIngressStats } from './modules/telemetry/rtk-ingress-store.js'
+  import { getCalculatedReplayStatus } from './modules/telemetry/replay-scheduler.js'
+  import { getTelemetryWriteCoordinatorStatus } from './modules/telemetry/telemetry-write-coordinator.js'
   import telemetryWarningsRouter from './modules/telemetry/warnings.routes.js'
   import telemetrySettingsRouter from './modules/telemetry/telemetry-settings.routes.js'
   import storageZonesRouter from './modules/storage-zones/storage-zones.routes.js'
@@ -90,13 +93,31 @@
     try {
       // Делаем легкий запрос к базе, чтобы убедиться, что Prisma жива
       await prisma.$queryRaw`SELECT 1`;
+
+      let rtkIngress
+      try {
+        const stats = getRtkIngressStats()
+        rtkIngress = {
+          pending: stats.pending,
+          retry: stats.retry,
+          processing: stats.processing,
+          processed: stats.processed,
+          permanent: stats.permanent,
+          oldestPendingAgeSeconds: stats.oldestPendingAgeSeconds
+        }
+      } catch (error) {
+        rtkIngress = { error: error?.message || String(error) }
+      }
       
       // Формируем красивый ответ
       res.json({
         status: 'ok',
         message: 'Сервер работает нормально',
         uptime: Math.floor(process.uptime()) + ' секунд',
-        timestamp: new Date().toISOString()
+        timestamp: new Date().toISOString(),
+        calculatedReplay: getCalculatedReplayStatus(),
+        telemetryWriters: getTelemetryWriteCoordinatorStatus(),
+        rtkIngress
       });
     } catch (error) {
       console.error('[Healthcheck Error]: База данных недоступна', error);

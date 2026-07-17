@@ -11,12 +11,13 @@ import { postprocessCompletedBatch } from '../src/modules/batches/batch-postproc
 import { recordLeftoverViolation } from '../src/modules/violations/violation-service.js'
 import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/loading-zone-correction.js'
 
-const prisma = new PrismaClient()
+const prismaClient = new PrismaClient()
+let prisma = prismaClient
 
-await prisma.$connect()
-await prisma.$queryRawUnsafe('PRAGMA journal_mode=WAL')
-await prisma.$queryRawUnsafe('PRAGMA busy_timeout=10000')
-await prisma.$queryRawUnsafe('PRAGMA synchronous=NORMAL')
+await prismaClient.$connect()
+await prismaClient.$queryRawUnsafe('PRAGMA journal_mode=WAL')
+await prismaClient.$queryRawUnsafe('PRAGMA busy_timeout=10000')
+await prismaClient.$queryRawUnsafe('PRAGMA synchronous=NORMAL')
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
@@ -41,6 +42,14 @@ const REPLAY_FROM = (() => {
   }
   return parsed
 })()
+const REPLAY_TRANSACTION_TIMEOUT_MS = Math.max(
+  60 * 1000,
+  Number(process.env.REPLAY_TRANSACTION_TIMEOUT_MS) || 30 * 60 * 1000
+)
+const REPLAY_TRANSACTION_MAX_WAIT_MS = Math.max(
+  10 * 1000,
+  Number(process.env.REPLAY_TRANSACTION_MAX_WAIT_MS) || 60 * 1000
+)
 
 function parseBoolean(value) {
   if (typeof value === 'boolean') return value
@@ -748,11 +757,9 @@ async function removeOrphanMicroBatches(batchIdsToRecalculate, settings = {}) {
     if (roundNonNegativeWeight(batch.startWeight) > emptyThresholdKg) continue
     if (roundNonNegativeWeight(batch.endWeight) > emptyThresholdKg) continue
 
-    await prisma.$transaction([
-      prisma.violation.deleteMany({ where: { batchId: batch.id } }),
-      prisma.batchIngredient.deleteMany({ where: { batchId: batch.id } }),
-      prisma.batch.delete({ where: { id: batch.id } })
-    ])
+    await prisma.violation.deleteMany({ where: { batchId: batch.id } })
+    await prisma.batchIngredient.deleteMany({ where: { batchId: batch.id } })
+    await prisma.batch.delete({ where: { id: batch.id } })
     batchIdsToRecalculate.delete(batch.id)
     removed += 1
   }
@@ -820,11 +827,9 @@ async function removeOrphanPreludeChains(batchIdsToRecalculate, settings = {}) {
   }
 
   for (const batchId of removableIds) {
-    await prisma.$transaction([
-      prisma.violation.deleteMany({ where: { batchId } }),
-      prisma.batchIngredient.deleteMany({ where: { batchId } }),
-      prisma.batch.delete({ where: { id: batchId } })
-    ])
+    await prisma.violation.deleteMany({ where: { batchId } })
+    await prisma.batchIngredient.deleteMany({ where: { batchId } })
+    await prisma.batch.delete({ where: { id: batchId } })
     batchIdsToRecalculate.delete(batchId)
   }
 
@@ -887,7 +892,7 @@ async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
   return aligned
 }
 
-async function main() {
+async function runReplay() {
   telemetryProcessor.clearStates()
 
   const replayTelemetryWhere = REPLAY_FROM ? { timestamp: { gte: REPLAY_FROM } } : {}
@@ -938,6 +943,9 @@ async function main() {
   console.log(`Active zones: ${activeZones.length}, loading zones: ${loadingZones.length}`)
   console.log('Clearing calculated batches...')
   await resetCalculatedTables()
+  if (String(process.env.REPLAY_FAIL_AFTER_RESET || '').trim() === '1') {
+    throw new Error('Forced replay failure after calculated-table reset')
+  }
 
   console.log('Loading RTK index...')
   const rtkIndex = indexRtkPoints(await prisma.rtkTelemetry.findMany({
@@ -1421,8 +1429,7 @@ async function main() {
     }
   })
 
-  console.log('Replay complete')
-  console.log(JSON.stringify({
+  return {
     stats,
     postprocessStats,
     removedMicroBatches,
@@ -1445,7 +1452,24 @@ async function main() {
         addedAt: item.addedAt
       }))
     }))
-  }, null, 2))
+  }
+}
+
+async function main() {
+  const summary = await prismaClient.$transaction(async (transactionClient) => {
+    prisma = transactionClient
+    try {
+      return await runReplay()
+    } finally {
+      prisma = prismaClient
+    }
+  }, {
+    maxWait: REPLAY_TRANSACTION_MAX_WAIT_MS,
+    timeout: REPLAY_TRANSACTION_TIMEOUT_MS
+  })
+
+  console.log('Replay complete')
+  console.log(JSON.stringify(summary, null, 2))
 }
 
 main()
@@ -1454,5 +1478,5 @@ main()
     process.exitCode = 1
   })
   .finally(async () => {
-    await prisma.$disconnect()
+    await prismaClient.$disconnect()
   })

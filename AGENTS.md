@@ -84,3 +84,37 @@ node scripts/replay-batches-from-telemetry.mjs
 - Сайт запущен локально на `http://127.0.0.1:3000`; `/api/health` и `/` отвечают HTTP 200. Логи снимка: `tmp/server_snapshot_20260715/local-site-3000.out.log` и `local-site-3000.err.log`.
 - Финальная обработанная БД сохранена в `tmp/farm-dev-latest-20260715-replayed.db` и установлена как `tmp/dev.db`; прежний файл сохранён в `tmp/dev-before-server-replay-20260715.db`.
 - Карты главной и замеса: разрывы треков host/погрузчика рисуются отдельно как пунктир. Для не-админов такие сегменты, а также пунктирные линии ингредиентных участков на карте замеса, не отображаются. Администратор может отдельно включать/выключать разрывы host и погрузчика; выбор сохраняется в `localStorage` браузера.
+
+## Последний replay на 2026-07-16
+
+- Свежий целостный снимок расположен в `C:\Users\Windows\projects\tmp\server_snapshot_20260716\server-dev.db`; рабочая обработанная копия — `replay-dev.db` в том же каталоге. Исходный snapshot не изменять.
+- Перед replay текущий код требует миграцию `20260715000100_add_rtk_ingest_key`: запускать `npx prisma migrate deploy` с `DATABASE_URL`, указывающим на рабочую копию. В production-снимке колонки `RtkTelemetry.ingestKey` на момент скачивания не было.
+- Полный replay завершён успешно: 338085 `Telemetry`, 28719 `RtkTelemetry`, 120 `Batch`, 743 `BatchIngredient`, 305 `Violation`; `PRAGMA integrity_check = ok`. Postprocessing выполнен для 120/120 завершённых замесов.
+- Локальный сайт запущен на `http://127.0.0.1:3000` с этой рабочей БД, `DATA_RETENTION_ENABLED=false` и `RTK_BUFFER_REPLAY_ENABLED=0`; логи: `tmp/server_snapshot_20260716/local-site-3000.out.log` и `local-site-3000.err.log`.
+
+## Production-деплой 2026-07-16
+
+- Сервер `/opt/farm-server` обновлён fast-forward до `a62e346` (`Add admin controls for dashed map gaps`), зависимости установлены через `npm ci`, миграция `20260715000100_add_rtk_ingest_key` применена.
+- Перед деплоем создан и проверен полный архив `/opt/backups/farm-site/farm-site-full_20260716_105310.tar.gz`; отдельный целостный SQLite-снимок: `/opt/backups/farm-site/server-dev-before-deploy_20260716_105309.db`.
+- После первого запуска новый retention scheduler удалил 9859 старых host-пакетов по политике 14 дней. Пакеты восстановлены из преддеплойного SQLite-снимка, а в production `.env` установлено `DATA_RETENTION_ENABLED=false`, чтобы сохранять полную raw-историю для будущих replay.
+- Финальный полный replay выполнен по 349418 `Telemetry` и 31113 `RtkTelemetry`: 121 `Batch`, 747 `BatchIngredient`, 318 `Violation`, 0 открытых замесов; postprocessing выполнен для 121/121 завершённых замесов.
+- После запуска production-БД прошла `PRAGMA integrity_check = ok`; локальный и публичный `/api/health`, а также `https://vi-korm.ru/` отвечают успешно. PM2-приложение `farm-server` запущено online.
+
+## Production-инцидент SQLite 2026-07-16
+
+- После деплоя массовая досылка старого host-буфера запланировала автоматический полный replay. Replay, live host-транзакции и RTK worker одновременно писали в SQLite; Prisma начала возвращать `P1008/P2028`, а nginx — `504` для треков, замесов и админки. Сам файл БД оставался исправным и проходил `quick_check`.
+- Hotfix `49d5ff2` приостанавливает записи host и обработку RTK durable inbox на время рассчитанного replay: host получает retryable HTTP 503 и сохраняет пакет на устройстве, RTK остаётся в inbox; после replay оба потока автоматически продолжаются.
+- `RTK_BUFFER_REPLAY_ENABLED=1` возвращён после деплоя hotfix. `DATA_RETENTION_ENABLED=false` оставлен намеренно для сохранения полной raw-истории.
+- В nginx добавлен защитный лимит только для `POST /api/telemetry/host`: 4 запроса/с с небольшим burst и HTTP 503 на превышение. Штатная частота 1 запрос/с не ограничивается; всплеск старого буфера выгружается постепенно без потери данных.
+- После исправления `/api/batches`, host/RTK recent/current и host admin history отвечали за 5–14 мс, health — за несколько миллисекунд; RTK inbox имел только `processed` записи, новых ошибок блокировки после рестарта не было.
+
+## Повторный SQLite-инцидент и безопасный replay 2026-07-17
+
+- Причина повторения: проверка `replayRunning` останавливала только новые host/RTK-записи, но replay не ждал завершения запросов, которые уже прошли проверку и выполняли чтение/транзакцию. Старый host-буфер продолжал ставить полные replay, конкурентные писатели вызывали `P1008/P2028`, nginx `504` и клиентские `499`.
+- Перед стабилизацией созданы и проверены: `/opt/backups/farm-site/server-dev-before-replay-stabilization_20260717_042355.db`, копия production `.env` и `/opt/backups/farm-site/farm-nginx-before-replay-stabilization_20260717_042355.conf`. Production-БД прошла `quick_check`.
+- Для аварийной разгрузки `RTK_BUFFER_REPLAY_ENABLED` временно установлен в `0`; `DATA_RETENTION_ENABLED=false` и nginx-лимит host ingest 4 запроса/с не менялись. Перед возвратом автопересчёта дождаться: RTK `pending/retry/processing = 0`, 30 минут без host-пакетов с задержкой более 5 минут, актуальные timestamps отстают не более чем на 2 минуты.
+- Новый `telemetry-write-coordinator.js` закрывает admission перед replay, считает активных host/RTK-писателей и позволяет scheduler запустить дочерний процесс только после полного drain. Host в закрытом окне получает retryable `503`; RTK остаётся в отдельном durable inbox.
+- Replay-сигналы объединяются, стандартный quiet window — 30 минут. Состояния scheduler: `idle`, `draining`, `running`, `backoff`; после ошибки применяется ограниченный экспоненциальный backoff без немедленного повторного запуска.
+- Полный replay выполняет очистку, построение и постпроцессинг `Batch`, `BatchIngredient`, `Violation` в одной Prisma-транзакции. Ошибка откатывает все расчётные изменения; raw `Telemetry`/`RtkTelemetry` не меняются.
+- `/api/health` дополнительно возвращает `calculatedReplay`, `telemetryWriters` и безопасную сводку `rtkIngress`. Основные параметры: `TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS`, `REPLAY_WRITER_DRAIN_TIMEOUT_MS`, `REPLAY_FAILURE_BACKOFF_MS`, `REPLAY_TRANSACTION_TIMEOUT_MS`.
+- Проверка на отдельной копии `tmp/server_snapshot_20260716/replay-atomic-validation-20260717.db`: 338085 host + 28719 RTK обработаны за 68 секунд; результат 120 замесов, 743 компонента, 305 нарушений, raw-счётчики неизменны, `quick_check = ok`. Запуск тестов: `npm run test:replay-safety` плюс шесть существующих наборов.
