@@ -75,6 +75,10 @@ export function startRtkIngressWorker(processBody, options = {}) {
         }
         store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts))
       }
+    } catch (error) {
+      console.warn('[RTK ingress worker] Queue operation will be retried', {
+        error: error?.message || String(error)
+      })
     } finally {
       writeLease.release()
       running = false

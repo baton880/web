@@ -9,6 +9,8 @@ datasource db {
 
 model Telemetry {
   id             Int      @id @default(autoincrement())
+  sourceStreamId String?
+  sourcePacketId Int?
   deviceId       String
   timestamp      DateTime
   receivedAt     DateTime @default(now())
@@ -30,6 +32,7 @@ model Telemetry {
 
   @@index([deviceId, timestamp])
   @@index([timestamp])
+  @@unique([deviceId, sourceStreamId, sourcePacketId])
 }
 
 model RtkTelemetry {

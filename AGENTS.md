@@ -120,3 +120,11 @@ node scripts/replay-batches-from-telemetry.mjs
 - Проверка на отдельной копии `tmp/server_snapshot_20260716/replay-atomic-validation-20260717.db`: 338085 host + 28719 RTK обработаны за 68 секунд; результат 120 замесов, 743 компонента, 305 нарушений, raw-счётчики неизменны, `quick_check = ok`. Запуск тестов: `npm run test:replay-safety` плюс шесть существующих наборов.
 - Исправление `3d81d67` развёрнуто в production. После деплоя `RTK_BUFFER_REPLAY_ENABLED=1` возвращён, quiet window явно установлен в 1800000 мс, writer drain — 60000 мс, transaction timeout — 1800000 мс; `DATA_RETENTION_ENABLED=false` сохранён. Старый host-буфер движется примерно на 72 секунды исходной истории за 13 минут реального времени, поэтому полный replay автоматически откладывается каждым старым пакетом до настоящего 30-минутного quiet window.
 - После деплоя RTK inbox разгружен (`pending/retry/processing = 0`), защищённые API отвечают примерно за 5–12 мс, новых nginx `504` и новых записей `P1008/P2028` в PM2 error log не обнаружено. Production health показывает `calculatedReplay.state=idle`, `queued=true` при наличии старого буфера и открытый writer admission.
+
+## Durable host ingress — локальная реализация 2026-07-17
+
+- Host POST больше не выполняет тяжёлую Prisma-транзакцию до ответа: одиночный и batch endpoint сначала синхронно пишут в `server/runtime/host-ingress.sqlite3` (WAL, `synchronous=FULL`) и возвращают HTTP 202.
+- Batch v1 принимает до 50 пакетов, `stream_id`, `live_packet_id` и `packet_id`; миграция `20260717000100_add_host_source_identity` добавляет постоянную idempotency-уникальность в `Telemetry`.
+- Host worker обрабатывает live-записи раньше backlog. Старые записи только обновляют `historyDirtyFrom`; автоматический полный replay на каждый пакет удалён.
+- `TelemetryWriteCoordinator` допускает максимум одного host/RTK-писателя. `/api/health` содержит `hostIngress` и безопасные счётчики очереди.
+- На копии снимка 2026-07-17 принято 5200 пакетов: HTTP p95 21.8 мс, процесс остался жив, SQLite `integrity_check=ok`. Production rollout ещё требует отдельного backup/deploy шага.

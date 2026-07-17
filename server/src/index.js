@@ -4,7 +4,9 @@
   import cors from 'cors'
   import path from 'path'
   import { fileURLToPath } from 'url'
-  import telemetryRouter from './modules/telemetry/telemetry.routes.js'
+  import telemetryRouter, { processHostTelemetryPacket } from './modules/telemetry/telemetry.routes.js'
+  import { startHostIngressWorker } from './modules/telemetry/host-ingress-worker.js'
+  import { getHostIngressStats } from './modules/telemetry/host-ingress-store.js'
   import rtkTelemetryRouter, { handleRtkTelemetryPost, processRtkTelemetryBody } from './modules/telemetry/rtk.routes.js'
   import { startRtkIngressWorker } from './modules/telemetry/rtk-ingress-worker.js'
   import { getRtkIngressStats } from './modules/telemetry/rtk-ingress-store.js'
@@ -108,6 +110,22 @@
       } catch (error) {
         rtkIngress = { error: error?.message || String(error) }
       }
+      let hostIngress
+      try {
+        const stats = getHostIngressStats()
+        hostIngress = {
+          pending: stats.pending,
+          retry: stats.retry,
+          processing: stats.processing,
+          processed: stats.processed,
+          permanent: stats.permanent,
+          oldestPendingAgeSeconds: stats.oldestPendingAgeSeconds,
+          historyDirtyFrom: stats.historyDirtyFrom,
+          lastError: stats.lastError
+        }
+      } catch (error) {
+        hostIngress = { error: error?.message || String(error) }
+      }
       
       // Формируем красивый ответ
       res.json({
@@ -117,6 +135,7 @@
         timestamp: new Date().toISOString(),
         calculatedReplay: getCalculatedReplayStatus(),
         telemetryWriters: getTelemetryWriteCoordinatorStatus(),
+        hostIngress,
         rtkIngress
       });
     } catch (error) {
@@ -205,6 +224,7 @@
   startDigestScheduler(prisma)
   startRtkTrackScheduler(prisma)
   startDataRetentionScheduler(prisma)
+  startHostIngressWorker(processHostTelemetryPacket)
   startRtkIngressWorker(processRtkTelemetryBody)
 
   // Запуск

@@ -18,6 +18,7 @@
     "scenario:loading-zones": "node scripts/loading-zone-routes-scenario.mjs",
     "capacity:test": "node scripts/capacity-test.mjs",
     "test:rtk-ingress": "node scripts/rtk-ingress-store-test.mjs",
+    "test:host-ingress": "node scripts/host-ingress-store-test.mjs",
     "test:replay-safety": "node scripts/replay-safety-test.mjs"
   },
   "dependencies": {

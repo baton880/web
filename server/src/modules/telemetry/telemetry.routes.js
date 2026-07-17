@@ -11,12 +11,11 @@ import { roundNonNegativeWeight, roundOptionalWeight, roundWeight } from '../../
 import { recordLeftoverViolation } from '../violations/violation-service.js'
 import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-store.js'
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
-import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
-import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
+import { getHostIngressStore } from './host-ingress-store.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 
 const router = Router()
-const telemetryWriteCoordinator = getTelemetryWriteCoordinator()
+const hostIngressStore = getHostIngressStore()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
 const MAX_TELEMETRY_HISTORY_LIMIT = 20000
@@ -372,21 +371,40 @@ async function inferMachineStateFromDatabase(
 // ============================================================================
 // POST / - ПРИЕМ ТЕЛЕМЕТРИИ
 // ============================================================================
-router.post('/', async (req, res) => {
-  const writeLease = telemetryWriteCoordinator.tryAcquire('host')
-  if (!writeLease) {
-    res.set('Retry-After', '5')
-    return res.status(503).json({
-      error: 'Calculated batch replay is preparing or running; retry telemetry later',
-      retryable: true
-    })
+export class HostTelemetryValidationError extends Error {
+  constructor(message) {
+    super(message)
+    this.name = 'HostTelemetryValidationError'
+    this.permanent = true
   }
+}
 
-  try {
-    const receivedAt = new Date()
-    let packet = normalizeTelemetryPacket(req.body);
+export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
+    let packet = normalizeTelemetryPacket(body);
+    if (!(packet.timestamp instanceof Date) || Number.isNaN(packet.timestamp.getTime())) {
+      throw new HostTelemetryValidationError('Invalid telemetry timestamp')
+    }
     const deviceId = packet.deviceId;
-    const rawPayload = stringifyRawPayload(req.body)
+    const rawPayload = stringifyRawPayload(body)
+
+    if (identity.streamId && Number.isInteger(identity.packetId)) {
+      const existing = await prisma.telemetry.findFirst({
+        where: {
+          deviceId,
+          sourceStreamId: identity.streamId,
+          sourcePacketId: identity.packetId
+        },
+        select: { id: true, timestamp: true }
+      })
+      if (existing) {
+        return {
+          status: 'duplicate',
+          id: existing.id,
+          outOfOrder: false,
+          timestamp: existing.timestamp.toISOString()
+        }
+      }
+    }
 
     // 1. Достаем геозоны из базы
     const [activeZones, groupsWithZones, telemetrySettings, activeBatchForHints, latestStoredTelemetry] = await Promise.all([
@@ -469,7 +487,7 @@ router.post('/', async (req, res) => {
 
     if (!result.isValid) {
       console.warn(`[Фильтр] Отброшен невалидный пакет от ${deviceId}:`, result.error);
-      return res.status(400).json({ error: result.error || 'Invalid coordinates' });
+      throw new HostTelemetryValidationError(result.error || 'Invalid coordinates')
     }
 
     let telemetry = null
@@ -488,6 +506,8 @@ router.post('/', async (req, res) => {
     await prisma.$transaction(async (tx) => {
       telemetry = await tx.telemetry.create({
         data: {
+          sourceStreamId: identity.streamId || null,
+          sourcePacketId: Number.isInteger(identity.packetId) ? identity.packetId : null,
           deviceId: deviceId,
           timestamp: packet.timestamp,
           receivedAt,
@@ -870,36 +890,72 @@ router.post('/', async (req, res) => {
       telemetryProcessor.clearDeviceState(deviceId)
     }
 
-    if (shouldScheduleReplay) {
-      const replay = scheduleReplayAfterBufferedTelemetry('host-buffer-out-of-order', {
-        deviceId,
-        telemetryId: telemetry?.id || null,
-        packetTimestamp: packet.timestamp,
-        latestKnownTimestamp: latestStoredTelemetry?.timestamp || null,
-        receivedAt
-      })
-
-      if (replay.scheduled) {
-        console.log('[Host ingest background]: scheduled replay after out-of-order buffered telemetry', {
-          deviceId,
-          telemetryId: telemetry?.id || null,
-          packetTimestamp: packet.timestamp?.toISOString?.() || null,
-          latestKnownTimestamp: latestStoredTelemetry?.timestamp?.toISOString?.() || null,
-          delayMs: replay.delayMs
-        })
-      }
+    return {
+      status: 'ok',
+      id: telemetry.id,
+      banner: result.banner,
+      outOfOrder: shouldScheduleReplay,
+      timestamp: packet.timestamp.toISOString()
     }
+}
 
-    // Возвращаем ответ контроллеру трактора
-    res.status(201).json({ status: 'ok', id: telemetry.id, banner: result.banner });
-
-  } catch (error) {
-    console.error('[Ошибка POST /]:', error);
-    res.status(500).json({ error: 'Internal server error' });
-  } finally {
-    writeLease.release()
+function normalizeBatchEnvelope(body) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    throw new HostTelemetryValidationError('Batch body must be an object')
   }
-});
+  if (Number(body.protocol_version) !== 1) throw new HostTelemetryValidationError('Unsupported protocol_version')
+  const deviceId = String(body.device_id || '').trim()
+  const streamId = String(body.stream_id || '').trim()
+  if (!deviceId || !streamId || deviceId.length > 128 || streamId.length > 128) {
+    throw new HostTelemetryValidationError('device_id and stream_id are required')
+  }
+  if (!Array.isArray(body.packets) || body.packets.length < 1 || body.packets.length > 50) {
+    throw new HostTelemetryValidationError('packets must contain 1..50 entries')
+  }
+  if (Buffer.byteLength(JSON.stringify(body), 'utf8') > 1024 * 1024) {
+    throw new HostTelemetryValidationError('Batch body exceeds 1 MiB')
+  }
+  const packetIds = new Set()
+  const packets = body.packets.map((entry) => {
+    const packetId = Number(entry?.packet_id)
+    if (!Number.isSafeInteger(packetId) || packetId <= 0 || packetIds.has(packetId)) {
+      throw new HostTelemetryValidationError('packet_id must be a unique positive integer')
+    }
+    if (!entry.payload || typeof entry.payload !== 'object' || Array.isArray(entry.payload)) {
+      throw new HostTelemetryValidationError(`packet ${packetId} payload must be an object`)
+    }
+    packetIds.add(packetId)
+    return { packetId, payload: { ...entry.payload, device_id: deviceId, deviceId } }
+  })
+  const livePacketId = Number(body.live_packet_id)
+  if (!packetIds.has(livePacketId)) throw new HostTelemetryValidationError('live_packet_id must identify a packet in this batch')
+  return { deviceId, streamId, livePacketId, packets }
+}
+
+router.post('/batch', (req, res) => {
+  try {
+    const accepted = hostIngressStore.enqueueBatch(normalizeBatchEnvelope(req.body), new Date())
+    return res.status(202).json({ status: 'accepted', receipt_id: accepted.receiptId, acked_packet_ids: accepted.ackedPacketIds })
+  } catch (error) {
+    const status = error?.permanent ? 400 : 503
+    if (status === 503) res.set('Retry-After', '5')
+    return res.status(status).json({ error: error?.message || 'Host ingress unavailable', retryable: status === 503 })
+  }
+})
+
+router.post('/', (req, res) => {
+  try {
+    if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
+      throw new HostTelemetryValidationError('Telemetry body must be an object')
+    }
+    const accepted = hostIngressStore.enqueueLegacy(req.body, new Date())
+    return res.status(202).json({ status: 'accepted', receipt_id: accepted.receiptId })
+  } catch (error) {
+    const status = error?.permanent ? 400 : 503
+    if (status === 503) res.set('Retry-After', '5')
+    return res.status(status).json({ error: error?.message || 'Host ingress unavailable', retryable: status === 503 })
+  }
+})
 
 // ============================================================================
 // POST /manual-stop - РУЧНАЯ ОСТАНОВКА АКТИВНОГО ЗАМЕСА

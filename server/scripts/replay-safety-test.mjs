@@ -55,6 +55,7 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
 
   const hostLease = coordinator.tryAcquire('host')
   const rtkLease = coordinator.tryAcquire('rtk')
+  assert.equal(rtkLease, null, 'SQLite coordinator must allow only one writer')
   for (let index = 0; index < 100; index += 1) {
     scheduler.schedule('host-buffer-out-of-order', { index }, 10)
   }
@@ -64,10 +65,6 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   assert.equal(coordinator.tryAcquire('host'), null)
 
   hostLease.release()
-  await delay(20)
-  assert.equal(children.length, 0)
-  rtkLease.release()
-
   await waitFor(() => children.length === 1)
   assert.equal(scheduler.getStatus().state, 'running')
   children[0].emit('close', 0, null)

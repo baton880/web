@@ -15,7 +15,11 @@ export class TelemetryWriteCoordinator {
   }
 
   tryAcquire(source = 'unknown') {
-    if (!this.accepting) return null
+    // SQLite permits several readers, but concurrent long-lived write
+    // transactions are exactly what caused the production timeout storm.
+    // Admission is therefore a real process-local mutex, not just a replay
+    // gate. Host and RTK ingress workers retry when the lease is unavailable.
+    if (!this.accepting || this.activeWriters >= 1) return null
 
     const normalizedSource = String(source || 'unknown')
     this.activeWriters += 1
