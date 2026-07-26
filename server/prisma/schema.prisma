@@ -18,6 +18,7 @@ model Telemetry {
   lon            Float
   gpsValid       Boolean  @default(false)
   gpsSatellites  Int      @default(0)
+  gpsAgeS        Float?
   speedKmh       Float?
   weight         Float
   rawWeight      Float?
@@ -29,10 +30,23 @@ model Telemetry {
   lteRssiDbm     Int?
   lteAccessTech  String?
   eventsReaderOk Boolean  @default(false)
+  currentFor     DeviceCurrentTelemetry?
 
   @@index([deviceId, timestamp])
   @@index([timestamp])
   @@unique([deviceId, sourceStreamId, sourcePacketId])
+}
+
+model DeviceCurrentTelemetry {
+  deviceId       String    @id
+  telemetryId    Int       @unique
+  sourceStreamId String?
+  sourcePacketId Int?
+  receivedAt     DateTime
+  updatedAt      DateTime  @updatedAt
+  telemetry      Telemetry @relation(fields: [telemetryId], references: [id], onDelete: Cascade)
+
+  @@index([receivedAt])
 }
 
 model RtkTelemetry {

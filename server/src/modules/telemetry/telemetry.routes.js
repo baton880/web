@@ -219,6 +219,7 @@ function normalizeTelemetryPacket(packet) {
     lon: Number(packet.lon || 0),
     gpsValid: parseBoolean(packet.gpsValid ?? packet.gps_valid),
     gpsSatellites: Number(packet.gpsSatellites ?? packet.gps_satellites ?? 0),
+    gpsAgeS: parseOptionalNumber(packet.gpsAgeS ?? packet.gps_age_s),
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
     rawWeight: parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight),
@@ -256,7 +257,7 @@ function applyWeightCalibration(packet, telemetrySettings = {}) {
 function buildEmptyLatestResponse(deviceId = null) {
   return {
     id: null, deviceId, timestamp: null, receivedAt: null, lat: null, lon: null,
-    speedKmh: null, weight: null, rawWeight: null, weightValid: false, gpsValid: false, gpsSatellites: 0,
+    speedKmh: null, weight: null, rawWeight: null, weightValid: false, gpsValid: false, gpsSatellites: 0, gpsAgeS: null,
     gpsQuality: 0, wifiClients: null, cpuTempC: null, lteRssiDbm: null,
     lteAccessTech: null, eventsReaderOk: false, banner: null,
     mode: 'Ожидание',
@@ -390,6 +391,7 @@ function buildTelemetryCreateData(packet, receivedAt, rawPayload, identity = {})
     lon: packet.lon,
     gpsValid: packet.gpsValid,
     gpsSatellites: packet.gpsSatellites,
+    gpsAgeS: packet.gpsAgeS,
     speedKmh: packet.speedKmh,
     weight: packet.weight,
     rawWeight: packet.rawWeight,
@@ -402,6 +404,80 @@ function buildTelemetryCreateData(packet, receivedAt, rawPayload, identity = {})
     lteAccessTech: packet.lteAccessTech,
     eventsReaderOk: packet.eventsReaderOk
   }
+}
+
+async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}) {
+  if (!identity.isLive || !telemetry?.id || !telemetry?.deviceId) return false
+
+  const candidateReceivedAt = receivedAt instanceof Date ? receivedAt : new Date(receivedAt)
+  if (Number.isNaN(candidateReceivedAt.getTime())) return false
+
+  const existing = await prisma.deviceCurrentTelemetry.findUnique({
+    where: { deviceId: telemetry.deviceId },
+    select: { receivedAt: true, sourceStreamId: true, sourcePacketId: true }
+  })
+  if (existing) {
+    const candidatePacketId = Number.isInteger(identity.packetId) ? identity.packetId : null
+    const isSameStream = Boolean(identity.streamId) && existing.sourceStreamId === identity.streamId
+    if (
+      isSameStream &&
+      Number.isInteger(existing.sourcePacketId) &&
+      Number.isInteger(candidatePacketId) &&
+      candidatePacketId <= existing.sourcePacketId
+    ) {
+      return false
+    }
+    const existingReceivedAtMs = existing.receivedAt.getTime()
+    const candidateReceivedAtMs = candidateReceivedAt.getTime()
+    if (candidateReceivedAtMs < existingReceivedAtMs) return false
+    if (
+      candidateReceivedAtMs === existingReceivedAtMs &&
+      existing.sourceStreamId === (identity.streamId || null) &&
+      Number.isInteger(existing.sourcePacketId) &&
+      Number.isInteger(identity.packetId) &&
+      identity.packetId <= existing.sourcePacketId
+    ) {
+      return false
+    }
+  }
+
+  await prisma.deviceCurrentTelemetry.upsert({
+    where: { deviceId: telemetry.deviceId },
+    create: {
+      deviceId: telemetry.deviceId,
+      telemetryId: telemetry.id,
+      sourceStreamId: identity.streamId || null,
+      sourcePacketId: Number.isInteger(identity.packetId) ? identity.packetId : null,
+      receivedAt: candidateReceivedAt,
+      updatedAt: new Date()
+    },
+    update: {
+      telemetryId: telemetry.id,
+      sourceStreamId: identity.streamId || null,
+      sourcePacketId: Number.isInteger(identity.packetId) ? identity.packetId : null,
+      receivedAt: candidateReceivedAt,
+      updatedAt: new Date()
+    }
+  })
+  return true
+}
+
+async function findCurrentTelemetry(requestedDeviceId = null) {
+  const current = requestedDeviceId
+    ? await prisma.deviceCurrentTelemetry.findUnique({
+        where: { deviceId: requestedDeviceId },
+        include: { telemetry: true }
+      })
+    : await prisma.deviceCurrentTelemetry.findFirst({
+        orderBy: [{ receivedAt: 'desc' }, { deviceId: 'asc' }],
+        include: { telemetry: true }
+      })
+  if (current?.telemetry) return current.telemetry
+
+  return prisma.telemetry.findFirst({
+    where: requestedDeviceId ? { deviceId: requestedDeviceId } : undefined,
+    orderBy: orderBySourceTimestampDesc()
+  })
 }
 
 export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
@@ -419,9 +495,10 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
           sourceStreamId: identity.streamId,
           sourcePacketId: identity.packetId
         },
-        select: { id: true, timestamp: true }
+        select: { id: true, deviceId: true, timestamp: true, receivedAt: true }
       })
       if (existing) {
+        await updateDeviceCurrentTelemetry(existing, existing.receivedAt, identity)
         return {
           status: 'duplicate',
           id: existing.id,
@@ -455,6 +532,7 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       const telemetry = await prisma.telemetry.create({
         data: buildTelemetryCreateData(packet, receivedAt, rawPayload, identity)
       })
+      await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity)
       return {
         status: 'ok',
         id: telemetry.id,
@@ -906,6 +984,8 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       telemetryProcessor.clearDeviceState(deviceId)
     }
 
+    await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity)
+
     return {
       status: 'ok',
       id: telemetry.id,
@@ -1055,10 +1135,7 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
 router.get('/current', authenticate, requireReadAccess, async (req, res) => {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)
-    const data = await prisma.telemetry.findFirst({
-      where: requestedDeviceId ? { deviceId: requestedDeviceId } : undefined,
-      orderBy: orderBySourceTimestampDesc()
-    });
+    const data = await findCurrentTelemetry(requestedDeviceId);
     
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
@@ -1178,7 +1255,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
       orderBy: orderBySourceTimestampDesc(), take: limit,
-      select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, deviceId: true }
+      select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, gpsAgeS: true, deviceId: true }
     });
     res.json(data.map(serializeTelemetryForResponse));
   } catch (error) {

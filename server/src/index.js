@@ -119,7 +119,10 @@
           processing: stats.processing,
           processed: stats.processed,
           permanent: stats.permanent,
+          pendingLive: stats.pendingLive,
+          pendingHistory: stats.pendingHistory,
           oldestPendingAgeSeconds: stats.oldestPendingAgeSeconds,
+          newestLiveAgeSeconds: stats.newestLiveAgeSeconds,
           historyDirtyFrom: stats.historyDirtyFrom,
           lastError: stats.lastError
         }

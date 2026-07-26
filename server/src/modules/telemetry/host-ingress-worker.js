@@ -55,7 +55,8 @@ export function startHostIngressWorker(processPacket, options = {}) {
         const result = await processPacket(payload, new Date(row.received_at), {
           deviceId: row.device_id,
           streamId: row.stream_id,
-          packetId: row.packet_id
+          packetId: row.packet_id,
+          isLive: Boolean(row.is_live)
         })
         if (result?.outOfOrder && result?.timestamp) store.markHistoryDirty(result.timestamp)
         store.markProcessed(row.id)

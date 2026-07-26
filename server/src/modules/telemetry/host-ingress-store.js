@@ -72,6 +72,20 @@ export class HostIngressStore {
           last_error = COALESCE(last_error, 'worker restarted while processing')
       WHERE status = 'processing'
     `).run(now, now)
+    this.db.prepare(`
+      UPDATE host_ingress AS older
+      SET is_live = 0, updated_at = ?
+      WHERE older.status IN ('pending', 'retry')
+        AND older.is_live = 1
+        AND EXISTS (
+          SELECT 1
+          FROM host_ingress AS newer
+          WHERE newer.device_id = older.device_id
+            AND newer.status IN ('pending', 'retry')
+            AND newer.is_live = 1
+            AND newer.id > older.id
+        )
+    `).run(now)
 
     this.insertPacket = this.db.prepare(`
       INSERT INTO host_ingress (
@@ -79,18 +93,39 @@ export class HostIngressStore {
         received_at, status, created_at, updated_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?)
       ON CONFLICT(dedupe_key) DO UPDATE SET
-        is_live = MAX(host_ingress.is_live, excluded.is_live),
+        is_live = excluded.is_live,
         updated_at = excluded.updated_at
+    `)
+    this.demoteReadyLivePackets = this.db.prepare(`
+      UPDATE host_ingress
+      SET is_live = 0, updated_at = ?
+      WHERE device_id = ?
+        AND status IN ('pending', 'retry')
+        AND is_live = 1
+    `)
+    this.maxPacketIdForStream = this.db.prepare(`
+      SELECT MAX(packet_id) max_packet_id
+      FROM host_ingress
+      WHERE device_id = ? AND stream_id = ?
     `)
     this.enqueueTransaction = this.db.transaction((entries, receivedAt) => {
       const nowIso = isoNow()
+      const liveCandidates = entries.filter((entry) => entry.isLive)
+      const acceptedLiveKeys = new Set()
+      for (const candidate of liveCandidates) {
+        const previousMax = this.maxPacketIdForStream.get(candidate.deviceId, candidate.streamId)?.max_packet_id
+        if (previousMax == null || candidate.packetId >= Number(previousMax)) {
+          this.demoteReadyLivePackets.run(nowIso, candidate.deviceId)
+          acceptedLiveKeys.add(candidate.dedupeKey)
+        }
+      }
       for (const entry of entries) {
         this.insertPacket.run(
           entry.dedupeKey,
           entry.deviceId || null,
           entry.streamId || null,
           Number.isInteger(entry.packetId) ? entry.packetId : null,
-          entry.isLive ? 1 : 0,
+          entry.isLive && acceptedLiveKeys.has(entry.dedupeKey) ? 1 : 0,
           JSON.stringify(entry.payload),
           receivedAt,
           nowIso,
@@ -103,7 +138,10 @@ export class HostIngressStore {
         SELECT * FROM host_ingress
         WHERE status IN ('pending', 'retry')
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
-        ORDER BY is_live DESC, id ASC
+        ORDER BY
+          is_live DESC,
+          CASE WHEN is_live = 1 THEN id END DESC,
+          id ASC
         LIMIT 1
       `).get(nowIso)
       if (!row) return null
@@ -194,10 +232,25 @@ export class HostIngressStore {
 
   stats() {
     const counts = Object.fromEntries(this.db.prepare(`SELECT status, COUNT(*) count FROM host_ingress GROUP BY status`).all().map((row) => [row.status, Number(row.count)]))
+    const readyCounts = this.db.prepare(`
+      SELECT
+        SUM(CASE WHEN is_live = 1 THEN 1 ELSE 0 END) live,
+        SUM(CASE WHEN is_live = 0 THEN 1 ELSE 0 END) history
+      FROM host_ingress
+      WHERE status IN ('pending','retry','processing')
+    `).get() || {}
     const oldest = this.db.prepare(`SELECT received_at FROM host_ingress WHERE status IN ('pending','retry','processing') ORDER BY id LIMIT 1`).get()
+    const newestLive = this.db.prepare(`
+      SELECT received_at
+      FROM host_ingress
+      WHERE status IN ('pending','retry','processing') AND is_live = 1
+      ORDER BY id DESC
+      LIMIT 1
+    `).get()
     const lastError = this.db.prepare(`SELECT id,status,attempts,last_error,updated_at FROM host_ingress WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1`).get()
     const historyDirtyFrom = this.db.prepare(`SELECT value FROM host_ingress_meta WHERE key='history_dirty_from'`).get()?.value || null
     const oldestMs = oldest ? new Date(oldest.received_at).getTime() : NaN
+    const newestLiveMs = newestLive ? new Date(newestLive.received_at).getTime() : NaN
     return {
       databasePath: this.databasePath,
       pending: counts.pending || 0,
@@ -205,7 +258,10 @@ export class HostIngressStore {
       processing: counts.processing || 0,
       processed: counts.processed || 0,
       permanent: counts.permanent || 0,
+      pendingLive: Number(readyCounts.live) || 0,
+      pendingHistory: Number(readyCounts.history) || 0,
       oldestPendingAgeSeconds: Number.isFinite(oldestMs) ? Math.max(0, Math.round((Date.now() - oldestMs) / 1000)) : null,
+      newestLiveAgeSeconds: Number.isFinite(newestLiveMs) ? Math.max(0, Math.round((Date.now() - newestLiveMs) / 1000)) : null,
       historyDirtyFrom,
       lastError: lastError || null
     }
