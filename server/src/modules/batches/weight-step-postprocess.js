@@ -1186,8 +1186,6 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
   const detectedPlateaus = buildPlateaus(inBatch, opts)
   const restLookbackMs = Math.max(0, Number(opts.restPlateauLookbackMinutes) || 0) * 60 * 1000
   const restStartMs = Math.max(points[0]?.x ?? batchStartMs, batchStartMs - restLookbackMs)
-  const restPoints = points.filter((point) => point.x >= restStartMs && point.x <= bounds.endMs)
-  const restPlateaus = buildRestPlateaus(restPoints, opts)
   const plateaus = insertTransitionPlateaus(
     inBatch,
     addBoundaryPlateaus(inBatch, detectedPlateaus, bounds.startMs, bounds.endMs, opts),
@@ -1243,6 +1241,12 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
     })
   }
 
+  const firstLoad = events.find((event) => event.kind === 'load') || null
+  const restEndMs = Number.isFinite(firstLoad?.startMs)
+    ? Math.min(bounds.endMs, firstLoad.startMs)
+    : bounds.endMs
+  const restPoints = points.filter((point) => point.x >= restStartMs && point.x <= restEndMs)
+  const restPlateaus = buildRestPlateaus(restPoints, opts)
   const mergedEvents = mergeCloseLoadEvents(events, inBatch, opts)
   const bounceMarkedEvents = markBounceArtifacts(mergedEvents, opts)
   const restMarkedEvents = markRestPlateauArtifacts(bounceMarkedEvents, restPlateaus, opts, batchStartMs)
@@ -1270,7 +1274,7 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
     },
     restBounds: {
       startTime: new Date(restStartMs),
-      endTime: new Date(bounds.endMs)
+      endTime: new Date(restEndMs)
     },
     points: points.map(serializePoint),
     inBatchPoints: inBatch.map(serializePoint),

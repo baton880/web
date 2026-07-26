@@ -34,13 +34,19 @@ function analyze(rows) {
     loadMovingMaxPct: 60,
     loadBoundaryStopWindowSec: 20,
     loadBoundaryStopSpeedKmh: 0.5,
-    loadBoundaryStopMinPoints: 2
+    loadBoundaryStopMinPoints: 2,
+    restPlateauMinDurationSec: 20,
+    restPlateauLookbackMinutes: 10
   })
 }
 
 const movingOnly = analyze(telemetryWithStep())
 assert.equal(movingOnly.includedEvents.filter((event) => event.delta > 0).length, 0)
 assert.equal(movingOnly.events.some((event) => event.artifactReason === 'moving-load-percent'), true)
+const firstDetectedLoad = movingOnly.events.find((event) => event.kind === 'load')
+assert.ok(firstDetectedLoad)
+assert.equal(new Date(movingOnly.restBounds.endTime).getTime(), firstDetectedLoad.startTime.getTime())
+assert.ok(movingOnly.restPlateaus.every((plateau) => plateau.endTime.getTime() <= firstDetectedLoad.startTime.getTime()))
 
 const stoppedBefore = analyze(telemetryWithStep({ stationaryBefore: true }))
 assert.equal(stoppedBefore.includedEvents.filter((event) => event.delta > 0).length, 0)
