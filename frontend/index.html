@@ -182,6 +182,28 @@
                                 </div>
                                 <div id="map" class="dashboard-map"></div>
                             </div>
+                            <div id="dashboardReplayPanel" class="batch-replay-panel mt-3 d-none" data-requires-admin hidden>
+                                <div class="batch-replay-toolbar">
+                                    <button id="dashboardReplayPlay" type="button" class="btn btn-sm btn-outline-primary" aria-pressed="false">
+                                        <i class="fas fa-play mr-1"></i><span>Пуск</span>
+                                    </button>
+                                    <input id="dashboardReplaySlider" class="batch-replay-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Время реплея общей карты">
+                                    <strong id="dashboardReplayTime" class="batch-replay-time">--:--:--</strong>
+                                    <select id="dashboardReplaySpeed" class="form-control form-control-sm batch-replay-speed" aria-label="Скорость реплея">
+                                        <option value="1">×1</option>
+                                        <option value="5" selected>×5</option>
+                                        <option value="20">×20</option>
+                                        <option value="100">×100</option>
+                                    </select>
+                                    <button id="dashboardReplayLive" type="button" class="btn btn-sm btn-outline-secondary">К текущему</button>
+                                </div>
+                                <div id="dashboardReplayStatus" class="batch-replay-status mt-2">Загрузка истории…</div>
+                                <div class="batch-replay-grid mt-2">
+                                    <div><span>Host-зона</span><strong id="dashboardReplayHostZone">—</strong></div>
+                                    <div><span>Вес HOST</span><strong id="dashboardReplayHostWeight">—</strong></div>
+                                    <div><span>Погрузчик</span><strong id="dashboardReplayLoaderZone">—</strong></div>
+                                </div>
+                            </div>
                             <div id="zone-entry-banner" class="zone-entry-banner hidden"></div>
                         </div>
                     </div>
@@ -319,7 +341,7 @@
 
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
 
-    <script src="js/dashboard.js?v=20260715a"></script>
+    <script src="js/dashboard.js?v=20260718a"></script>
     <script src="js/dashboard-current-state.js?v=20260708a"></script>
 
 </body>

@@ -13,6 +13,7 @@ const HISTORY_POLL_HIDDEN_MS = 30000;
 const ZONES_POLL_VISIBLE_MS = 20000;
 const ZONES_POLL_HIDDEN_MS = 60000;
 const OFFLINE_THRESHOLD_MS = 15000;
+const HOST_GPS_MAX_FIX_AGE_S = 3;
 const TRACK_MAX_GAP_MS = 45000;
 const TRACK_MAX_SPEED_MPS = 12;
 const TRACK_MIN_JUMP_DISTANCE_M = 30;
@@ -77,6 +78,11 @@ let lastHistoryFetchStartedAt = 0;
 let lastZonesFetchStartedAt = 0;
 let latestTrackHistory = { host: [], rtk: [] };
 let dashedTrackPreferences = { host: true, rtk: true };
+let dashboardReplayFrames = [];
+let dashboardReplayIndex = 0;
+let dashboardReplayActive = false;
+let dashboardReplayPlaying = false;
+let dashboardReplayTimer = null;
 
 function isAdmin() {
     return Boolean(window.AppAuth?.isAdmin && window.AppAuth.isAdmin());
@@ -694,6 +700,27 @@ function hasValidCoordinates(lat, lon) {
     return parsedLat !== 0 && parsedLon !== 0;
 }
 
+function hasFreshGpsCoordinates(data) {
+    if (!hasValidCoordinates(data?.lat, data?.lon)) {
+        return false;
+    }
+
+    const gpsValidValue = data?.gpsValid ?? data?.gps_valid;
+    if (gpsValidValue != null && !asBoolean(gpsValidValue)) {
+        return false;
+    }
+
+    const gpsAgeValue = data?.gpsAgeS ?? data?.gps_age_s;
+    if (gpsAgeValue != null) {
+        const gpsAgeS = Number(gpsAgeValue);
+        if (!Number.isFinite(gpsAgeS) || gpsAgeS > HOST_GPS_MAX_FIX_AGE_S) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
 function normalizeShapeType(value) {
     return String(value || "CIRCLE").trim().toUpperCase() === "SQUARE" ? "SQUARE" : "CIRCLE";
 }
@@ -910,7 +937,7 @@ function getCurrentMarkerCoords() {
 }
 
 function getTelemetryCoordsByTarget(target) {
-    if (target === "host" && hasValidCoordinates(latestTelemetry?.lat, latestTelemetry?.lon)) {
+    if (target === "host" && hasFreshGpsCoordinates(latestTelemetry)) {
         return [Number(latestTelemetry.lat), Number(latestTelemetry.lon)];
     }
 
@@ -929,7 +956,7 @@ function getVisibleTelemetryCoords(target = "all") {
 
     const coords = [];
 
-    if (hasValidCoordinates(latestTelemetry?.lat, latestTelemetry?.lon)) {
+    if (hasFreshGpsCoordinates(latestTelemetry)) {
         coords.push([Number(latestTelemetry.lat), Number(latestTelemetry.lon)]);
     }
 
@@ -1224,8 +1251,12 @@ function initMapActionControls() {
     syncMapActionButtons();
 }
 
-function updateMapPosition(data, isOnline) {
-    if (!hasValidCoordinates(data?.lat, data?.lon)) {
+function updateMapPosition(data, isOnline, options = {}) {
+    if (dashboardReplayActive && !options.force) {
+        return;
+    }
+
+    if (!hasFreshGpsCoordinates(data)) {
         hidePlacemark();
         hasLiveCoordinates = false;
         syncMapActionButtons();
@@ -1272,7 +1303,11 @@ function updateMapPosition(data, isOnline) {
         return;
     }
 
-    smoothMove(newCoords);
+    if (options.instant) {
+        placemark.geometry.setCoordinates(newCoords);
+    } else {
+        smoothMove(newCoords);
+    }
 
     if (isMarkerTrackingEnabled) {
         centerMapOnMarker({ duration: 220, target: markerTrackingTarget });
@@ -1347,7 +1382,11 @@ function updateRtkMapChip(data) {
     qualityElement.textContent = `${qualityLabel} • ${coordsText}`;
 }
 
-function updateRtkMapPosition(data) {
+function updateRtkMapPosition(data, options = {}) {
+    if (dashboardReplayActive && !options.force) {
+        return;
+    }
+
     if (!hasValidCoordinates(data?.lat, data?.lon)) {
         hideRtkPlacemark();
         updateRtkMapChip(null);
@@ -1425,7 +1464,7 @@ function renderDashboard(data) {
     }
 
     const isOnline = isTelemetryOnline(data);
-    const hasCoordinates = hasValidCoordinates(data.lat, data.lon);
+    const hasCoordinates = hasFreshGpsCoordinates(data);
     const parsedLat = Number(data.lat);
     const parsedLon = Number(data.lon);
     const zoneName = hasCoordinates
@@ -1568,7 +1607,7 @@ function buildRoutePoints(historyRows) {
     }
 
     return historyRows
-        .filter((row) => hasValidCoordinates(row?.lat, row?.lon))
+        .filter((row) => hasFreshGpsCoordinates(row))
         .map((row) => ({
             lat: Number(row.lat),
             lon: Number(row.lon),
@@ -1676,27 +1715,60 @@ function buildRtkTrackSegments(historyRows) {
         hasHeading: hasRtkHeadingData(point.source),
     }));
     const segments = [];
+    let currentSegment = [];
+    let currentColor = null;
+
+    const addCurrentSegment = () => {
+        if (currentSegment.length < 2) return;
+
+        segments.push({
+            coords: currentSegment.map((point) => [point.lat, point.lon]),
+            points: currentSegment.slice(),
+            dashed: false,
+            strokeColor: currentColor,
+        });
+    };
 
     for (let index = 1; index < points.length; index += 1) {
         const previousPoint = points[index - 1];
         const currentPoint = points[index];
-        const currentHasHeading = currentPoint.hasHeading;
+        const pointColor = currentPoint.hasHeading ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR;
         const isDashedGap = shouldRenderDashedTrackGap(previousPoint, currentPoint);
 
-        if (isDashedGap && !canShowDashedTrackGap("rtk")) {
+        if (isDashedGap) {
+            addCurrentSegment();
+
+            if (canShowDashedTrackGap("rtk")) {
+                segments.push({
+                    coords: [[previousPoint.lat, previousPoint.lon], [currentPoint.lat, currentPoint.lon]],
+                    points: [previousPoint, currentPoint],
+                    dashed: true,
+                    strokeColor: pointColor,
+                });
+            }
+
+            currentSegment = [currentPoint];
+            currentColor = pointColor;
             continue;
         }
 
-        segments.push({
-            coords: [
-                [previousPoint.lat, previousPoint.lon],
-                [currentPoint.lat, currentPoint.lon],
-            ],
-            points: [previousPoint, currentPoint],
-            dashed: isDashedGap,
-            strokeColor: currentHasHeading ? RTK_FIX_COLOR : RTK_GPS_FIX_COLOR,
-        });
+        if (!currentSegment.length) {
+            currentSegment = [previousPoint, currentPoint];
+            currentColor = pointColor;
+            continue;
+        }
+
+        if (pointColor !== currentColor) {
+            addCurrentSegment();
+            currentSegment = [previousPoint, currentPoint];
+            currentColor = pointColor;
+            continue;
+        }
+
+        currentSegment.push(currentPoint);
     }
+
+    addCurrentSegment();
 
     return segments;
 }
@@ -1745,6 +1817,7 @@ function renderRoute(historyRows) {
 
     latestTrackHistory.host = Array.isArray(historyRows) ? historyRows : [];
     rememberTrackHistoryMaxTimestamp("host", historyRows);
+    rebuildDashboardReplayFrames();
     const routeSegments = buildTrackSegments(filterVisibleTrackRows("host", historyRows));
 
     if (!routeSegments.length) {
@@ -1767,6 +1840,7 @@ function renderRtkRoute(historyRows) {
 
     latestTrackHistory.rtk = Array.isArray(historyRows) ? historyRows : [];
     rememberTrackHistoryMaxTimestamp("rtk", historyRows);
+    rebuildDashboardReplayFrames();
     const routeSegments = buildRtkTrackSegments(filterVisibleTrackRows("rtk", historyRows));
 
     if (!routeSegments.length) {
@@ -1782,17 +1856,210 @@ function renderRtkRoute(historyRows) {
         strokeWidth: 4,
         strokeOpacity: 0.8,
     });
+
+}
+
+function getDashboardReplayElements() {
+    return {
+        panel: document.getElementById("dashboardReplayPanel"),
+        play: document.getElementById("dashboardReplayPlay"),
+        slider: document.getElementById("dashboardReplaySlider"),
+        time: document.getElementById("dashboardReplayTime"),
+        speed: document.getElementById("dashboardReplaySpeed"),
+        live: document.getElementById("dashboardReplayLive"),
+        status: document.getElementById("dashboardReplayStatus"),
+        hostZone: document.getElementById("dashboardReplayHostZone"),
+        hostWeight: document.getElementById("dashboardReplayHostWeight"),
+        loaderZone: document.getElementById("dashboardReplayLoaderZone"),
+    };
+}
+
+function formatDashboardReplayZone(point) {
+    if (!hasValidCoordinates(point?.lat, point?.lon)) {
+        return "нет координат";
+    }
+
+    return getCurrentZoneName(Number(point.lat), Number(point.lon)) || "Вне зоны";
+}
+
+function findDashboardReplayIndexByTimestamp(timestampMs) {
+    if (!dashboardReplayFrames.length || !Number.isFinite(timestampMs)) {
+        return Math.max(0, dashboardReplayFrames.length - 1);
+    }
+
+    let left = 0;
+    let right = dashboardReplayFrames.length - 1;
+    while (left < right) {
+        const middle = Math.ceil((left + right) / 2);
+        if (dashboardReplayFrames[middle].timestampMs <= timestampMs) {
+            left = middle;
+        } else {
+            right = middle - 1;
+        }
+    }
+    return left;
+}
+
+function buildDashboardReplayFrames() {
+    const hostPoints = buildRoutePoints(latestTrackHistory.host);
+    const loaderPoints = buildRoutePoints(latestTrackHistory.rtk);
+    let loaderIndex = -1;
+
+    return hostPoints.map((hostPoint) => {
+        while (
+            loaderIndex + 1 < loaderPoints.length &&
+            loaderPoints[loaderIndex + 1].timestampMs <= hostPoint.timestampMs
+        ) {
+            loaderIndex += 1;
+        }
+
+        const loaderPoint = loaderIndex >= 0 ? loaderPoints[loaderIndex] : null;
+        return {
+            timestampMs: hostPoint.timestampMs,
+            host: hostPoint.source,
+            loader: loaderPoint?.source || null,
+            loaderAgeMs: loaderPoint ? Math.max(0, hostPoint.timestampMs - loaderPoint.timestampMs) : null,
+        };
+    });
+}
+
+function renderDashboardReplayFrame(index = dashboardReplayIndex, options = {}) {
+    const elements = getDashboardReplayElements();
+    if (!isAdmin() || !dashboardReplayFrames.length) {
+        elements.panel?.classList.add("d-none");
+        return;
+    }
+
+    elements.panel?.classList.remove("d-none");
+    const safeIndex = Math.max(0, Math.min(Number(index) || 0, dashboardReplayFrames.length - 1));
+    const frame = dashboardReplayFrames[safeIndex];
+    dashboardReplayIndex = safeIndex;
+
+    if (elements.slider) {
+        elements.slider.max = String(dashboardReplayFrames.length - 1);
+        elements.slider.value = String(safeIndex);
+    }
+    if (elements.time) {
+        elements.time.textContent = new Date(frame.timestampMs).toLocaleTimeString("ru-RU", {
+            timeZone: "Asia/Novosibirsk",
+            hour: "2-digit",
+            minute: "2-digit",
+            second: "2-digit",
+        });
+    }
+    if (elements.hostZone) elements.hostZone.textContent = formatDashboardReplayZone(frame.host);
+    if (elements.hostWeight) {
+        elements.hostWeight.textContent = frame.host?.weight == null ? "—" : `${formatMetric(frame.host.weight, 1)} кг`;
+    }
+    if (elements.loaderZone) {
+        elements.loaderZone.textContent = frame.loader
+            ? `${formatDashboardReplayZone(frame.loader)}${Number.isFinite(frame.loaderAgeMs) ? ` · −${Math.round(frame.loaderAgeMs / 1000)} с` : ""}`
+            : "нет RTK";
+    }
+    if (elements.status) {
+        elements.status.textContent = `${dashboardReplayActive ? "Просмотр истории" : "Текущая точка"} · ${formatDateTime(frame.host?.timestamp)} · кадр ${safeIndex + 1} / ${dashboardReplayFrames.length}`;
+    }
+
+    if (options.moveMap === false) {
+        return;
+    }
+
+    updateMapPosition(frame.host, true, { force: true, instant: true });
+    if (frame.loader) {
+        updateRtkMapPosition(frame.loader, { force: true });
+    } else {
+        hideRtkPlacemark();
+    }
+}
+
+function rebuildDashboardReplayFrames() {
+    if (!isAdmin()) return;
+
+    const previousTimestampMs = dashboardReplayFrames[dashboardReplayIndex]?.timestampMs ?? null;
+    dashboardReplayFrames = buildDashboardReplayFrames();
+    if (!dashboardReplayFrames.length) {
+        getDashboardReplayElements().panel?.classList.add("d-none");
+        return;
+    }
+
+    dashboardReplayIndex = dashboardReplayActive && Number.isFinite(previousTimestampMs)
+        ? findDashboardReplayIndexByTimestamp(previousTimestampMs)
+        : dashboardReplayFrames.length - 1;
+    renderDashboardReplayFrame(dashboardReplayIndex, { moveMap: dashboardReplayActive });
+}
+
+function stopDashboardReplay() {
+    dashboardReplayPlaying = false;
+    window.clearInterval(dashboardReplayTimer);
+    dashboardReplayTimer = null;
+    const play = getDashboardReplayElements().play;
+    if (play) {
+        play.setAttribute("aria-pressed", "false");
+        play.innerHTML = '<i class="fas fa-play mr-1"></i><span>Пуск</span>';
+    }
+}
+
+function startDashboardReplay() {
+    if (!dashboardReplayFrames.length) return;
+    dashboardReplayActive = true;
+    if (dashboardReplayIndex >= dashboardReplayFrames.length - 1) dashboardReplayIndex = 0;
+    dashboardReplayPlaying = true;
+    const elements = getDashboardReplayElements();
+    if (elements.play) {
+        elements.play.setAttribute("aria-pressed", "true");
+        elements.play.innerHTML = '<i class="fas fa-pause mr-1"></i><span>Пауза</span>';
+    }
+    window.clearInterval(dashboardReplayTimer);
+    dashboardReplayTimer = window.setInterval(() => {
+        const step = Math.max(1, Number(elements.speed?.value || 5));
+        const nextIndex = Math.min(dashboardReplayIndex + step, dashboardReplayFrames.length - 1);
+        renderDashboardReplayFrame(nextIndex);
+        if (nextIndex >= dashboardReplayFrames.length - 1) stopDashboardReplay();
+    }, 100);
+    renderDashboardReplayFrame(dashboardReplayIndex);
+}
+
+function returnDashboardReplayToLive() {
+    stopDashboardReplay();
+    dashboardReplayActive = false;
+    dashboardReplayIndex = Math.max(0, dashboardReplayFrames.length - 1);
+    renderDashboardReplayFrame(dashboardReplayIndex, { moveMap: false });
+    updateMapPosition(latestTelemetry, isTelemetryOnline(latestTelemetry), { force: true, instant: true });
+    updateRtkMapPosition(latestRtkTelemetry, { force: true });
+}
+
+function initDashboardReplay() {
+    const elements = getDashboardReplayElements();
+    if (!isAdmin()) {
+        elements.panel?.classList.add("d-none");
+        return;
+    }
+
+    elements.play?.addEventListener("click", () => {
+        if (dashboardReplayPlaying) stopDashboardReplay();
+        else startDashboardReplay();
+    });
+    elements.slider?.addEventListener("input", () => {
+        stopDashboardReplay();
+        dashboardReplayActive = true;
+        renderDashboardReplayFrame(Number(elements.slider.value));
+    });
+    elements.live?.addEventListener("click", returnDashboardReplayToLive);
+    rebuildDashboardReplayFrames();
 }
 
 function getRetainableTelemetry(track, snapshotRows = []) {
     const currentTelemetry = track === "rtk" ? latestRtkTelemetry : latestTelemetry;
+    const hasUsableCoordinates = track === "rtk"
+        ? (row) => hasValidCoordinates(row?.lat, row?.lon)
+        : (row) => hasFreshGpsCoordinates(row);
 
-    if (hasValidCoordinates(currentTelemetry?.lat, currentTelemetry?.lon)) {
+    if (hasUsableCoordinates(currentTelemetry)) {
         return currentTelemetry;
     }
 
     return Array.isArray(snapshotRows)
-        ? snapshotRows.find((row) => hasValidCoordinates(row?.lat, row?.lon)) || null
+        ? snapshotRows.find(hasUsableCoordinates) || null
         : null;
 }
 
@@ -1917,6 +2184,7 @@ function buildTelemetryRestorePayload(row) {
         lon: row.lon == null ? 0 : Number(row.lon),
         gps_valid: Boolean(row.gpsValid),
         gps_satellites: Number(row.gpsSatellites) || 0,
+        gps_age_s: row.gpsAgeS == null ? null : Number(row.gpsAgeS),
         weight: row.weight == null ? 0 : Number(row.weight),
         raw: row.rawWeight == null ? 0 : Number(row.rawWeight),
         weight_valid: Boolean(row.weightValid),
@@ -2406,7 +2674,7 @@ function getTelemetryZoneBannerName(data) {
         return String(data.zone.name).trim();
     }
 
-    if (hasValidCoordinates(data?.lat, data?.lon)) {
+    if (hasFreshGpsCoordinates(data)) {
         return getCurrentZoneName(Number(data.lat), Number(data.lon)) || "";
     }
 
@@ -2562,6 +2830,7 @@ function init() {
     initMapTypeSwitch();
     initMapActionControls();
     initDashedTrackControls();
+    initDashboardReplay();
     applyIdleMapCursor();
     map.events.add("actionbegin", applyDragMapCursor);
     map.events.add("actionend", handleMapActionEnd);
