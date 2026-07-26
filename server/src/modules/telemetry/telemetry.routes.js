@@ -13,12 +13,14 @@ import { getHostTrackClearSince, setHostTrackClearSince } from './track-state-st
 import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.js'
 import { getHostIngressStore } from './host-ingress-store.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
+import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js'
 
 const router = Router()
 const hostIngressStore = getHostIngressStore()
 const DEFAULT_RECENT_LIMIT = 5
 const DEFAULT_ADMIN_HISTORY_LIMIT = 10
 const MAX_TELEMETRY_HISTORY_LIMIT = 20000
+const MAX_REPLAY_DAY_ROWS = 100000
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
@@ -180,6 +182,13 @@ function orderBySourceTimestampDesc() {
   return [
     { timestamp: 'desc' },
     { id: 'desc' }
+  ]
+}
+
+function orderBySourceTimestampAsc() {
+  return [
+    { timestamp: 'asc' },
+    { id: 'asc' }
   ]
 }
 
@@ -1277,11 +1286,165 @@ router.get('/admin/latest', authenticate, requireAdmin, async (req, res) => {
   }
 });
 
+router.get('/admin/replay-days', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const rows = await prisma.$queryRawUnsafe(`
+      SELECT DISTINCT strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', '+7 hours') AS date
+      FROM Telemetry
+      WHERE timestamp IS NOT NULL
+      ORDER BY date DESC
+      LIMIT 120
+    `)
+    const dates = rows
+      .map((row) => String(row?.date || '').trim())
+      .filter(Boolean)
+
+    res.json({ dates })
+  } catch (error) {
+    console.error('[Ошибка GET /api/telemetry/host/admin/replay-days]:', error)
+    res.status(500).json({ error: 'Не удалось получить даты истории' })
+  }
+})
+
+router.get('/admin/replay-day', authenticate, requireAdmin, async (req, res) => {
+  try {
+    const selectedDate = String(req.query.date || getFarmDateString()).trim()
+    const range = farmDateRange(selectedDate)
+    if (!range) {
+      return res.status(400).json({ error: 'Некорректная дата истории' })
+    }
+
+    const hostWhere = {
+      timestamp: {
+        gte: range.start,
+        lte: range.end
+      }
+    }
+    const rtkWhere = {
+      timestamp: {
+        gte: range.start,
+        lte: range.end
+      }
+    }
+    const batchWhere = {
+      startTime: { lte: range.end },
+      OR: [
+        { endTime: null },
+        { endTime: { gte: range.start } }
+      ]
+    }
+
+    const [hostCount, hostRows, rtkRows, batches, telemetrySettings] = await Promise.all([
+      prisma.telemetry.count({ where: hostWhere }),
+      prisma.telemetry.findMany({
+        where: hostWhere,
+        orderBy: orderBySourceTimestampAsc(),
+        take: MAX_REPLAY_DAY_ROWS,
+        select: {
+          id: true,
+          deviceId: true,
+          timestamp: true,
+          receivedAt: true,
+          lat: true,
+          lon: true,
+          gpsValid: true,
+          gpsSatellites: true,
+          gpsAgeS: true,
+          gpsQuality: true,
+          speedKmh: true,
+          weight: true,
+          rawWeight: true,
+          weightValid: true,
+          cpuTempC: true,
+          lteRssiDbm: true,
+          lteAccessTech: true,
+          eventsReaderOk: true
+        }
+      }),
+      prisma.rtkTelemetry.findMany({
+        where: rtkWhere,
+        orderBy: [
+          { timestamp: 'asc' },
+          { id: 'asc' }
+        ],
+        take: MAX_REPLAY_DAY_ROWS,
+        select: {
+          id: true,
+          deviceId: true,
+          timestamp: true,
+          lat: true,
+          lon: true,
+          rtkQuality: true,
+          rtkAge: true,
+          speed: true,
+          course: true,
+          satellites: true,
+          fixType: true
+        }
+      }),
+      prisma.batch.findMany({
+        where: batchWhere,
+        orderBy: [
+          { startTime: 'asc' },
+          { id: 'asc' }
+        ],
+        select: {
+          id: true,
+          deviceId: true,
+          startTime: true,
+          endTime: true,
+          startWeight: true,
+          endWeight: true,
+          actualIngredients: {
+            orderBy: [
+              { addedAt: 'asc' },
+              { id: 'asc' }
+            ],
+            select: {
+              id: true,
+              ingredientName: true,
+              actualWeight: true,
+              startedAt: true,
+              addedAt: true
+            }
+          }
+        }
+      }),
+      getTelemetrySettings(prisma)
+    ])
+
+    res.json({
+      date: selectedDate,
+      range: {
+        from: range.start,
+        to: range.end
+      },
+      truncated: hostCount > hostRows.length,
+      host: hostRows.map(serializeTelemetryForResponse),
+      rtk: rtkRows,
+      batches,
+      settings: {
+        unloadDropThresholdKg: telemetrySettings.unloadDropThresholdKg,
+        unloadMinPeakKg: telemetrySettings.unloadMinPeakKg,
+        modeUnloadDropHintKg: telemetrySettings.modeUnloadDropHintKg,
+        modeLoadingDeltaHintKg: telemetrySettings.modeLoadingDeltaHintKg,
+        movementSpeedThresholdKmh: telemetrySettings.movementSpeedThresholdKmh,
+        movementConfirmPackets: telemetrySettings.movementConfirmPackets,
+        loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
+      }
+    })
+  } catch (error) {
+    console.error('[Ошибка GET /api/telemetry/host/admin/replay-day]:', error)
+    res.status(500).json({ error: 'Не удалось загрузить историю за день' })
+  }
+})
+
 router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
   try {
     const limit = parseLimit(req.query.limit, DEFAULT_ADMIN_HISTORY_LIMIT);
     const requestedDeviceId = getRequestedDeviceId(req)
-    const clearSince = await getHostTrackClearSince(prisma)
+    const includeCleared = String(req.query.includeCleared || '').trim() === '1'
+    const clearSince = includeCleared ? null : await getHostTrackClearSince(prisma)
     const where = {
       ...(requestedDeviceId ? { deviceId: requestedDeviceId } : {}),
       ...(clearSince ? { timestamp: { gt: clearSince } } : {})

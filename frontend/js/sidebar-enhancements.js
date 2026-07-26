@@ -250,6 +250,12 @@
     }
 
     function ensureViolationsNavigationItem() {
+        const isDirector = window.AppAuth?.getRole?.() === window.AppAuth?.ROLE_DIRECTOR;
+        if (isDirector) {
+            sidebar.querySelector(`[data-sidebar-item="${VIOLATIONS_ITEM_ID}"]`)?.remove();
+            return;
+        }
+
         ensureNavigationItem({
             id: VIOLATIONS_ITEM_ID,
             page: VIOLATIONS_PAGE,

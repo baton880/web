@@ -638,6 +638,9 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
         // Форматируем ответ для удобной таблицы фронтенда
         const formattedBatches = batches.map(b => {
             const ingredients = buildIngredientSummary(b, telemetrySettings);
+            const totalActualWeight = b.endTime
+                ? roundWeight(ingredients.reduce((sum, ingredient) => sum + Number(ingredient?.fact || 0), 0))
+                : null;
             const hasLoggedViolations = (b.violations?.length || 0) > 0;
             const activeViolationCodes = (b.violations || []).map((violation) => String(violation.code || ''));
             const hasStrawAlfalfaWarning = activeViolationCodes.some(isStrawAlfalfaViolationCode);
@@ -659,6 +662,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 violationLabel: hasStrawAlfalfaWarning ? 'Сол.+Люц.' : null,
                 startWeight: roundWeight(b.startWeight || 0),
                 endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
+                totalActualWeight,
                 ingredients,
                 postprocess: {
                     status: b.endTime ? 'complete' : 'in_progress',

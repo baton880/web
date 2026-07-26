@@ -183,21 +183,31 @@
                                 <div id="map" class="dashboard-map"></div>
                             </div>
                             <div id="dashboardReplayPanel" class="batch-replay-panel mt-3 d-none" data-requires-admin hidden>
+                                <div class="d-flex flex-column flex-sm-row align-items-sm-center justify-content-between mb-2">
+                                    <strong>Диагностика истории карты</strong>
+                                    <div class="d-flex align-items-center flex-wrap mt-2 mt-sm-0">
+                                        <label for="dashboardReplayDate" class="small text-muted mb-0 mr-2">День</label>
+                                        <input id="dashboardReplayDate" type="date" class="form-control form-control-sm mr-2" style="width: 150px">
+                                        <button id="dashboardReplayLoad" type="button" class="btn btn-sm btn-outline-secondary">
+                                            Загрузить историю
+                                        </button>
+                                    </div>
+                                </div>
                                 <div class="batch-replay-toolbar">
-                                    <button id="dashboardReplayPlay" type="button" class="btn btn-sm btn-outline-primary" aria-pressed="false">
+                                    <button id="dashboardReplayPlay" type="button" class="btn btn-sm btn-outline-primary" aria-pressed="false" disabled>
                                         <i class="fas fa-play mr-1"></i><span>Пуск</span>
                                     </button>
-                                    <input id="dashboardReplaySlider" class="batch-replay-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Время реплея общей карты">
+                                    <input id="dashboardReplaySlider" class="batch-replay-slider" type="range" min="0" max="0" value="0" step="1" aria-label="Время реплея общей карты" disabled>
                                     <strong id="dashboardReplayTime" class="batch-replay-time">--:--:--</strong>
-                                    <select id="dashboardReplaySpeed" class="form-control form-control-sm batch-replay-speed" aria-label="Скорость реплея">
+                                    <select id="dashboardReplaySpeed" class="form-control form-control-sm batch-replay-speed" aria-label="Скорость реплея" disabled>
                                         <option value="1">×1</option>
                                         <option value="5" selected>×5</option>
                                         <option value="20">×20</option>
                                         <option value="100">×100</option>
                                     </select>
-                                    <button id="dashboardReplayLive" type="button" class="btn btn-sm btn-outline-secondary">К текущему</button>
+                                    <button id="dashboardReplayLive" type="button" class="btn btn-sm btn-outline-secondary" disabled>К текущему</button>
                                 </div>
-                                <div id="dashboardReplayStatus" class="batch-replay-status mt-2">Загрузка истории…</div>
+                                <div id="dashboardReplayStatus" class="batch-replay-status mt-2">История загружается только по запросу администратора.</div>
                                 <div class="batch-replay-grid mt-2">
                                     <div><span>Host-зона</span><strong id="dashboardReplayHostZone">—</strong></div>
                                     <div><span>Вес HOST</span><strong id="dashboardReplayHostWeight">—</strong></div>
@@ -264,7 +274,7 @@
 
                             <div id="dashboardActiveBatchCard" class="dashboard-section d-none">
                                 <div class="d-flex flex-column flex-md-row align-items-md-center justify-content-between mb-3">
-                                    <div class="text-xs font-weight-bold text-primary text-uppercase mb-2 mb-md-0">План / Факт текущего замеса</div>
+                                    <div class="text-xs font-weight-bold text-primary text-uppercase mb-2 mb-md-0">Компоненты текущего замеса</div>
                                     <div class="d-flex align-items-center">
                                         <button
                                             id="dashboardStopBatchButton"
@@ -283,15 +293,12 @@
                                         <thead>
                                             <tr>
                                                 <th>Компонент</th>
-                                                <th>План</th>
-                                                <th>Факт</th>
-                                                <th>Отклонение</th>
-                                                <th>Нарушение</th>
+                                                <th>Зафиксировано</th>
                                             </tr>
                                         </thead>
                                         <tbody id="dashboardActiveBatchTableBody">
                                             <tr>
-                                                <td colspan="5" class="dashboard-mini-table-empty">--</td>
+                                                <td colspan="2" class="dashboard-mini-table-empty">--</td>
                                             </tr>
                                         </tbody>
                                     </table>
@@ -337,12 +344,12 @@
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
 
     <script src="js/sb-admin-2.min.js"></script>
-    <script src="js/sidebar-enhancements.js?v=20260429d"></script>
+    <script src="js/sidebar-enhancements.js?v=20260726a"></script>
 
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
 
-    <script src="js/dashboard.js?v=20260718a"></script>
-    <script src="js/dashboard-current-state.js?v=20260708a"></script>
+    <script src="js/dashboard.js?v=20260726d"></script>
+    <script src="js/dashboard-current-state.js?v=20260726d"></script>
 
 </body>
 

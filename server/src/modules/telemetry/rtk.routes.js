@@ -1247,11 +1247,14 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
   try {
     const deviceId = getRequestedDeviceId(req)
     const limit = parseLimit(req.query.limit, DEFAULT_HISTORY_LIMIT, { max: MAX_RTK_HISTORY_LIMIT })
+    const includeCleared = String(req.query.includeCleared || '').trim() === '1'
     const [zones, settings] = await Promise.all([
       loadActiveZones(),
       getTelemetrySettings(prisma)
     ])
-    const where = await buildVisibleRtkTrackWhere(deviceId)
+    const where = includeCleared
+      ? (deviceId ? { deviceId } : {})
+      : await buildVisibleRtkTrackWhere(deviceId)
     const rows = await prisma.rtkTelemetry.findMany({
       where: Object.keys(where).length ? where : undefined,
       orderBy: orderBySourceTimestampDesc(),

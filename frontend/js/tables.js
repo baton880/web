@@ -40,6 +40,15 @@ $(document).ready(function () {
     let lastSnapshotKey = "";
     let activeRequestId = 0;
     let lastAlertKey = "";
+    const BATCH_COLUMN_LABELS = [
+        "Время",
+        "План",
+        "Группа",
+        "Итоговый вес",
+        "Нарушения",
+        "Компоненты",
+        "Действия",
+    ];
 
     const table = $("#batchesTable").DataTable({
         language: {
@@ -62,6 +71,9 @@ $(document).ready(function () {
             row.setAttribute("tabindex", "0");
             row.setAttribute("role", "link");
             row.setAttribute("aria-label", `Открыть детали замеса ${data.id}`);
+            Array.from(row.cells).forEach((cell, index) => {
+                cell.dataset.label = BATCH_COLUMN_LABELS[index] || "";
+            });
         },
         columns: [
             {
@@ -98,6 +110,25 @@ $(document).ready(function () {
                 },
             },
             {
+                data: "totalActualWeight",
+                className: "align-middle batch-table-final-weight",
+                render: function (data, type, row) {
+                    const statusMarkup = renderPostprocessStatus(row);
+                    if (statusMarkup) {
+                        return type === "display" ? statusMarkup : "";
+                    }
+
+                    const formattedWeight = formatWeight(data);
+                    if (type !== "display") {
+                        return Number.isFinite(Number(data)) ? Number(data) : "";
+                    }
+
+                    return formattedWeight
+                        ? `<strong class="batch-final-weight">${escapeHtml(formattedWeight)}</strong>`
+                        : '<span class="text-muted">—</span>';
+                },
+            },
+            {
                 data: "hasViolations",
                 className: "align-middle text-center",
                 render: function (data, type, row) {
@@ -115,6 +146,7 @@ $(document).ready(function () {
             },
             {
                 data: "ingredients",
+                className: "batch-table-ingredients",
                 render: function (data, type, row) {
                     const ingredients = Array.isArray(data) ? data : [];
 
@@ -251,17 +283,17 @@ $(document).ready(function () {
     function renderBatchViolationBadge(row, value) {
         const warningLabel = row?.violationLabel || null;
         if (String(row?.violationStatus || "").toLowerCase() === "warning") {
-            return `<span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel || "Сол.+Люц.")}</span>`;
+            return `<span class="batch-violation-badges"><span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel || "Сол.+Люц.")}</span></span>`;
         }
 
         if (warningLabel && asBoolean(value)) {
-            return [
+            return `<span class="batch-violation-badges">${[
                 `<span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel)}</span>`,
                 renderBooleanBadge(true)
-            ].join(" ");
+            ].join(" ")}</span>`;
         }
 
-        return renderBooleanBadge(asBoolean(value));
+        return `<span class="batch-violation-badges">${renderBooleanBadge(asBoolean(value))}</span>`;
     }
 
     function getPostprocessStatus(row) {

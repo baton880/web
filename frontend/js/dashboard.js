@@ -78,11 +78,16 @@ let lastHistoryFetchStartedAt = 0;
 let lastZonesFetchStartedAt = 0;
 let latestTrackHistory = { host: [], rtk: [] };
 let dashedTrackPreferences = { host: true, rtk: true };
+let dashboardReplayHistory = { host: [], rtk: [] };
+let dashboardReplayBatches = [];
+let dashboardReplaySettings = {};
 let dashboardReplayFrames = [];
 let dashboardReplayIndex = 0;
 let dashboardReplayActive = false;
 let dashboardReplayPlaying = false;
 let dashboardReplayTimer = null;
+let dashboardReplayHistoryLoaded = false;
+let dashboardReplayHistoryLoading = false;
 
 function isAdmin() {
     return Boolean(window.AppAuth?.isAdmin && window.AppAuth.isAdmin());
@@ -348,6 +353,11 @@ function setCurrentStateNotice(tone, message) {
 }
 
 function updateCurrentStateNotice(data) {
+    if (data?.__dashboardReplay === true) {
+        setCurrentStateNotice("info", `Исторический просмотр: ${formatDateTime(data.timestamp)}.`);
+        return;
+    }
+
     if (latestFetchState.status === "loading" && !latestFetchState.hasLoadedAtLeastOnce) {
         setCurrentStateNotice("info", "Загрузка текущего состояния...");
         return;
@@ -413,7 +423,7 @@ function normalizeModeKey(mode) {
     return "unknown";
 }
 
-function renderModeBadge(mode) {
+function renderModeBadge(mode, options = {}) {
     const element = document.getElementById("dashboardCurrentMode");
     if (!element) {
         return;
@@ -429,7 +439,7 @@ function renderModeBadge(mode) {
         "is-stale"
     );
     element.classList.add("dashboard-mode-badge", `dashboard-mode-badge--${modeKey}`);
-    element.classList.toggle("is-stale", latestFetchState.status === "stale");
+    element.classList.toggle("is-stale", options.replay !== true && latestFetchState.status === "stale");
 }
 
 function isUnloadMode(mode) {
@@ -1044,15 +1054,14 @@ function syncMapActionButtons() {
         ? getVisibleTelemetryCoords().length
         : getTelemetryCoordsByTarget(markerTrackingTarget));
 
-    if (isMarkerTrackingEnabled && !hasTrackingCoords) {
-        isMarkerTrackingEnabled = false;
-        markerTrackingTarget = "all";
-    }
-
     if (mapTrackToggleButton) {
-        mapTrackToggleButton.disabled = !hasMarkerCoords;
+        mapTrackToggleButton.disabled = !hasMarkerCoords && !isMarkerTrackingEnabled;
         mapTrackToggleButton.classList.toggle("is-active", isMarkerTrackingEnabled);
         mapTrackToggleButton.setAttribute("aria-pressed", String(isMarkerTrackingEnabled));
+        mapTrackToggleButton.classList.toggle("is-waiting", isMarkerTrackingEnabled && !hasTrackingCoords);
+        mapTrackToggleButton.title = isMarkerTrackingEnabled && !hasTrackingCoords
+            ? "Слежение продолжится, когда появятся координаты"
+            : "Отслеживание метки";
     }
 
     if (mapCenterOnMarkerButton) {
@@ -1862,6 +1871,8 @@ function renderRtkRoute(historyRows) {
 function getDashboardReplayElements() {
     return {
         panel: document.getElementById("dashboardReplayPanel"),
+        date: document.getElementById("dashboardReplayDate"),
+        load: document.getElementById("dashboardReplayLoad"),
         play: document.getElementById("dashboardReplayPlay"),
         slider: document.getElementById("dashboardReplaySlider"),
         time: document.getElementById("dashboardReplayTime"),
@@ -1900,9 +1911,99 @@ function findDashboardReplayIndexByTimestamp(timestampMs) {
     return left;
 }
 
+function buildDashboardHostReplayPoints(historyRows) {
+    if (!Array.isArray(historyRows)) return [];
+
+    return historyRows
+        .map((row) => ({
+            timestampMs: parseRouteTimestampMs(row?.timestamp),
+            source: row,
+        }))
+        .filter((point) => point.timestampMs !== null)
+        .sort((left, right) => left.timestampMs - right.timestampMs);
+}
+
+function getDashboardReplayBatch(timestampMs, deviceId) {
+    return dashboardReplayBatches.find((batch) => {
+        const startMs = parseRouteTimestampMs(batch?.startTime);
+        const endMs = parseRouteTimestampMs(batch?.endTime);
+        const matchesDevice = !deviceId || !batch?.deviceId || batch.deviceId === deviceId;
+        return matchesDevice &&
+            startMs !== null &&
+            startMs <= timestampMs &&
+            (endMs === null || timestampMs < endMs);
+    }) || null;
+}
+
+function getDashboardReplayIngredients(batch, timestampMs, field = "addedAt") {
+    const rows = Array.isArray(batch?.actualIngredients) ? batch.actualIngredients : [];
+    return rows.filter((ingredient) => {
+        const eventMs = parseRouteTimestampMs(ingredient?.[field] || ingredient?.addedAt);
+        return eventMs !== null && eventMs <= timestampMs;
+    });
+}
+
+function aggregateDashboardReplayIngredients(rows) {
+    const byName = new Map();
+    rows.forEach((ingredient) => {
+        const name = String(ingredient?.ingredientName || "Неизвестный компонент").trim();
+        const key = name.toLowerCase();
+        const previous = byName.get(key) || { name, fact: 0 };
+        previous.fact += Number(ingredient?.actualWeight || 0);
+        byName.set(key, previous);
+    });
+    return Array.from(byName.values()).map((ingredient) => ({
+        ...ingredient,
+        fact: Math.round(ingredient.fact * 10) / 10,
+    }));
+}
+
+function buildDashboardReplayWarnings(host, loader, loaderAgeMs) {
+    const warnings = [];
+    if (!hasFreshGpsCoordinates(host)) {
+        warnings.push({
+            code: "no_gps",
+            title: "Нет GPS",
+            message: "В этом кадре координаты HOST недоступны или GPS fix устарел.",
+            severity: "danger",
+        });
+    }
+    if (host?.weightValid === false) {
+        warnings.push({
+            code: "weight_invalid",
+            title: "Нет корректного веса",
+            message: "В этом кадре показание весов отмечено как недостоверное.",
+            severity: "warning",
+        });
+    }
+    if (host?.eventsReaderOk === false) {
+        warnings.push({
+            code: "events_reader",
+            title: "Нет данных считывателя событий",
+            message: "В этом кадре считыватель событий HOST не отвечал.",
+            severity: "warning",
+        });
+    }
+
+    const loaderTimeoutMs = Math.max(
+        1,
+        Number(dashboardReplaySettings.loaderOfflineTimeoutMinutes || 4)
+    ) * 60 * 1000;
+    if (!loader || !Number.isFinite(loaderAgeMs) || loaderAgeMs > loaderTimeoutMs) {
+        warnings.push({
+            code: "no_rtk",
+            title: "Нет погрузчика",
+            message: "К этому моменту не было свежего RTK-пакета погрузчика.",
+            severity: "warning",
+        });
+    }
+    return warnings;
+}
+
 function buildDashboardReplayFrames() {
-    const hostPoints = buildRoutePoints(latestTrackHistory.host);
-    const loaderPoints = buildRoutePoints(latestTrackHistory.rtk);
+    const hostPoints = buildDashboardHostReplayPoints(dashboardReplayHistory.host);
+    const loaderPoints = buildRoutePoints(dashboardReplayHistory.rtk);
+    const runtimeByBatchId = new Map();
     let loaderIndex = -1;
 
     return hostPoints.map((hostPoint) => {
@@ -1914,11 +2015,89 @@ function buildDashboardReplayFrames() {
         }
 
         const loaderPoint = loaderIndex >= 0 ? loaderPoints[loaderIndex] : null;
+        const loaderAgeMs = loaderPoint ? Math.max(0, hostPoint.timestampMs - loaderPoint.timestampMs) : null;
+        const host = hostPoint.source;
+        const batch = getDashboardReplayBatch(hostPoint.timestampMs, host?.deviceId);
+        let mode = "Ожидание";
+        let activeBatch = null;
+        let unloadProgress = null;
+
+        if (batch) {
+            const runtime = runtimeByBatchId.get(batch.id) || {
+                peakWeight: Number(batch.startWeight || 0),
+                previousWeight: Number(host?.weight || 0),
+                recentSpeeds: [],
+                unloading: false,
+            };
+            const currentWeight = Number(host?.weight || 0);
+            runtime.peakWeight = Math.max(runtime.peakWeight, currentWeight);
+            runtime.recentSpeeds.push(Number(host?.speedKmh));
+            if (runtime.recentSpeeds.length > 8) runtime.recentSpeeds.shift();
+
+            const speedThreshold = Math.max(0, Number(dashboardReplaySettings.movementSpeedThresholdKmh || 3));
+            const confirmPackets = Math.max(1, Number(dashboardReplaySettings.movementConfirmPackets || 3));
+            const recentConfirmedSpeeds = runtime.recentSpeeds.slice(-confirmPackets);
+            const isMoving = recentConfirmedSpeeds.length >= confirmPackets &&
+                recentConfirmedSpeeds.every((speed) => Number.isFinite(speed) && speed >= speedThreshold);
+            const dropFromPeak = runtime.peakWeight - currentWeight;
+            const recentDelta = currentWeight - runtime.previousWeight;
+            const completedIngredients = getDashboardReplayIngredients(batch, hostPoint.timestampMs, "addedAt");
+            const begunIngredients = getDashboardReplayIngredients(batch, hostPoint.timestampMs, "startedAt");
+
+            if (
+                runtime.unloading ||
+                (
+                    !isMoving &&
+                    runtime.peakWeight > Number(dashboardReplaySettings.unloadMinPeakKg || 400) &&
+                    dropFromPeak > Number(dashboardReplaySettings.unloadDropThresholdKg || 500)
+                )
+            ) {
+                runtime.unloading = true;
+                mode = "Выгрузка";
+            } else if (
+                !isMoving &&
+                (
+                    begunIngredients.length > 0 ||
+                    completedIngredients.length > 0 ||
+                    recentDelta > Number(dashboardReplaySettings.modeLoadingDeltaHintKg || 5)
+                )
+            ) {
+                mode = "Загрузка";
+            }
+
+            const ingredients = aggregateDashboardReplayIngredients(completedIngredients);
+            activeBatch = {
+                id: batch.id,
+                ingredients,
+                __replay: true,
+            };
+            if (mode === "Выгрузка") {
+                const targetWeight = ingredients.reduce((sum, ingredient) => sum + Number(ingredient.fact || 0), 0);
+                unloadProgress = {
+                    target_weight: targetWeight,
+                    unloaded_fact: Math.max(0, runtime.peakWeight - currentWeight),
+                };
+            }
+
+            runtime.previousWeight = currentWeight;
+            runtimeByBatchId.set(batch.id, runtime);
+        }
+
         return {
             timestampMs: hostPoint.timestampMs,
-            host: hostPoint.source,
+            host,
             loader: loaderPoint?.source || null,
-            loaderAgeMs: loaderPoint ? Math.max(0, hostPoint.timestampMs - loaderPoint.timestampMs) : null,
+            loaderAgeMs,
+            dashboard: {
+                ...host,
+                mode,
+                isMixing: mode === "Загрузка",
+                isUnloading: mode === "Выгрузка",
+                unload_progress: unloadProgress,
+                active_batch: activeBatch,
+                __dashboardReplay: true,
+                __replayWarnings: buildDashboardReplayWarnings(host, loaderPoint?.source || null, loaderAgeMs),
+            },
         };
     });
 }
@@ -1926,7 +2105,6 @@ function buildDashboardReplayFrames() {
 function renderDashboardReplayFrame(index = dashboardReplayIndex, options = {}) {
     const elements = getDashboardReplayElements();
     if (!isAdmin() || !dashboardReplayFrames.length) {
-        elements.panel?.classList.add("d-none");
         return;
     }
 
@@ -1970,6 +2148,9 @@ function renderDashboardReplayFrame(index = dashboardReplayIndex, options = {}) 
     } else {
         hideRtkPlacemark();
     }
+    if (dashboardReplayActive) {
+        renderDashboard(frame.dashboard);
+    }
 }
 
 function rebuildDashboardReplayFrames() {
@@ -1978,14 +2159,86 @@ function rebuildDashboardReplayFrames() {
     const previousTimestampMs = dashboardReplayFrames[dashboardReplayIndex]?.timestampMs ?? null;
     dashboardReplayFrames = buildDashboardReplayFrames();
     if (!dashboardReplayFrames.length) {
-        getDashboardReplayElements().panel?.classList.add("d-none");
+        const elements = getDashboardReplayElements();
+        if (elements.play) elements.play.disabled = true;
+        if (elements.slider) elements.slider.disabled = true;
+        if (elements.speed) elements.speed.disabled = true;
+        if (elements.live) elements.live.disabled = true;
+        if (elements.status && dashboardReplayHistoryLoaded) {
+            elements.status.textContent = "За выбранный день нет HOST-пакетов.";
+        }
         return;
     }
 
+    const elements = getDashboardReplayElements();
+    if (elements.play) elements.play.disabled = false;
+    if (elements.slider) elements.slider.disabled = false;
+    if (elements.speed) elements.speed.disabled = false;
+    if (elements.live) elements.live.disabled = false;
     dashboardReplayIndex = dashboardReplayActive && Number.isFinite(previousTimestampMs)
         ? findDashboardReplayIndexByTimestamp(previousTimestampMs)
         : dashboardReplayFrames.length - 1;
     renderDashboardReplayFrame(dashboardReplayIndex, { moveMap: dashboardReplayActive });
+}
+
+async function loadDashboardReplayHistory() {
+    if (!isAdmin() || dashboardReplayHistoryLoading) return;
+
+    const elements = getDashboardReplayElements();
+    const selectedDate = String(elements.date?.value || "").trim();
+    if (!selectedDate) {
+        if (elements.status) elements.status.textContent = "Выберите день истории.";
+        return;
+    }
+
+    stopDashboardReplay();
+    dashboardReplayActive = false;
+    renderDashboard(latestTelemetry);
+    dashboardReplayHistoryLoading = true;
+    if (elements.load) {
+        elements.load.disabled = true;
+        elements.load.textContent = "Загрузка…";
+    }
+    if (elements.status) {
+        elements.status.textContent = `Загрузка истории за ${selectedDate}…`;
+    }
+    if (elements.date) elements.date.disabled = true;
+
+    try {
+        const response = await fetch(
+            `${API_BASE}/admin/replay-day?date=${encodeURIComponent(selectedDate)}`,
+            { headers: getHeaders() }
+        );
+
+        if (!response.ok) {
+            throw new Error(`История недоступна: HTTP ${response.status}`);
+        }
+
+        const payload = await response.json();
+        dashboardReplayHistory = {
+            host: Array.isArray(payload?.host) ? payload.host : [],
+            rtk: Array.isArray(payload?.rtk) ? payload.rtk : [],
+        };
+        dashboardReplayBatches = Array.isArray(payload?.batches) ? payload.batches : [];
+        dashboardReplaySettings = payload?.settings || {};
+        dashboardReplayHistoryLoaded = true;
+        rebuildDashboardReplayFrames();
+        if (payload?.truncated && elements.status) {
+            elements.status.textContent += " · достигнут лимит кадров";
+        }
+    } catch (error) {
+        console.error("Error loading dashboard replay history:", error);
+        if (elements.status) {
+            elements.status.textContent = error.message || "Не удалось загрузить диагностическую историю.";
+        }
+    } finally {
+        dashboardReplayHistoryLoading = false;
+        if (elements.date) elements.date.disabled = false;
+        if (elements.load) {
+            elements.load.disabled = false;
+            elements.load.textContent = dashboardReplayHistoryLoaded ? "Обновить историю" : "Загрузить историю";
+        }
+    }
 }
 
 function stopDashboardReplay() {
@@ -2024,8 +2277,35 @@ function returnDashboardReplayToLive() {
     dashboardReplayActive = false;
     dashboardReplayIndex = Math.max(0, dashboardReplayFrames.length - 1);
     renderDashboardReplayFrame(dashboardReplayIndex, { moveMap: false });
+    renderDashboard(latestTelemetry);
     updateMapPosition(latestTelemetry, isTelemetryOnline(latestTelemetry), { force: true, instant: true });
     updateRtkMapPosition(latestRtkTelemetry, { force: true });
+    void fetchLatest({ force: true });
+}
+
+async function loadDashboardReplayDates() {
+    const elements = getDashboardReplayElements();
+    if (!isAdmin() || !elements.date) return;
+
+    try {
+        const response = await fetch(`${API_BASE}/admin/replay-days`, { headers: getHeaders() });
+        if (!response.ok) return;
+
+        const payload = await response.json();
+        const dates = Array.isArray(payload?.dates) ? payload.dates.filter(Boolean) : [];
+        if (!dates.length) {
+            elements.status.textContent = "В базе пока нет истории HOST.";
+            return;
+        }
+
+        elements.date.max = dates[0];
+        elements.date.min = dates[dates.length - 1];
+        if (!elements.date.value || !dates.includes(elements.date.value)) {
+            elements.date.value = dates[0];
+        }
+    } catch (error) {
+        console.error("Error loading dashboard replay dates:", error);
+    }
 }
 
 function initDashboardReplay() {
@@ -2035,6 +2315,9 @@ function initDashboardReplay() {
         return;
     }
 
+    elements.panel?.classList.remove("d-none");
+    elements.load?.addEventListener("click", loadDashboardReplayHistory);
+    elements.date?.addEventListener("change", loadDashboardReplayHistory);
     elements.play?.addEventListener("click", () => {
         if (dashboardReplayPlaying) stopDashboardReplay();
         else startDashboardReplay();
@@ -2045,7 +2328,7 @@ function initDashboardReplay() {
         renderDashboardReplayFrame(Number(elements.slider.value));
     });
     elements.live?.addEventListener("click", returnDashboardReplayToLive);
-    rebuildDashboardReplayFrames();
+    void loadDashboardReplayDates();
 }
 
 function getRetainableTelemetry(track, snapshotRows = []) {

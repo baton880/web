@@ -200,6 +200,10 @@
     }
 
     function getRenderedWarningItems(data) {
+        if (data?.__dashboardReplay === true) {
+            return Array.isArray(data?.__replayWarnings) ? data.__replayWarnings : [];
+        }
+
         if (latestWarningSource === "backend") {
             return Array.isArray(latestWarningItems) ? latestWarningItems : [];
         }
@@ -252,10 +256,13 @@
             return;
         }
 
+        const isReplay = data?.__dashboardReplay === true;
         const items = getRenderedWarningItems(data);
 
-        titleElement.textContent = WARNING_SECTION_TITLE;
-        metaElement.textContent = getWarningsMetaText(items);
+        titleElement.textContent = isReplay ? `${WARNING_SECTION_TITLE} · история` : WARNING_SECTION_TITLE;
+        metaElement.textContent = isReplay
+            ? `${items.length > 0 ? `Активно: ${items.length}` : "Система в норме"} | ${formatDateTime(data?.timestamp)}`
+            : getWarningsMetaText(items);
         sectionElement.hidden = false;
         sectionElement.classList.remove("d-none");
 
@@ -467,11 +474,11 @@
         const isVisible = hasActiveBatch;
 
         setSectionVisible("dashboardActiveBatchCard", isVisible);
-        updateStopBatchButton(hasActiveBatch ? batch : null);
+        updateStopBatchButton(hasActiveBatch && batch?.__replay !== true ? batch : null);
 
         if (!isVisible) {
             setText("dashboardActiveBatchMeta", "--");
-            tbody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">--</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" class="dashboard-mini-table-empty">--</td></tr>';
             return;
         }
 
@@ -482,34 +489,25 @@
         setText("dashboardActiveBatchMeta", metaParts.join(" | "));
 
         if (!rows.length) {
-            tbody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Компоненты ещё не зафиксированы</td></tr>';
+            tbody.innerHTML = '<tr><td colspan="2" class="dashboard-mini-table-empty">Компоненты ещё не зафиксированы</td></tr>';
             return;
         }
 
         tbody.innerHTML = rows.map((row) => {
             const name = escapeHtml(row?.name ?? "--");
-            const plan = formatMetric(row?.plan, 1);
             const fact = formatMetric(row?.fact, 1);
-            const deviation = formatSignedPercent(row?.deviation_percent, 1);
-            const isViolation = asBoolean(row?.is_violation);
 
             return `
                 <tr>
                     <td>${name}</td>
-                    <td>${plan}</td>
                     <td>${fact}</td>
-                    <td>${deviation}</td>
-                    <td>
-                        <span class="dashboard-bool-badge ${isViolation ? "is-yes" : "is-no"}">
-                            ${isViolation ? "Да" : "Нет"}
-                        </span>
-                    </td>
                 </tr>
             `;
         }).join("");
     };
 
     renderDashboard = function (data) {
+        const isReplay = data?.__dashboardReplay === true;
         updateCurrentStateNotice(data);
         renderWarnings(data);
 
@@ -517,7 +515,7 @@
             resetTelemetryActivity();
             setVehicleStatus(false);
             setText("dashboardCurrentZone", "--");
-            renderModeBadge(data?.mode);
+            renderModeBadge(data?.mode, { replay: isReplay });
             setText("dashboardCurrentWeight", "--");
             setText(
                 "dashboardLastPacketTime",
@@ -533,7 +531,7 @@
             return;
         }
 
-        const isOnline = isTelemetryOnline(data);
+        const isOnline = isReplay ? true : isTelemetryOnline(data);
         const hasCoordinates = hasValidCoordinates(data.lat, data.lon);
         const parsedLat = Number(data.lat);
         const parsedLon = Number(data.lon);
@@ -543,7 +541,7 @@
 
         setVehicleStatus(isOnline);
         setText("dashboardCurrentZone", zoneName);
-        renderModeBadge(data?.mode);
+        renderModeBadge(data?.mode, { replay: isReplay });
         setText("dashboardCurrentWeight", data.weight != null ? `${formatMetric(data.weight, 1)} кг` : "--");
         setText("dashboardLastPacketTime", formatDateTime(data.timestamp));
         renderUnloadProgress(data?.mode, data?.unload_progress);
@@ -567,7 +565,9 @@
                 latestWarningSource = "backend";
                 latestWarningItems = [];
                 latestWarningUpdatedAt = null;
-                renderDashboard(latestTelemetry);
+                if (!dashboardReplayActive) {
+                    renderDashboard(latestTelemetry);
+                }
                 return;
             }
 
@@ -585,11 +585,15 @@
                 hideRtkPlacemark();
             }
 
-            syncTelemetryZoneBanners();
+            if (!dashboardReplayActive) {
+                syncTelemetryZoneBanners();
+            }
             await syncWarningsFromResponse(warningsResponse, latestTelemetry, latestRtkTelemetry);
 
-            renderDashboard(latestTelemetry);
-            updateRtkMapPosition(latestRtkTelemetry);
+            if (!dashboardReplayActive) {
+                renderDashboard(latestTelemetry);
+                updateRtkMapPosition(latestRtkTelemetry);
+            }
         } catch (error) {
             console.error("Error fetching latest:", error);
             latestFetchState.status = !isEmptyTelemetry(latestTelemetry) ? "stale" : "error";
@@ -597,7 +601,9 @@
             latestWarningSource = "backend";
             latestWarningItems = [];
             latestWarningUpdatedAt = null;
-            renderDashboard(latestTelemetry);
+            if (!dashboardReplayActive) {
+                renderDashboard(latestTelemetry);
+            }
         }
     };
 
