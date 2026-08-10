@@ -11,6 +11,9 @@ const SERVER_ROOT = path.resolve(__dirname, '../../..')
 const DEFAULT_DATABASE_PATH = path.join(SERVER_ROOT, 'runtime', 'host-ingress.sqlite3')
 const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const CATCHUP_THROUGH_ID_KEY = 'replay_catchup_through_id'
+const CATCHUP_MODE_KEY = 'replay_catchup_mode'
+const CATCHUP_MODE_PRE_REPLAY = 'pre-replay'
+const CATCHUP_MODE_POST_REPLAY = 'post-replay'
 const REPLAY_ACTIVE_KEY = 'calculated_replay_active'
 const PROCESSED_HIGH_WATER_KEY = 'processed_high_water_timestamp'
 const DIRTY_PADDING_MS = 10 * 60 * 1000
@@ -155,6 +158,7 @@ export class HostIngressStore {
     })
     this.claimTransaction = this.db.transaction((nowIso) => {
       const catchupThroughId = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
+      const catchupMode = this.getMetaValue(CATCHUP_MODE_KEY)
       let row = null
 
       if (Number.isInteger(catchupThroughId) && catchupThroughId > 0) {
@@ -175,9 +179,22 @@ export class HostIngressStore {
             LIMIT 1
           `).get(catchupThroughId)
           if (remaining) return null
+          if (catchupMode === CATCHUP_MODE_POST_REPLAY) {
+            const expandedThroughId = this.maxUnprocessedIngressId()
+            if (Number.isInteger(expandedThroughId) && expandedThroughId > catchupThroughId) {
+              // Packets keep arriving while the post-replay backlog is being
+              // consumed. Extend that fence until the worker catches the live
+              // edge so normal newest-live priority cannot jump over the last
+              // history row and manufacture a new dirty generation.
+              this.setMetaValue(CATCHUP_THROUGH_ID_KEY, expandedThroughId, nowIso)
+              return null
+            }
+          }
           this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+          this.deleteMetaValue(CATCHUP_MODE_KEY)
           // Yield at the finite fence boundary so the worker can schedule the
-          // replay before it starts consuming packets that arrived later.
+          // replay before it starts consuming packets that arrived later. The
+          // pre-replay fence stays finite; only post-replay catch-up expands.
           return null
         }
       }
@@ -228,18 +245,28 @@ export class HostIngressStore {
 
   beginReplayDrain(now = isoNow()) {
     const existing = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
+    const existingMode = this.getMetaValue(CATCHUP_MODE_KEY)
     const maxId = this.maxUnprocessedIngressId()
     const throughId = Math.max(
       Number.isInteger(existing) && existing > 0 ? existing : 0,
       Number.isInteger(maxId) && maxId > 0 ? maxId : 0
     ) || null
-    if (Number.isInteger(throughId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, throughId, now)
+    if (Number.isInteger(throughId)) {
+      this.setMetaValue(CATCHUP_THROUGH_ID_KEY, throughId, now)
+      if (existingMode !== CATCHUP_MODE_POST_REPLAY) {
+        this.setMetaValue(CATCHUP_MODE_KEY, CATCHUP_MODE_PRE_REPLAY, now)
+      }
+    }
     return throughId
   }
 
   replayDrainThroughId() {
     const value = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
     return Number.isInteger(value) && value > 0 ? value : null
+  }
+
+  replayCatchupMode() {
+    return this.getMetaValue(CATCHUP_MODE_KEY)
   }
 
   noteProcessedTimestamp(timestamp, now = isoNow()) {
@@ -275,7 +302,13 @@ export class HostIngressStore {
     const replayWasActive = this.getMetaValue(REPLAY_ACTIVE_KEY)
     if (!replayWasActive) return false
     const maxId = this.maxUnprocessedIngressId()
-    if (Number.isInteger(maxId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId, now)
+    if (Number.isInteger(maxId)) {
+      this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId, now)
+      this.setMetaValue(CATCHUP_MODE_KEY, CATCHUP_MODE_POST_REPLAY, now)
+    } else {
+      this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+      this.deleteMetaValue(CATCHUP_MODE_KEY)
+    }
     this.deleteMetaValue(REPLAY_ACTIVE_KEY)
     return true
   }
@@ -525,8 +558,13 @@ export class HostIngressStore {
   finishCalculatedReplay({ clearHistoryDirty = false, farmDay = null, throughVersion = null } = {}) {
     return this.db.transaction(() => {
       const maxId = this.maxUnprocessedIngressId()
-      if (Number.isInteger(maxId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId)
-      else this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+      if (Number.isInteger(maxId)) {
+        this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId)
+        this.setMetaValue(CATCHUP_MODE_KEY, CATCHUP_MODE_POST_REPLAY)
+      } else {
+        this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+        this.deleteMetaValue(CATCHUP_MODE_KEY)
+      }
       this.deleteMetaValue(REPLAY_ACTIVE_KEY)
       const clearedHistoryDirty = clearHistoryDirty
         ? (farmDay
@@ -562,6 +600,7 @@ export class HostIngressStore {
     const lastError = this.db.prepare(`SELECT id,status,attempts,last_error,updated_at FROM host_ingress WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1`).get()
     const historyDirtyFrom = this.db.prepare(`SELECT value FROM host_ingress_meta WHERE key='history_dirty_from'`).get()?.value || null
     const catchupThroughId = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY)) || null
+    const catchupMode = this.replayCatchupMode()
     const replayDirty = this.nextReplayDirty()
     const replayDirtyDayCount = Number(this.db.prepare('SELECT COUNT(*) count FROM calculated_replay_dirty').get()?.count || 0)
     const processedHighWaterTimestamp = this.processedHighWaterTimestamp()
@@ -582,6 +621,7 @@ export class HostIngressStore {
       replayDirty,
       replayDirtyDayCount,
       catchupThroughId,
+      catchupMode,
       processedHighWaterTimestamp,
       replayWindowReady: this.isReplayWindowReady(replayDirty),
       lastError: lastError || null

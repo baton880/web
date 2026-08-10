@@ -481,6 +481,7 @@ async function testHostPacketsAcceptedDuringReplayDoNotScheduleAnotherReplay() {
     latestStoredTimestampMs = Math.max(latestStoredTimestampMs, timestampMs)
     processedPacketIds.push(identity.packetId)
     if (identity.isLive) currentPacketId = identity.packetId
+    await delay(20)
     return { outOfOrder, timestamp: body.timestamp }
   }, {
     store,
@@ -517,11 +518,33 @@ async function testHostPacketsAcceptedDuringReplayDoNotScheduleAnotherReplay() {
     assert.equal(store.stats().pending, 4)
 
     children[0].emit('close', 0, null)
-    await waitFor(() => processedPacketIds.length === 4)
+    await waitFor(() => processedPacketIds.length === 1)
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'stream-replay-catchup',
+      livePacketId: 5,
+      packets: [
+        { packetId: 5, payload: { timestamp: '2026-07-26T01:00:10Z' } }
+      ]
+    })
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'stream-replay-catchup',
+      livePacketId: 6,
+      packets: [
+        { packetId: 6, payload: { timestamp: '2026-07-26T01:00:12Z' } }
+      ]
+    })
+
+    await waitFor(() => processedPacketIds.length === 6)
     await delay(100)
 
-    assert.deepEqual(processedPacketIds, [1, 2, 3, 4], 'replay-window packets must catch up in source order')
-    assert.equal(currentPacketId, 4, 'the newest accepted live packet must remain current')
+    assert.deepEqual(
+      processedPacketIds,
+      [1, 2, 3, 4, 5, 6],
+      'post-replay fence must expand to the live edge without letting newest-live jump over history'
+    )
+    assert.equal(currentPacketId, 6, 'the newest accepted live packet must remain current')
     assert.equal(store.stats().historyDirtyFrom, null)
     assert.equal(children.length, 1, 'synthetic replay catch-up must not schedule a second replay')
   } finally {

@@ -127,6 +127,7 @@
           replayDirty: stats.replayDirty,
           replayDirtyDayCount: stats.replayDirtyDayCount,
           catchupThroughId: stats.catchupThroughId,
+          catchupMode: stats.catchupMode,
           processedHighWaterTimestamp: stats.processedHighWaterTimestamp,
           replayWindowReady: stats.replayWindowReady,
           lastError: stats.lastError
