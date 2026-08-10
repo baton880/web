@@ -2483,6 +2483,32 @@ export class TelemetryProcessor {
   clearStates() {
     this.deviceStates.clear();
   }
+
+  exportStates() {
+    return {
+      version: 1,
+      devices: Array.from(this.deviceStates.entries(), ([deviceId, state]) => ({
+        deviceId,
+        state: structuredClone(state)
+      }))
+    };
+  }
+
+  replaceStates(snapshot) {
+    if (snapshot?.version !== 1 || !Array.isArray(snapshot.devices)) {
+      throw new TypeError('Unsupported telemetry processor state snapshot');
+    }
+
+    const nextStates = new Map();
+    for (const entry of snapshot.devices) {
+      const deviceId = String(entry?.deviceId || '').trim();
+      if (!deviceId || !entry?.state || typeof entry.state !== 'object' || Array.isArray(entry.state)) {
+        throw new TypeError('Invalid telemetry processor device state');
+      }
+      nextStates.set(deviceId, structuredClone(entry.state));
+    }
+    this.deviceStates = nextStates;
+  }
 }
 
 export default new TelemetryProcessor();

@@ -22,6 +22,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
   let lastScheduledDirtyKey = null
 
   function scheduleNextDirtyReplay() {
+    if (typeof store.replayDrainThroughId === 'function' && store.replayDrainThroughId()) return
     const dirty = typeof store.nextReplayDirty === 'function' ? store.nextReplayDirty() : null
     if (!dirty) {
       lastScheduledDirtyKey = null
@@ -61,9 +62,10 @@ export function startHostIngressWorker(processPacket, options = {}) {
           packetId: row.packet_id,
           isLive: Boolean(row.is_live)
         })
+        if (result?.timestamp) store.noteProcessedTimestamp?.(result.timestamp)
         if (result?.outOfOrder && result?.timestamp) {
           store.markHistoryDirty(result.timestamp)
-          scheduleNextDirtyReplay()
+          store.beginReplayDrain?.()
         }
         store.markProcessed(row.id)
       } catch (error) {

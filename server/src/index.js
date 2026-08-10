@@ -127,6 +127,8 @@
           replayDirty: stats.replayDirty,
           replayDirtyDayCount: stats.replayDirtyDayCount,
           catchupThroughId: stats.catchupThroughId,
+          processedHighWaterTimestamp: stats.processedHighWaterTimestamp,
+          replayWindowReady: stats.replayWindowReady,
           lastError: stats.lastError
         }
       } catch (error) {

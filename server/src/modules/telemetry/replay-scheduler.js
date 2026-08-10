@@ -1,7 +1,11 @@
 import { spawn } from 'node:child_process'
+import { readFileSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
 import { dirname, resolve } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { fileURLToPath } from 'node:url'
 
+import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { getHostIngressStore } from './host-ingress-store.js'
 import { farmDateRange } from '../../utils/farm-date.js'
@@ -55,7 +59,9 @@ export class CalculatedReplayScheduler {
     this.drainTimeoutMs = normalizeDelayMs(options.drainTimeoutMs, DEFAULT_DRAIN_TIMEOUT_MS, 1)
     this.failureBackoffMs = normalizeDelayMs(options.failureBackoffMs, DEFAULT_FAILURE_BACKOFF_MS, 1)
     this.maxQueueWaitMs = normalizeDelayMs(options.maxQueueWaitMs, DEFAULT_MAX_QUEUE_WAIT_MS, 1)
+    this.replayReady = options.replayReady || (() => true)
     this.onReplayStart = options.onReplayStart || (() => {})
+    this.onReplayState = options.onReplayState || null
     this.onReplaySuccess = options.onReplaySuccess || (() => {})
     this.onReplayFailure = options.onReplayFailure || (() => {})
 
@@ -146,8 +152,21 @@ export class CalculatedReplayScheduler {
   async startQueuedReplay() {
     if (!this.enabled || !this.queued || this.isBlockingWrites()) return
 
-    const reason = this.pendingReason || 'telemetry-buffer'
-    const meta = this.pendingMeta || {}
+    let reason = this.pendingReason || 'telemetry-buffer'
+    let meta = this.pendingMeta || {}
+    let ready = false
+    try {
+      ready = this.replayReady({ reason, meta })
+    } catch (error) {
+      this.lastError = `Replay readiness check failed: ${error?.message || String(error)}`
+      console.error('[Calculated replay] readiness check failed', {
+        error: error?.message || String(error)
+      })
+    }
+    if (!ready) {
+      this.armTimer(Math.min(1000, this.bufferDrainedDebounceMs))
+      return
+    }
     this.queued = false
     this.queuedSinceMs = null
     this.pendingReason = null
@@ -170,10 +189,25 @@ export class CalculatedReplayScheduler {
       return
     }
 
+    // A writer that was already active when pause() ran may publish a newer
+    // dirty generation before releasing its lease. That write is in SQLite and
+    // therefore covered by the replay we are about to start. Fold the newer
+    // generation into this run when it belongs to the same farm day; work for a
+    // different day must remain queued separately.
+    if (this.queued && this.pendingMeta?.farmDay === meta?.farmDay) {
+      reason = this.pendingReason || reason
+      meta = this.pendingMeta || meta
+      this.queued = false
+      this.queuedSinceMs = null
+      this.pendingReason = null
+      this.pendingMeta = null
+    }
+
     this.state = 'running'
     this.lastStartedAtMs = this.now()
     try {
-      this.onReplayStart({ reason, meta })
+      const startResult = this.onReplayStart({ reason, meta })
+      if (startResult?.meta) meta = startResult.meta
     } catch (error) {
       this.coordinator.resume()
       this.state = 'backoff'
@@ -199,6 +233,22 @@ export class CalculatedReplayScheduler {
       }
     }
     this.lastCompletedAtMs = this.now()
+
+    if (result.ok && this.onReplayState) {
+      try {
+        this.onReplayState(result.stateSnapshot)
+      } catch (error) {
+        console.error('[Calculated replay] processor state sync failed', {
+          error: error?.message || String(error)
+        })
+        result = {
+          ok: false,
+          code: result.code,
+          signal: result.signal,
+          error: `Processor state sync failed: ${error?.message || String(error)}`
+        }
+      }
+    }
 
     if (result.ok) {
       try {
@@ -262,6 +312,9 @@ export class CalculatedReplayScheduler {
   runReplayProcess(reason, meta = {}) {
     return new Promise((resolveResult) => {
       let settled = false
+      const replayStatePath = this.onReplayState
+        ? resolve(tmpdir(), `farm-replay-state-${process.pid}-${randomUUID()}.json`)
+        : null
       const child = this.spawnProcess(process.execPath, [this.replayScript], {
         cwd: this.serverRoot,
         env: {
@@ -269,7 +322,8 @@ export class CalculatedReplayScheduler {
           REPLAY_TRIGGER: reason || 'rtk-buffer',
           ...(meta?.farmDay ? { REPLAY_DAY: String(meta.farmDay) } : {}),
           ...(meta?.dirtyFrom ? { REPLAY_DIRTY_FROM: String(meta.dirtyFrom) } : {}),
-          ...(meta?.dirtyTo ? { REPLAY_DIRTY_TO: String(meta.dirtyTo) } : {})
+          ...(meta?.dirtyTo ? { REPLAY_DIRTY_TO: String(meta.dirtyTo) } : {}),
+          ...(replayStatePath ? { REPLAY_STATE_OUTPUT: replayStatePath } : {})
         },
         stdio: ['ignore', 'pipe', 'pipe']
       })
@@ -288,6 +342,15 @@ export class CalculatedReplayScheduler {
       const finish = (result) => {
         if (settled) return
         settled = true
+        if (result.ok && replayStatePath) {
+          try {
+            result.stateSnapshot = JSON.parse(readFileSync(replayStatePath, 'utf8'))
+          } catch (error) {
+            result.ok = false
+            result.error = `Replay state output unavailable: ${error?.message || String(error)}`
+          }
+        }
+        if (replayStatePath) rmSync(replayStatePath, { force: true })
         resolveResult(result)
       }
       child.once('error', (error) => finish({ ok: false, code: null, signal: null, error: error.message }))
@@ -317,7 +380,18 @@ const replayScheduler = new CalculatedReplayScheduler({
   drainTimeoutMs: process.env.REPLAY_WRITER_DRAIN_TIMEOUT_MS,
   failureBackoffMs: process.env.REPLAY_FAILURE_BACKOFF_MS,
   maxQueueWaitMs: process.env.REPLAY_MAX_QUEUE_WAIT_MS,
-  onReplayStart: ({ meta }) => getHostIngressStore().beginCalculatedReplay(meta),
+  replayReady: () => {
+    const store = getHostIngressStore()
+    return !store.replayDrainThroughId() && store.isReplayWindowReady()
+  },
+  onReplayStart: ({ meta }) => {
+    const store = getHostIngressStore()
+    const latestDirty = store.nextReplayDirty()
+    const effectiveMeta = latestDirty?.farmDay === meta?.farmDay ? latestDirty : meta
+    store.beginCalculatedReplay(effectiveMeta)
+    return { meta: effectiveMeta }
+  },
+  onReplayState: (snapshot) => telemetryProcessor.replaceStates(snapshot),
   onReplaySuccess: ({ meta }) => getHostIngressStore().finishCalculatedReplay({
     clearHistoryDirty: true,
     farmDay: meta?.farmDay || null,

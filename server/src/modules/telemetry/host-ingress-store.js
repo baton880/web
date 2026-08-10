@@ -12,7 +12,10 @@ const DEFAULT_DATABASE_PATH = path.join(SERVER_ROOT, 'runtime', 'host-ingress.sq
 const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 const CATCHUP_THROUGH_ID_KEY = 'replay_catchup_through_id'
 const REPLAY_ACTIVE_KEY = 'calculated_replay_active'
+const PROCESSED_HIGH_WATER_KEY = 'processed_high_water_timestamp'
 const DIRTY_PADDING_MS = 10 * 60 * 1000
+const REPLAY_BOUNDARY_SETTLE_MS = 10 * 60 * 1000
+const DEFAULT_REPLAY_BOUNDARY_MAX_WAIT_MS = 30 * 60 * 1000
 
 function isoNow() {
   return new Date().toISOString()
@@ -39,6 +42,10 @@ function legacyDedupeKey(payload) {
 export class HostIngressStore {
   constructor(databasePath = process.env.HOST_INGRESS_DATABASE_PATH) {
     this.databasePath = resolveDatabasePath(databasePath)
+    this.replayBoundaryMaxWaitMs = Math.max(
+      60 * 1000,
+      Number(process.env.HOST_REPLAY_BOUNDARY_MAX_WAIT_MS) || DEFAULT_REPLAY_BOUNDARY_MAX_WAIT_MS
+    )
     this.db = new Database(this.databasePath)
     this.db.pragma('journal_mode = WAL')
     this.db.pragma('synchronous = FULL')
@@ -169,6 +176,9 @@ export class HostIngressStore {
           `).get(catchupThroughId)
           if (remaining) return null
           this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+          // Yield at the finite fence boundary so the worker can schedule the
+          // replay before it starts consuming packets that arrived later.
+          return null
         }
       }
 
@@ -214,6 +224,51 @@ export class HostIngressStore {
       WHERE status IN ('pending', 'retry', 'processing')
     `).get()?.max_id
     return Number.isInteger(value) ? value : null
+  }
+
+  beginReplayDrain(now = isoNow()) {
+    const existing = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
+    const maxId = this.maxUnprocessedIngressId()
+    const throughId = Math.max(
+      Number.isInteger(existing) && existing > 0 ? existing : 0,
+      Number.isInteger(maxId) && maxId > 0 ? maxId : 0
+    ) || null
+    if (Number.isInteger(throughId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, throughId, now)
+    return throughId
+  }
+
+  replayDrainThroughId() {
+    const value = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
+    return Number.isInteger(value) && value > 0 ? value : null
+  }
+
+  noteProcessedTimestamp(timestamp, now = isoNow()) {
+    const timestampMs = new Date(timestamp).getTime()
+    if (!Number.isFinite(timestampMs)) return this.processedHighWaterTimestamp()
+    const previous = this.processedHighWaterTimestamp()
+    if (!previous || timestampMs > new Date(previous).getTime()) {
+      const next = new Date(timestampMs).toISOString()
+      this.setMetaValue(PROCESSED_HIGH_WATER_KEY, next, now)
+      return next
+    }
+    return previous
+  }
+
+  processedHighWaterTimestamp() {
+    return this.getMetaValue(PROCESSED_HIGH_WATER_KEY)
+  }
+
+  isReplayWindowReady(dirty = this.nextReplayDirty(), nowMs = Date.now()) {
+    if (!dirty) return true
+    const dirtyToMs = new Date(dirty.dirtyTo).getTime()
+    const highWaterMs = new Date(this.processedHighWaterTimestamp() || 0).getTime()
+    if (
+      Number.isFinite(dirtyToMs) &&
+      Number.isFinite(highWaterMs) &&
+      highWaterMs >= dirtyToMs + REPLAY_BOUNDARY_SETTLE_MS
+    ) return true
+    const updatedAtMs = new Date(dirty.updatedAt || 0).getTime()
+    return Number.isFinite(updatedAtMs) && nowMs - updatedAtMs >= this.replayBoundaryMaxWaitMs
   }
 
   recoverInterruptedReplay(now = isoNow()) {
@@ -509,6 +564,7 @@ export class HostIngressStore {
     const catchupThroughId = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY)) || null
     const replayDirty = this.nextReplayDirty()
     const replayDirtyDayCount = Number(this.db.prepare('SELECT COUNT(*) count FROM calculated_replay_dirty').get()?.count || 0)
+    const processedHighWaterTimestamp = this.processedHighWaterTimestamp()
     const oldestMs = oldest ? new Date(oldest.received_at).getTime() : NaN
     const newestLiveMs = newestLive ? new Date(newestLive.received_at).getTime() : NaN
     return {
@@ -526,6 +582,8 @@ export class HostIngressStore {
       replayDirty,
       replayDirtyDayCount,
       catchupThroughId,
+      processedHighWaterTimestamp,
+      replayWindowReady: this.isReplayWindowReady(replayDirty),
       lastError: lastError || null
     }
   }

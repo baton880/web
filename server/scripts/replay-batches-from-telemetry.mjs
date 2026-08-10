@@ -1,4 +1,5 @@
 import { PrismaClient } from '@prisma/client'
+import { writeFileSync } from 'node:fs'
 
 import telemetryProcessor from '../../module-3/telemetryProcessor.js'
 import { calculateHaversine, detectZoneObject } from '../../module-1/geo.js'
@@ -35,6 +36,7 @@ const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
 )
 const REPLAY_DAY = String(process.env.REPLAY_DAY || '').trim() || null
+const REPLAY_STATE_OUTPUT = String(process.env.REPLAY_STATE_OUTPUT || '').trim() || null
 const REPLAY_BOUNDARY_CONTEXT_MS = 10 * 60 * 1000
 const REPLAY_STATE_WARMUP_MS = 24 * 60 * 60 * 1000 + REPLAY_BOUNDARY_CONTEXT_MS
 const EXPLICIT_REPLAY_FROM = (() => {
@@ -1695,6 +1697,13 @@ async function main() {
     maxWait: REPLAY_TRANSACTION_MAX_WAIT_MS,
     timeout: REPLAY_TRANSACTION_TIMEOUT_MS
   })
+
+  if (REPLAY_STATE_OUTPUT) {
+    writeFileSync(REPLAY_STATE_OUTPUT, JSON.stringify(telemetryProcessor.exportStates()), {
+      encoding: 'utf8',
+      flag: 'wx'
+    })
+  }
 
   console.log('Replay complete')
   console.log(JSON.stringify(summary, null, 2))

@@ -138,6 +138,29 @@ async function testAutomaticReplayRejectsUnboundedScope() {
   scheduler.stop()
 }
 
+async function testReplayReadinessFailureKeepsWorkQueued() {
+  const coordinator = new TelemetryWriteCoordinator()
+  let spawnCount = 0
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    bufferDrainedDebounceMs: 20,
+    replayReady: () => { throw new Error('ingress metadata unavailable') },
+    spawnProcess: () => {
+      spawnCount += 1
+      return createFakeChild()
+    }
+  })
+
+  scheduler.schedule('host-ingress-history', { farmDay: '2026-07-23' }, 5)
+  await waitFor(() => scheduler.getStatus().lastError?.includes('ingress metadata unavailable'))
+  assert.equal(scheduler.getStatus().queued, true)
+  assert.equal(scheduler.getStatus().state, 'idle')
+  assert.equal(spawnCount, 0, 'readiness failure must not start an unsafe replay')
+  assert.equal(coordinator.snapshot().accepting, true)
+  scheduler.stop()
+}
+
 async function testReplayCleanupFailureKeepsDirtyWorkQueued() {
   const coordinator = new TelemetryWriteCoordinator()
   let child = null
@@ -162,6 +185,188 @@ async function testReplayCleanupFailureKeepsDirtyWorkQueued() {
   assert.equal(scheduler.getStatus().queued, true)
   assert.equal(coordinator.snapshot().accepting, true)
   scheduler.stop()
+}
+
+async function testReplaySynchronizesProcessorStateBeforeResumingWriters() {
+  const coordinator = new TelemetryWriteCoordinator()
+  const imported = []
+  let child = null
+  let spawnEnvironment = null
+  const expectedSnapshot = {
+    version: 1,
+    devices: [{ deviceId: 'Hozain_01', state: { isMixing: true, peakWeight: 1234 } }]
+  }
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    failureBackoffMs: 1000,
+    onReplayState: (snapshot) => imported.push(snapshot),
+    spawnProcess: (command, args, options) => {
+      spawnEnvironment = options.env
+      child = createFakeChild()
+      return child
+    }
+  })
+
+  scheduler.schedule('host-ingress-history', { farmDay: '2026-07-23' }, 5)
+  await waitFor(() => child)
+  assert.ok(spawnEnvironment.REPLAY_STATE_OUTPUT)
+  fs.writeFileSync(spawnEnvironment.REPLAY_STATE_OUTPUT, JSON.stringify(expectedSnapshot))
+  child.emit('close', 0, null)
+  await waitFor(() => scheduler.getStatus().state === 'idle')
+
+  assert.deepEqual(imported, [expectedSnapshot])
+  assert.equal(coordinator.snapshot().accepting, true)
+  assert.equal(fs.existsSync(spawnEnvironment.REPLAY_STATE_OUTPUT), false)
+  scheduler.stop()
+}
+
+async function testReplayAbsorbsSameDayDirtyGenerationPublishedWhileDraining() {
+  const coordinator = new TelemetryWriteCoordinator()
+  const lease = coordinator.tryAcquire('host-ingress')
+  const children = []
+  const startedMeta = []
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    drainTimeoutMs: 500,
+    onReplayStart: ({ meta }) => startedMeta.push(meta),
+    spawnProcess: () => {
+      const child = createFakeChild()
+      children.push(child)
+      return child
+    }
+  })
+
+  scheduler.schedule('host-ingress-history', { farmDay: '2026-07-23', version: 1 }, 5)
+  await waitFor(() => scheduler.getStatus().state === 'draining')
+  scheduler.schedule('host-ingress-history', { farmDay: '2026-07-23', version: 2 }, 5)
+  lease.release()
+  await waitFor(() => children.length === 1)
+  assert.equal(startedMeta[0].version, 2)
+  children[0].emit('close', 0, null)
+  await waitFor(() => scheduler.getStatus().state === 'idle')
+  await delay(25)
+  assert.equal(children.length, 1, 'same-day work committed before writer drain must be covered by the current replay')
+  assert.equal(scheduler.getStatus().queued, false)
+  scheduler.stop()
+}
+
+async function testBufferedHistoryDrainsToFiniteFenceBeforeSingleReplay() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-pre-replay-drain-'))
+  const store = new HostIngressStore(path.join(tempDir, 'host-ingress.sqlite3'))
+  const coordinator = new TelemetryWriteCoordinator()
+  const children = []
+  const processedPacketIds = []
+  let latestStoredTimestampMs = new Date('2026-07-26T01:00:00Z').getTime()
+
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    bufferQuietDebounceMs: 5,
+    drainTimeoutMs: 500,
+    failureBackoffMs: 1000,
+    replayReady: () => !store.replayDrainThroughId() && store.isReplayWindowReady(),
+    onReplayStart: ({ meta }) => store.beginCalculatedReplay(meta),
+    onReplaySuccess: ({ meta }) => store.finishCalculatedReplay({
+      clearHistoryDirty: true,
+      farmDay: meta.farmDay,
+      throughVersion: meta.version
+    }),
+    onReplayFailure: () => store.finishCalculatedReplay({ clearHistoryDirty: false }),
+    spawnProcess: () => {
+      const child = createFakeChild()
+      children.push(child)
+      return child
+    }
+  })
+
+  const worker = startHostIngressWorker(async (body) => {
+    const timestampMs = new Date(body.timestamp).getTime()
+    const outOfOrder = timestampMs < latestStoredTimestampMs
+    latestStoredTimestampMs = Math.max(latestStoredTimestampMs, timestampMs)
+    processedPacketIds.push(body.packetId)
+    if (body.packetId === 1) {
+      store.enqueueBatch({
+        deviceId: 'Hozain_01',
+        streamId: 'buffered-stream',
+        livePacketId: 8,
+        packets: [
+          { packetId: 5, payload: { packetId: 5, timestamp: '2026-07-26T00:59:54Z' } },
+          { packetId: 6, payload: { packetId: 6, timestamp: '2026-07-26T00:59:56Z' } },
+          { packetId: 7, payload: { packetId: 7, timestamp: '2026-07-26T00:59:58Z' } },
+          { packetId: 8, payload: { packetId: 8, timestamp: '2026-07-26T01:00:00Z' } }
+        ]
+      })
+    }
+    return { outOfOrder, timestamp: body.timestamp }
+  }, {
+    store,
+    pollMs: 5,
+    writeCoordinator: coordinator,
+    scheduleReplay: (reason, meta, options = {}) => scheduler.schedule(
+      reason,
+      meta,
+      options.bufferDrained ? scheduler.bufferDrainedDebounceMs : scheduler.bufferQuietDebounceMs
+    )
+  })
+
+  try {
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'buffered-stream',
+      livePacketId: 4,
+      packets: [
+        { packetId: 1, payload: { packetId: 1, timestamp: '2026-07-26T01:00:02Z' } },
+        { packetId: 2, payload: { packetId: 2, timestamp: '2026-07-26T01:00:04Z' } },
+        { packetId: 3, payload: { packetId: 3, timestamp: '2026-07-26T01:00:06Z' } },
+        { packetId: 4, payload: { packetId: 4, timestamp: '2026-07-26T01:00:08Z' } }
+      ]
+    })
+
+    await waitFor(() => processedPacketIds.length === 8)
+    assert.deepEqual(
+      processedPacketIds,
+      [4, 1, 2, 3, 5, 6, 7, 8],
+      'finite pre-replay fence must expand across a multi-request buffered generation'
+    )
+    assert.equal(store.stats().pending, 0)
+    assert.equal(children.length, 0, 'replay must wait for ten minutes of future source context')
+
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'buffered-stream',
+      livePacketId: 9,
+      packets: [
+        { packetId: 9, payload: { packetId: 9, timestamp: '2026-07-26T01:20:06Z' } }
+      ]
+    })
+    await waitFor(() => children.length === 1)
+
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'buffered-stream',
+      livePacketId: 13,
+      packets: [
+        { packetId: 10, payload: { packetId: 10, timestamp: '2026-07-26T01:20:08Z' } },
+        { packetId: 11, payload: { packetId: 11, timestamp: '2026-07-26T01:20:10Z' } },
+        { packetId: 12, payload: { packetId: 12, timestamp: '2026-07-26T01:20:12Z' } },
+        { packetId: 13, payload: { packetId: 13, timestamp: '2026-07-26T01:20:14Z' } }
+      ]
+    })
+    children[0].emit('close', 0, null)
+    await waitFor(() => processedPacketIds.length === 13)
+    await delay(50)
+
+    assert.deepEqual(processedPacketIds.slice(8), [9, 10, 11, 12, 13])
+    assert.equal(store.stats().historyDirtyFrom, null)
+    assert.equal(children.length, 1, 'post-replay catch-up must not create a second replay')
+  } finally {
+    worker.stop()
+    scheduler.stop()
+    store.close()
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
 }
 
 function testRtkReplayRequiresActuallyHistoricalPackets() {
@@ -378,7 +583,11 @@ function testReplayRollbackAfterForcedFailure() {
 await testReplayWaitsForActiveWritersAndCoalescesRequests()
 await testFarmDayReplayEnvironmentIsBounded()
 await testAutomaticReplayRejectsUnboundedScope()
+await testReplayReadinessFailureKeepsWorkQueued()
 await testReplayCleanupFailureKeepsDirtyWorkQueued()
+await testReplaySynchronizesProcessorStateBeforeResumingWriters()
+await testReplayAbsorbsSameDayDirtyGenerationPublishedWhileDraining()
+await testBufferedHistoryDrainsToFiniteFenceBeforeSingleReplay()
 testRtkReplayRequiresActuallyHistoricalPackets()
 await testRtkWorkerHonorsCoordinatorPauseAndResumes()
 await testHostPacketsAcceptedDuringReplayDoNotScheduleAnotherReplay()
