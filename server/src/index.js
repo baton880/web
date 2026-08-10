@@ -124,6 +124,9 @@
           oldestPendingAgeSeconds: stats.oldestPendingAgeSeconds,
           newestLiveAgeSeconds: stats.newestLiveAgeSeconds,
           historyDirtyFrom: stats.historyDirtyFrom,
+          replayDirty: stats.replayDirty,
+          replayDirtyDayCount: stats.replayDirtyDayCount,
+          catchupThroughId: stats.catchupThroughId,
           lastError: stats.lastError
         }
       } catch (error) {

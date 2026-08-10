@@ -7,11 +7,13 @@ import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-se
 import { getHostTrackClearSince } from './track-state-store.js'
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
+import { getHostIngressStore } from './host-ingress-store.js'
+import { findHistoricalRtkRange } from './rtk-replay-window.js'
 import {
   getRtkIngestStatus,
   noteRtkRequestAcknowledged
 } from './rtk-ingest-monitor.js'
-import { enqueueRtkIngress, getRtkIngressStats } from './rtk-ingress-store.js'
+import { enqueueRtkIngress, getRtkIngressStats, getRtkIngressStore } from './rtk-ingress-store.js'
 
 const router = Router()
 const DEFAULT_RECENT_LIMIT = 5
@@ -893,9 +895,36 @@ async function getLatestRtkPoint(deviceId, freshnessMs = null) {
   )) || null
 }
 
-async function buildLatestResponse(deviceId) {
+export async function buildLatestResponse(deviceId) {
   const settings = await getTelemetrySettings(prisma)
-  const latest = await getLatestRtkPoint(deviceId, resolveLoaderOfflineTimeoutMs(settings))
+  let latest = await getLatestRtkPoint(deviceId, resolveLoaderOfflineTimeoutMs(settings))
+  const processedReceivedAt = latest?.createdAt instanceof Date ? latest.createdAt : new Date(latest?.createdAt || 0)
+  const processedTimestampMs = new Date(latest?.timestamp || 0).getTime()
+  const newestAccepted = getRtkIngressStore().recentAccepted(100)
+    .flatMap((accepted) => {
+      const acceptedReceivedAt = new Date(accepted.receivedAt)
+      if (!Number.isFinite(acceptedReceivedAt.getTime()) || acceptedReceivedAt <= processedReceivedAt) return []
+      return extractRtkPayloads(accepted.body)
+        .map((payload) => normalizeRtkPacket(payload || {}, settings, acceptedReceivedAt))
+        .filter((packet) => !validateRtkPacket(packet))
+        .filter((packet) => !deviceId || packet.deviceId === deviceId)
+        .filter((packet) => !Number.isFinite(processedTimestampMs) || packet.timestamp.getTime() >= processedTimestampMs)
+        .map((packet) => ({ packet, acceptedReceivedAt, status: accepted.status }))
+    })
+    .sort((left, right) => (
+      right.packet.timestamp.getTime() - left.packet.timestamp.getTime() ||
+      right.acceptedReceivedAt.getTime() - left.acceptedReceivedAt.getTime()
+    ))[0]
+  if (newestAccepted) {
+    latest = {
+      id: null,
+      ...newestAccepted.packet,
+      createdAt: newestAccepted.acceptedReceivedAt,
+      pipelineStatus: 'accepted',
+      ingressStatus: newestAccepted.status,
+      processed: newestAccepted.status === 'processed'
+    }
+  }
   if (!latest) {
     return buildEmptyRtkResponse(deviceId)
   }
@@ -1014,6 +1043,15 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     .slice()
     .sort(comparePacketTimestampAsc)
     .map((entry) => entry.packet)
+  const packetDeviceIds = [...new Set(packets.map((packet) => packet.deviceId).filter(Boolean))]
+  const latestStoredBefore = new Map(await Promise.all(packetDeviceIds.map(async (deviceId) => {
+    const latest = await prisma.rtkTelemetry.findFirst({
+      where: { deviceId },
+      orderBy: [{ timestamp: 'desc' }, { id: 'desc' }],
+      select: { timestamp: true }
+    })
+    return [deviceId, latest?.timestamp || null]
+  })))
 
   if (packets.length === 1) {
     const existing = packets[0].ingestKey
@@ -1030,25 +1068,25 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     createdCount = await createManyRtkTelemetryInChunks(packets)
   }
 
-  if (createdCount > 0 && packets.length > 1) {
-    const timestamps = packets
-      .map((packet) => packet.timestamp)
-      .filter(Boolean)
-      .map((timestamp) => new Date(timestamp))
-      .filter((date) => Number.isFinite(date.getTime()))
-    const from = timestamps.length ? new Date(Math.min(...timestamps.map((date) => date.getTime()))) : null
-    const to = timestamps.length ? new Date(Math.max(...timestamps.map((date) => date.getTime()))) : null
+  if (createdCount > 0) {
+    const historicalRange = findHistoricalRtkRange(packets, latestStoredBefore)
+    const from = historicalRange?.from || null
+    const to = historicalRange?.to || null
     const remainingAfterAck = parseInteger(
       transport.buffer_remaining_after_ack ?? transport.bufferRemainingAfterAck
     )
-    const replay = scheduleReplayAfterBufferedTelemetry('rtk-buffer', {
+    const dirtyStore = getHostIngressStore()
+    if (from && to) dirtyStore.markReplayDirtyRange(from, to, 'rtk')
+    const dirty = from && to ? dirtyStore.nextReplayDirty() : null
+    const replay = dirty ? scheduleReplayAfterBufferedTelemetry('rtk-history', {
+      ...dirty,
       receivedAt,
       received: payloads.length,
       accepted: createdCount,
       from,
       to,
       remainingAfterAck
-    }, { bufferDrained: remainingAfterAck === 0 })
+    }, { bufferDrained: false }) : { scheduled: false }
     if (replay.scheduled) {
       console.log('[RTK ingest background]: scheduled replay after buffered RTK', {
         delayMs: replay.delayMs,

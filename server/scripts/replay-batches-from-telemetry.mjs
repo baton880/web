@@ -10,6 +10,7 @@ import { recalculateBatchViolations } from '../src/modules/batches/batch-violati
 import { postprocessCompletedBatch } from '../src/modules/batches/batch-postprocess-service.js'
 import { recordLeftoverViolation } from '../src/modules/violations/violation-service.js'
 import { alignAmbiguousIngredientsWithRation } from '../src/modules/telemetry/loading-zone-correction.js'
+import { farmDateRange, getFarmDateString } from '../src/utils/farm-date.js'
 
 const prismaClient = new PrismaClient()
 let prisma = prismaClient
@@ -33,7 +34,10 @@ const BATCH_START_INGREDIENT_LOOKBACK_MS = 10 * 60 * 1000
 const APPLY_WEIGHT_CALIBRATION_ON_REPLAY = ['1', 'true', 'yes'].includes(
   String(process.env.REPLAY_APPLY_WEIGHT_CALIBRATION || '').trim().toLowerCase()
 )
-const REPLAY_FROM = (() => {
+const REPLAY_DAY = String(process.env.REPLAY_DAY || '').trim() || null
+const REPLAY_BOUNDARY_CONTEXT_MS = 10 * 60 * 1000
+const REPLAY_STATE_WARMUP_MS = 24 * 60 * 60 * 1000 + REPLAY_BOUNDARY_CONTEXT_MS
+const EXPLICIT_REPLAY_FROM = (() => {
   const value = String(process.env.REPLAY_FROM || '').trim()
   if (!value) return null
   const parsed = new Date(value)
@@ -42,6 +46,43 @@ const REPLAY_FROM = (() => {
   }
   return parsed
 })()
+const EXPLICIT_REPLAY_TO = (() => {
+  const value = String(process.env.REPLAY_TO || '').trim()
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) {
+    throw new Error(`Invalid REPLAY_TO value: ${value}`)
+  }
+  return parsed
+})()
+const REPLAY_DIRTY_FROM = (() => {
+  const value = String(process.env.REPLAY_DIRTY_FROM || '').trim()
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid REPLAY_DIRTY_FROM value: ${value}`)
+  return parsed
+})()
+const REPLAY_DIRTY_TO = (() => {
+  const value = String(process.env.REPLAY_DIRTY_TO || '').trim()
+  if (!value) return null
+  const parsed = new Date(value)
+  if (Number.isNaN(parsed.getTime())) throw new Error(`Invalid REPLAY_DIRTY_TO value: ${value}`)
+  return parsed
+})()
+const REPLAY_DAY_RANGE = REPLAY_DAY ? farmDateRange(REPLAY_DAY) : null
+if (REPLAY_DAY && !REPLAY_DAY_RANGE) throw new Error(`Invalid REPLAY_DAY value: ${REPLAY_DAY}`)
+if (!REPLAY_DAY && (EXPLICIT_REPLAY_FROM || EXPLICIT_REPLAY_TO)) {
+  throw new Error('Partial calculated replay requires REPLAY_DAY so calculated rows outside the farm day remain intact')
+}
+const REPLAY_FROM = REPLAY_DAY_RANGE
+  ? new Date(REPLAY_DAY_RANGE.start.getTime() - REPLAY_STATE_WARMUP_MS)
+  : EXPLICIT_REPLAY_FROM
+const REPLAY_TO = REPLAY_DAY_RANGE
+  ? new Date(REPLAY_DAY_RANGE.end.getTime() + 1 + REPLAY_BOUNDARY_CONTEXT_MS)
+  : EXPLICIT_REPLAY_TO
+if (REPLAY_FROM && REPLAY_TO && REPLAY_FROM >= REPLAY_TO) {
+  throw new Error('REPLAY_FROM must be earlier than REPLAY_TO')
+}
 const REPLAY_TRANSACTION_TIMEOUT_MS = Math.max(
   60 * 1000,
   Number(process.env.REPLAY_TRANSACTION_TIMEOUT_MS) || 30 * 60 * 1000
@@ -473,6 +514,57 @@ function rememberRecentWeight(recentWeightsByDevice, deviceId, weight, limit) {
 }
 
 async function resetCalculatedTables() {
+  if (REPLAY_DAY_RANGE) {
+    const overlapping = await prisma.batch.findMany({
+      where: {
+        startTime: { lt: new Date(REPLAY_DAY_RANGE.end.getTime() + 1) },
+        OR: [
+          { endTime: null },
+          { endTime: { gte: REPLAY_DAY_RANGE.start } }
+        ]
+      },
+      select: { id: true, deviceId: true, startTime: true, endTime: true }
+    })
+    const protectedBoundaryBatches = overlapping.filter((batch) => {
+      const startMs = timestampMs(batch.startTime)
+      const endMs = timestampMs(batch.endTime)
+      return !Number.isFinite(startMs) ||
+        startMs < REPLAY_FROM.getTime() ||
+        !Number.isFinite(endMs) ||
+        endMs >= REPLAY_TO.getTime()
+    })
+    const protectedIds = new Set(protectedBoundaryBatches.map((batch) => batch.id))
+    const batchIds = overlapping.filter((batch) => !protectedIds.has(batch.id)).map((batch) => batch.id)
+    const workflowViolations = batchIds.length
+      ? await prisma.violation.findMany({
+          where: {
+            batchId: { in: batchIds },
+            OR: [
+              { status: 'CLOSED' },
+              { comment: { not: null } }
+            ]
+          },
+          include: {
+            batch: {
+              select: { deviceId: true, startTime: true, endTime: true }
+            }
+          }
+        })
+      : []
+    if (batchIds.length) {
+      if (workflowViolations.length) {
+        await prisma.violation.updateMany({
+          where: { id: { in: workflowViolations.map((violation) => violation.id) } },
+          data: { batchId: null }
+        })
+      }
+      await prisma.violation.deleteMany({ where: { batchId: { in: batchIds } } })
+      await prisma.batchIngredient.deleteMany({ where: { batchId: { in: batchIds } } })
+      await prisma.batch.deleteMany({ where: { id: { in: batchIds } } })
+    }
+    return { deletedBatchIds: batchIds, protectedBoundaryBatches, workflowViolations }
+  }
+
   await prisma.violation.deleteMany({})
   await prisma.batchIngredient.deleteMany({})
   await prisma.batch.deleteMany({})
@@ -484,10 +576,85 @@ async function resetCalculatedTables() {
       `INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('Batch', ${batchIdSequenceStart})`
     )
   }
+  return { deletedBatchIds: null, protectedBoundaryBatches: [], workflowViolations: [] }
+}
+
+async function restoreViolationWorkflow(workflowViolations, batchIdsToRecalculate) {
+  if (!workflowViolations?.length || !batchIdsToRecalculate?.size) return { restored: 0, orphaned: workflowViolations?.length || 0 }
+  const batches = await prisma.batch.findMany({
+    where: { id: { in: [...batchIdsToRecalculate] } },
+    select: { id: true, deviceId: true, startTime: true, endTime: true }
+  })
+  const violations = await prisma.violation.findMany({
+    where: { batchId: { in: batches.map((batch) => batch.id) } }
+  })
+  let restored = 0
+
+  for (const saved of workflowViolations) {
+    const savedStartMs = timestampMs(saved.batch?.startTime)
+    const savedEndMs = timestampMs(saved.batch?.endTime)
+    const candidates = batches
+      .filter((batch) => batch.deviceId === saved.batch?.deviceId)
+      .map((batch) => ({
+        batch,
+        startMs: timestampMs(batch.startTime),
+        endMs: timestampMs(batch.endTime)
+      }))
+      .filter(({ startMs, endMs }) => {
+        if (startMs === savedStartMs) return true
+        const overlaps = startMs <= (Number.isFinite(savedEndMs) ? savedEndMs : Number.POSITIVE_INFINITY) &&
+          (!Number.isFinite(endMs) || endMs >= savedStartMs)
+        return overlaps && Math.abs(startMs - savedStartMs) <= REPLAY_BOUNDARY_CONTEXT_MS
+      })
+      .sort((left, right) => Math.abs(left.startMs - savedStartMs) - Math.abs(right.startMs - savedStartMs))
+    const replacementBatch = candidates[0]?.batch
+    if (!replacementBatch) continue
+
+    const replacement = violations.find((violation) => (
+      violation.batchId === replacementBatch.id &&
+      violation.code === saved.code &&
+      violation.componentKey === saved.componentKey
+    ))
+    if (replacement) {
+      await prisma.violation.delete({ where: { id: replacement.id } })
+      await prisma.violation.update({
+        where: { id: saved.id },
+        data: {
+          batchId: replacementBatch.id,
+          deviceId: replacement.deviceId,
+          title: replacement.title,
+          componentName: replacement.componentName,
+          message: replacement.message,
+          category: replacement.category,
+          status: saved.status === 'CLOSED' ? 'CLOSED' : replacement.status,
+          planWeight: replacement.planWeight,
+          actualWeight: replacement.actualWeight,
+          deviation: replacement.deviation,
+          deviationPercent: replacement.deviationPercent,
+          detectedAt: replacement.detectedAt,
+          resolvedAt: saved.status === 'CLOSED' ? saved.resolvedAt : replacement.resolvedAt,
+          comment: saved.comment
+        }
+      })
+    } else {
+      await prisma.violation.update({
+        where: { id: saved.id },
+        data: {
+          batchId: replacementBatch.id,
+          status: saved.status === 'CLOSED' ? 'CLOSED' : 'RESOLVED',
+          resolvedAt: saved.resolvedAt || new Date()
+        }
+      })
+    }
+    restored += 1
+  }
+
+  return { restored, orphaned: workflowViolations.length - restored }
 }
 
 async function mergeEmptyCarryoverBatches(batchIdsToRecalculate) {
   const batches = await prisma.batch.findMany({
+    where: REPLAY_DAY_RANGE ? { id: { in: [...batchIdsToRecalculate] } } : undefined,
     orderBy: [
       { deviceId: 'asc' },
       { startTime: 'asc' },
@@ -646,6 +813,7 @@ function shouldMergePreludeBatch(previous, batch, settings = {}) {
 
 async function mergeShortPreludeBatches(batchIdsToRecalculate, settings = {}) {
   const batches = await prisma.batch.findMany({
+    where: REPLAY_DAY_RANGE ? { id: { in: [...batchIdsToRecalculate] } } : undefined,
     orderBy: [
       { deviceId: 'asc' },
       { startTime: 'asc' },
@@ -732,6 +900,7 @@ async function removeOrphanMicroBatches(batchIdsToRecalculate, settings = {}) {
   const maxMicroWeightKg = emptyThresholdKg + PRELUDE_BATCH_MAX_WEIGHT_BUFFER_KG
   const batches = await prisma.batch.findMany({
     where: {
+      ...(REPLAY_DAY_RANGE ? { id: { in: [...batchIdsToRecalculate] } } : {}),
       endTime: { not: null },
       groupId: null,
       rationId: null
@@ -773,6 +942,7 @@ async function removeOrphanPreludeChains(batchIdsToRecalculate, settings = {}) {
     : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
   const maxEdgeWeightKg = emptyThresholdKg + ORPHAN_PRELUDE_CHAIN_MAX_EDGE_WEIGHT_BUFFER_KG
   const batches = await prisma.batch.findMany({
+    where: REPLAY_DAY_RANGE ? { id: { in: [...batchIdsToRecalculate] } } : undefined,
     orderBy: [
       { deviceId: 'asc' },
       { startTime: 'asc' },
@@ -836,9 +1006,12 @@ async function removeOrphanPreludeChains(batchIdsToRecalculate, settings = {}) {
   return removableIds.size
 }
 
-async function postprocessReplayedBatches(telemetrySettings = {}) {
+async function postprocessReplayedBatches(telemetrySettings = {}, batchIdsToRecalculate = null) {
   const completedBatches = await prisma.batch.findMany({
-    where: { endTime: { not: null } },
+    where: {
+      endTime: { not: null },
+      ...(REPLAY_DAY_RANGE && batchIdsToRecalculate ? { id: { in: [...batchIdsToRecalculate] } } : {})
+    },
     select: { id: true },
     orderBy: { id: 'asc' }
   })
@@ -861,6 +1034,7 @@ async function postprocessReplayedBatches(telemetrySettings = {}) {
 
 async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
   const batches = await prisma.batch.findMany({
+    where: REPLAY_DAY_RANGE ? { id: { in: [...batchIdsToRecalculate] } } : undefined,
     include: {
       actualIngredients: {
         select: {
@@ -895,7 +1069,13 @@ async function alignBatchStartsWithEarliestIngredient(batchIdsToRecalculate) {
 async function runReplay() {
   telemetryProcessor.clearStates()
 
-  const replayTelemetryWhere = REPLAY_FROM ? { timestamp: { gte: REPLAY_FROM } } : {}
+  const replayTimestampWhere = {
+    ...(REPLAY_FROM ? { gte: REPLAY_FROM } : {}),
+    ...(REPLAY_TO ? { lt: REPLAY_TO } : {})
+  }
+  const replayTelemetryWhere = Object.keys(replayTimestampWhere).length
+    ? { timestamp: replayTimestampWhere }
+    : {}
 
   const [
     telemetryCount,
@@ -939,10 +1119,19 @@ async function runReplay() {
 
   console.log(`Raw telemetry rows: ${telemetryCount}`)
   console.log(`RTK rows: ${rtkCount}`)
+  console.log(`Replay scope: ${REPLAY_DAY ? `farm day ${REPLAY_DAY}` : 'custom/global'}`)
+  if (REPLAY_DIRTY_FROM || REPLAY_DIRTY_TO) {
+    console.log(`Dirty window: ${REPLAY_DIRTY_FROM?.toISOString() || 'unknown'} .. ${REPLAY_DIRTY_TO?.toISOString() || 'unknown'}`)
+  }
   console.log(`Replay from: ${REPLAY_FROM ? REPLAY_FROM.toISOString() : 'all telemetry'}`)
+  console.log(`Replay to: ${REPLAY_TO ? REPLAY_TO.toISOString() : 'latest telemetry'}`)
   console.log(`Active zones: ${activeZones.length}, loading zones: ${loadingZones.length}`)
   console.log('Clearing calculated batches...')
-  await resetCalculatedTables()
+  const resetResult = await resetCalculatedTables()
+  if (REPLAY_DAY_RANGE) {
+    console.log(`Removed overlapping calculated batches: ${resetResult.deletedBatchIds.length}`)
+    console.log(`Protected boundary-spanning batches: ${resetResult.protectedBoundaryBatches.length}`)
+  }
   if (String(process.env.REPLAY_FAIL_AFTER_RESET || '').trim() === '1') {
     throw new Error('Forced replay failure after calculated-table reset')
   }
@@ -1392,7 +1581,37 @@ async function runReplay() {
     console.log(`Aligned batch starts with first ingredient: ${alignedStarts}`)
   }
 
-  const postprocessStats = await postprocessReplayedBatches(telemetrySettings)
+  if (REPLAY_DAY_RANGE) {
+    const createdBatchIds = [...batchIdsToRecalculate]
+    if (createdBatchIds.length) {
+      const createdBatches = await prisma.batch.findMany({
+        where: { id: { in: createdBatchIds } },
+        select: { id: true, deviceId: true, startTime: true, endTime: true }
+      })
+      const outsideIds = createdBatches.filter((batch) => {
+        const startMs = timestampMs(batch.startTime)
+        const endMs = timestampMs(batch.endTime)
+        const outsideDay = startMs >= REPLAY_DAY_RANGE.end.getTime() + 1 ||
+          (Number.isFinite(endMs) && endMs < REPLAY_DAY_RANGE.start.getTime())
+        const overlapsProtected = resetResult.protectedBoundaryBatches.some((protectedBatch) => {
+          if (protectedBatch.deviceId !== batch.deviceId) return false
+          const protectedStartMs = timestampMs(protectedBatch.startTime)
+          const protectedEndMs = timestampMs(protectedBatch.endTime)
+          return startMs < (Number.isFinite(protectedEndMs) ? protectedEndMs : Number.POSITIVE_INFINITY) &&
+            (!Number.isFinite(endMs) || endMs >= protectedStartMs)
+        })
+        return outsideDay || overlapsProtected
+      }).map((batch) => batch.id)
+      if (outsideIds.length) {
+        await prisma.violation.deleteMany({ where: { batchId: { in: outsideIds } } })
+        await prisma.batchIngredient.deleteMany({ where: { batchId: { in: outsideIds } } })
+        await prisma.batch.deleteMany({ where: { id: { in: outsideIds } } })
+        outsideIds.forEach((batchId) => batchIdsToRecalculate.delete(batchId))
+      }
+    }
+  }
+
+  const postprocessStats = await postprocessReplayedBatches(telemetrySettings, batchIdsToRecalculate)
 
   console.log(`Recalculating violations for ${batchIdsToRecalculate.size} batches...`)
   for (const batchId of batchIdsToRecalculate) {
@@ -1406,6 +1625,14 @@ async function runReplay() {
         data: { hasViolations: true }
       })
     }
+  }
+
+  const workflowRestore = await restoreViolationWorkflow(
+    resetResult.workflowViolations,
+    batchIdsToRecalculate
+  )
+  if (workflowRestore.restored || workflowRestore.orphaned) {
+    console.log(`Violation workflow restored: ${workflowRestore.restored}, retained as orphan audit: ${workflowRestore.orphaned}`)
   }
 
   const [batchCount, ingredientCount, openBatchCount, violationCount] = await Promise.all([
@@ -1453,6 +1680,7 @@ async function runReplay() {
       }))
     }))
   }
+  return { deletedBatchIds: null }
 }
 
 async function main() {

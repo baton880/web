@@ -6,13 +6,15 @@ import { RtkIngressStore } from '../src/modules/telemetry/rtk-ingress-store.js'
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rtk-ingress-'))
 const databasePath = path.join(tempDir, 'inbox.sqlite3')
+let store = null
 
 try {
-  let store = new RtkIngressStore(databasePath)
+  store = new RtkIngressStore(databasePath)
   const first = store.enqueue('{"deviceId":"test","timestamp":"2026-07-15T00:00:00Z"}')
   const duplicate = store.enqueue('{"deviceId":"test","timestamp":"2026-07-15T00:00:00Z"}')
   assert.equal(first.inserted, true)
   assert.equal(duplicate.inserted, false)
+  assert.equal(store.latestAccepted().body.timestamp, '2026-07-15T00:00:00Z')
   store.close()
 
   store = new RtkIngressStore(databasePath)
@@ -35,5 +37,6 @@ try {
   store.close()
   console.log('RTK ingress store test passed')
 } finally {
+  try { store?.close() } catch {}
   fs.rmSync(tempDir, { recursive: true, force: true })
 }

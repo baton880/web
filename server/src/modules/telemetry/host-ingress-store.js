@@ -3,12 +3,16 @@ import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
+import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
 const SERVER_ROOT = path.resolve(__dirname, '../../..')
 const DEFAULT_DATABASE_PATH = path.join(SERVER_ROOT, 'runtime', 'host-ingress.sqlite3')
 const PROCESSED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+const CATCHUP_THROUGH_ID_KEY = 'replay_catchup_through_id'
+const REPLAY_ACTIVE_KEY = 'calculated_replay_active'
+const DIRTY_PADDING_MS = 10 * 60 * 1000
 
 function isoNow() {
   return new Date().toISOString()
@@ -64,6 +68,14 @@ export class HostIngressStore {
         value TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS calculated_replay_dirty (
+        farm_day TEXT PRIMARY KEY,
+        dirty_from TEXT NOT NULL,
+        dirty_to TEXT NOT NULL,
+        sources TEXT NOT NULL DEFAULT '',
+        version INTEGER NOT NULL DEFAULT 1,
+        updated_at TEXT NOT NULL
+      );
     `)
     const now = isoNow()
     this.db.prepare(`
@@ -84,8 +96,9 @@ export class HostIngressStore {
             AND newer.status IN ('pending', 'retry')
             AND newer.is_live = 1
             AND newer.id > older.id
-        )
+      )
     `).run(now)
+    this.recoverInterruptedReplay(now)
 
     this.insertPacket = this.db.prepare(`
       INSERT INTO host_ingress (
@@ -134,7 +147,32 @@ export class HostIngressStore {
       }
     })
     this.claimTransaction = this.db.transaction((nowIso) => {
-      const row = this.db.prepare(`
+      const catchupThroughId = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY))
+      let row = null
+
+      if (Number.isInteger(catchupThroughId) && catchupThroughId > 0) {
+        row = this.db.prepare(`
+          SELECT * FROM host_ingress
+          WHERE id <= ?
+            AND status IN ('pending', 'retry')
+            AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
+          ORDER BY id ASC
+          LIMIT 1
+        `).get(catchupThroughId, nowIso)
+
+        if (!row) {
+          const remaining = this.db.prepare(`
+            SELECT 1
+            FROM host_ingress
+            WHERE id <= ? AND status IN ('pending', 'retry', 'processing')
+            LIMIT 1
+          `).get(catchupThroughId)
+          if (remaining) return null
+          this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+        }
+      }
+
+      row ||= this.db.prepare(`
         SELECT * FROM host_ingress
         WHERE status IN ('pending', 'retry')
           AND (next_attempt_at IS NULL OR next_attempt_at <= ?)
@@ -152,6 +190,39 @@ export class HostIngressStore {
       `).run(nowIso, row.id)
       return result.changes === 1 ? { ...row, status: 'processing', attempts: row.attempts + 1 } : null
     })
+  }
+
+  getMetaValue(key) {
+    return this.db.prepare('SELECT value FROM host_ingress_meta WHERE key = ?').get(String(key))?.value ?? null
+  }
+
+  setMetaValue(key, value, updatedAt = isoNow()) {
+    this.db.prepare(`
+      INSERT INTO host_ingress_meta(key, value, updated_at) VALUES(?, ?, ?)
+      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
+    `).run(String(key), String(value), updatedAt)
+  }
+
+  deleteMetaValue(key) {
+    return this.db.prepare('DELETE FROM host_ingress_meta WHERE key = ?').run(String(key)).changes
+  }
+
+  maxUnprocessedIngressId() {
+    const value = this.db.prepare(`
+      SELECT MAX(id) max_id
+      FROM host_ingress
+      WHERE status IN ('pending', 'retry', 'processing')
+    `).get()?.max_id
+    return Number.isInteger(value) ? value : null
+  }
+
+  recoverInterruptedReplay(now = isoNow()) {
+    const replayWasActive = this.getMetaValue(REPLAY_ACTIVE_KEY)
+    if (!replayWasActive) return false
+    const maxId = this.maxUnprocessedIngressId()
+    if (Number.isInteger(maxId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId, now)
+    this.deleteMetaValue(REPLAY_ACTIVE_KEY)
+    return true
   }
 
   enqueueLegacy(payload, receivedAt = new Date()) {
@@ -190,6 +261,60 @@ export class HostIngressStore {
     return this.db.prepare('SELECT * FROM host_ingress WHERE dedupe_key = ?').get(dedupeKey)
   }
 
+  latestAccepted(deviceId = null) {
+    const row = this.db.prepare(`
+      SELECT id, device_id, stream_id, packet_id, raw_body, received_at, status
+      FROM host_ingress
+      WHERE is_live = 1
+        AND (? IS NULL OR device_id = ?)
+      ORDER BY id DESC
+      LIMIT 1
+    `).get(deviceId || null, deviceId || null)
+    if (!row) return null
+    try {
+      return {
+        inboxId: row.id,
+        deviceId: row.device_id,
+        streamId: row.stream_id,
+        packetId: row.packet_id,
+        payload: JSON.parse(row.raw_body),
+        receivedAt: row.received_at,
+        status: row.status
+      }
+    } catch {
+      return null
+    }
+  }
+
+  recentAccepted(limit = 20, deviceId = null) {
+    const take = Math.min(500, Math.max(1, Number(limit) || 20))
+    const rows = this.db.prepare(`
+      SELECT id, device_id, stream_id, packet_id, is_live, raw_body, received_at, status
+      FROM host_ingress
+      WHERE status != 'permanent'
+        AND (? IS NULL OR device_id = ?)
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(deviceId || null, deviceId || null, take)
+
+    return rows.flatMap((row) => {
+      try {
+        return [{
+          inboxId: row.id,
+          deviceId: row.device_id,
+          streamId: row.stream_id,
+          packetId: row.packet_id,
+          isLive: Boolean(row.is_live),
+          payload: JSON.parse(row.raw_body),
+          receivedAt: row.received_at,
+          status: row.status
+        }]
+      } catch {
+        return []
+      }
+    })
+  }
+
   claimNext() {
     return this.claimTransaction.immediate(isoNow())
   }
@@ -212,17 +337,149 @@ export class HostIngressStore {
   }
 
   markHistoryDirty(timestamp) {
-    const candidate = new Date(timestamp).toISOString()
-    const current = this.db.prepare(`SELECT value FROM host_ingress_meta WHERE key='history_dirty_from'`).get()?.value
-    const value = !current || candidate < current ? candidate : current
-    this.db.prepare(`
-      INSERT INTO host_ingress_meta(key, value, updated_at) VALUES('history_dirty_from', ?, ?)
-      ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at
-    `).run(value, isoNow())
+    return this.markReplayDirtyRange(timestamp, timestamp, 'host')
+  }
+
+  markReplayDirtyRange(from, to = from, source = 'host') {
+    const fromMs = new Date(from).getTime()
+    const toMs = new Date(to).getTime()
+    if (!Number.isFinite(fromMs) || !Number.isFinite(toMs)) {
+      throw new TypeError('Replay dirty range requires valid timestamps')
+    }
+
+    const rangeStartMs = Math.min(fromMs, toMs) - DIRTY_PADDING_MS
+    const rangeEndMs = Math.max(fromMs, toMs) + DIRTY_PADDING_MS
+    const firstDay = getFarmDateString(new Date(rangeStartMs))
+    const lastDay = getFarmDateString(new Date(rangeEndMs))
+    const days = []
+    let cursorDay = firstDay
+    while (cursorDay) {
+      days.push(cursorDay)
+      if (cursorDay === lastDay) break
+      const cursorRange = farmDateRange(cursorDay)
+      if (!cursorRange) break
+      cursorDay = getFarmDateString(new Date(cursorRange.end.getTime() + 1))
+    }
+    const normalizedSource = String(source || 'unknown').trim() || 'unknown'
+    const updated = []
+
+    const transaction = this.db.transaction(() => {
+      for (const farmDay of days) {
+        const dayRange = farmDateRange(farmDay)
+        if (!dayRange) continue
+        const clippedFrom = new Date(Math.max(rangeStartMs, dayRange.start.getTime())).toISOString()
+        const clippedTo = new Date(Math.min(rangeEndMs, dayRange.end.getTime())).toISOString()
+        if (clippedFrom > clippedTo) continue
+
+        const existing = this.db.prepare(`
+          SELECT farm_day, dirty_from, dirty_to, sources, version
+          FROM calculated_replay_dirty
+          WHERE farm_day = ?
+        `).get(farmDay)
+        const sources = new Set(String(existing?.sources || '').split(',').map((item) => item.trim()).filter(Boolean))
+        sources.add(normalizedSource)
+        const dirtyFrom = existing && existing.dirty_from < clippedFrom ? existing.dirty_from : clippedFrom
+        const dirtyTo = existing && existing.dirty_to > clippedTo ? existing.dirty_to : clippedTo
+        const version = Number(existing?.version || 0) + 1
+        const now = isoNow()
+        this.db.prepare(`
+          INSERT INTO calculated_replay_dirty(farm_day, dirty_from, dirty_to, sources, version, updated_at)
+          VALUES(?, ?, ?, ?, ?, ?)
+          ON CONFLICT(farm_day) DO UPDATE SET
+            dirty_from=excluded.dirty_from,
+            dirty_to=excluded.dirty_to,
+            sources=excluded.sources,
+            version=excluded.version,
+            updated_at=excluded.updated_at
+        `).run(farmDay, dirtyFrom, dirtyTo, [...sources].sort().join(','), version, now)
+        updated.push({ farmDay, dirtyFrom, dirtyTo, sources: [...sources].sort(), version, updatedAt: now })
+      }
+
+      const earliest = this.db.prepare(`
+        SELECT dirty_from FROM calculated_replay_dirty ORDER BY dirty_from ASC LIMIT 1
+      `).get()?.dirty_from
+      if (earliest) this.setMetaValue('history_dirty_from', earliest)
+    })
+    transaction.immediate()
+    return updated
+  }
+
+  nextReplayDirty() {
+    const row = this.db.prepare(`
+      SELECT farm_day, dirty_from, dirty_to, sources, version, updated_at
+      FROM calculated_replay_dirty
+      ORDER BY dirty_from ASC, farm_day ASC
+      LIMIT 1
+    `).get()
+    return row ? {
+      farmDay: row.farm_day,
+      dirtyFrom: row.dirty_from,
+      dirtyTo: row.dirty_to,
+      sources: String(row.sources || '').split(',').filter(Boolean),
+      version: Number(row.version),
+      updatedAt: row.updated_at
+    } : null
+  }
+
+  listReplayDirty(limit = 31) {
+    const take = Math.min(366, Math.max(1, Number(limit) || 31))
+    return this.db.prepare(`
+      SELECT farm_day, dirty_from, dirty_to, sources, version, updated_at
+      FROM calculated_replay_dirty
+      ORDER BY dirty_from ASC, farm_day ASC
+      LIMIT ?
+    `).all(take).map((row) => ({
+      farmDay: row.farm_day,
+      dirtyFrom: row.dirty_from,
+      dirtyTo: row.dirty_to,
+      sources: String(row.sources || '').split(',').filter(Boolean),
+      version: Number(row.version),
+      updatedAt: row.updated_at
+    }))
+  }
+
+  clearReplayDirty(farmDay, throughVersion = Number.MAX_SAFE_INTEGER) {
+    const result = this.db.prepare(`
+      DELETE FROM calculated_replay_dirty
+      WHERE farm_day = ? AND version <= ?
+    `).run(String(farmDay), Number(throughVersion))
+    const earliest = this.db.prepare(`
+      SELECT dirty_from FROM calculated_replay_dirty ORDER BY dirty_from ASC LIMIT 1
+    `).get()?.dirty_from
+    if (earliest) this.setMetaValue('history_dirty_from', earliest)
+    else this.deleteMetaValue('history_dirty_from')
+    return result.changes
   }
 
   clearHistoryDirty() {
-    return this.db.prepare(`DELETE FROM host_ingress_meta WHERE key='history_dirty_from'`).run().changes
+    return this.db.transaction(() => {
+      const dirtyChanges = this.db.prepare('DELETE FROM calculated_replay_dirty').run().changes
+      const metaChanges = this.deleteMetaValue('history_dirty_from')
+      return dirtyChanges + metaChanges
+    }).immediate()
+  }
+
+  beginCalculatedReplay(meta = {}) {
+    this.setMetaValue(REPLAY_ACTIVE_KEY, JSON.stringify({
+      startedAt: isoNow(),
+      farmDay: meta?.farmDay || null,
+      version: Number(meta?.version || meta?.dirtyVersion) || null
+    }))
+  }
+
+  finishCalculatedReplay({ clearHistoryDirty = false, farmDay = null, throughVersion = null } = {}) {
+    return this.db.transaction(() => {
+      const maxId = this.maxUnprocessedIngressId()
+      if (Number.isInteger(maxId)) this.setMetaValue(CATCHUP_THROUGH_ID_KEY, maxId)
+      else this.deleteMetaValue(CATCHUP_THROUGH_ID_KEY)
+      this.deleteMetaValue(REPLAY_ACTIVE_KEY)
+      const clearedHistoryDirty = clearHistoryDirty
+        ? (farmDay
+            ? this.clearReplayDirty(farmDay, throughVersion ?? Number.MAX_SAFE_INTEGER)
+            : this.db.prepare('DELETE FROM calculated_replay_dirty').run().changes + this.deleteMetaValue('history_dirty_from'))
+        : 0
+      return { catchupThroughId: maxId, clearedHistoryDirty }
+    }).immediate()
   }
 
   cleanup() {
@@ -249,6 +506,9 @@ export class HostIngressStore {
     `).get()
     const lastError = this.db.prepare(`SELECT id,status,attempts,last_error,updated_at FROM host_ingress WHERE last_error IS NOT NULL ORDER BY updated_at DESC LIMIT 1`).get()
     const historyDirtyFrom = this.db.prepare(`SELECT value FROM host_ingress_meta WHERE key='history_dirty_from'`).get()?.value || null
+    const catchupThroughId = Number(this.getMetaValue(CATCHUP_THROUGH_ID_KEY)) || null
+    const replayDirty = this.nextReplayDirty()
+    const replayDirtyDayCount = Number(this.db.prepare('SELECT COUNT(*) count FROM calculated_replay_dirty').get()?.count || 0)
     const oldestMs = oldest ? new Date(oldest.received_at).getTime() : NaN
     const newestLiveMs = newestLive ? new Date(newestLive.received_at).getTime() : NaN
     return {
@@ -263,6 +523,9 @@ export class HostIngressStore {
       oldestPendingAgeSeconds: Number.isFinite(oldestMs) ? Math.max(0, Math.round((Date.now() - oldestMs) / 1000)) : null,
       newestLiveAgeSeconds: Number.isFinite(newestLiveMs) ? Math.max(0, Math.round((Date.now() - newestLiveMs) / 1000)) : null,
       historyDirtyFrom,
+      replayDirty,
+      replayDirtyDayCount,
+      catchupThroughId,
       lastError: lastError || null
     }
   }

@@ -20,7 +20,10 @@
     "test:rtk-ingress": "node scripts/rtk-ingress-store-test.mjs",
     "test:host-ingress": "node scripts/host-ingress-store-test.mjs",
     "test:host-current": "node scripts/host-current-pointer-test.mjs",
-    "test:replay-safety": "node scripts/replay-safety-test.mjs"
+    "test:rtk-current": "node scripts/rtk-current-ingress-test.mjs",
+    "test:replay-safety": "node scripts/replay-safety-test.mjs",
+    "test:day-replay": "node scripts/day-replay-validation-test.mjs",
+    "test:late-packet-replay": "node scripts/late-packet-day-replay-test.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.8.1",

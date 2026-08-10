@@ -105,6 +105,50 @@ export class RtkIngressStore {
     return { inserted: result.changes === 1, requestHash, row }
   }
 
+  latestAccepted() {
+    const row = this.db.prepare(`
+      SELECT id, request_hash, raw_body, received_at, status
+      FROM rtk_ingress
+      ORDER BY id DESC
+      LIMIT 1
+    `).get()
+    if (!row) return null
+    try {
+      return {
+        inboxId: row.id,
+        requestHash: row.request_hash,
+        body: JSON.parse(row.raw_body),
+        receivedAt: row.received_at,
+        status: row.status
+      }
+    } catch {
+      return null
+    }
+  }
+
+  recentAccepted(limit = 100) {
+    const take = Math.min(500, Math.max(1, Number(limit) || 100))
+    return this.db.prepare(`
+      SELECT id, request_hash, raw_body, received_at, status
+      FROM rtk_ingress
+      WHERE status != 'permanent'
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(take).flatMap((row) => {
+      try {
+        return [{
+          inboxId: row.id,
+          requestHash: row.request_hash,
+          body: JSON.parse(row.raw_body),
+          receivedAt: row.received_at,
+          status: row.status
+        }]
+      } catch {
+        return []
+      }
+    })
+  }
+
   claimNext() {
     return this.claimTransaction(isoNow())
   }

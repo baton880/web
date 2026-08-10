@@ -389,6 +389,66 @@ export class HostTelemetryValidationError extends Error {
   }
 }
 
+function telemetryIdentity(row) {
+  const streamId = row?.sourceStreamId
+  const packetId = Number(row?.sourcePacketId)
+  if (streamId && Number.isInteger(packetId)) return `stream:${streamId}:${packetId}`
+  return `timestamp:${row?.deviceId || ''}:${new Date(row?.timestamp || 0).getTime()}`
+}
+
+export async function findAdminHistoryTelemetry({
+  limit = DEFAULT_ADMIN_HISTORY_LIMIT,
+  requestedDeviceId = null,
+  clearSince = null
+} = {}) {
+  const take = parseLimit(limit, DEFAULT_ADMIN_HISTORY_LIMIT)
+  const where = {
+    ...(requestedDeviceId ? { deviceId: requestedDeviceId } : {}),
+    ...(clearSince ? { timestamp: { gt: clearSince } } : {})
+  }
+  const [processed, telemetrySettings] = await Promise.all([
+    prisma.telemetry.findMany({
+      where: Object.keys(where).length ? where : undefined,
+      orderBy: orderBySourceTimestampDesc(),
+      take
+    }),
+    getTelemetrySettings(prisma)
+  ])
+  const accepted = hostIngressStore.recentAccepted(take, requestedDeviceId)
+    .map((entry) => {
+      const packet = normalizeTelemetryPacket(entry.payload)
+      if (Number.isNaN(packet.timestamp.getTime())) return null
+      if (clearSince && packet.timestamp <= clearSince) return null
+      return applyWeightCalibration({
+        id: null,
+        ingressId: entry.inboxId,
+        sourceStreamId: entry.streamId || null,
+        sourcePacketId: Number.isInteger(entry.packetId) ? entry.packetId : null,
+        receivedAt: new Date(entry.receivedAt),
+        ...packet,
+        wifiClients: Array.isArray(packet.wifiClients)
+          ? JSON.stringify(packet.wifiClients)
+          : String(packet.wifiClients || '[]'),
+        pipelineStatus: entry.status,
+        processed: entry.status === 'processed'
+      }, telemetrySettings)
+    })
+    .filter(Boolean)
+
+  const byIdentity = new Map(processed.map((row) => [telemetryIdentity(row), row]))
+  for (const row of accepted) {
+    const key = telemetryIdentity(row)
+    if (!byIdentity.has(key)) byIdentity.set(key, row)
+  }
+  return [...byIdentity.values()]
+    .sort((left, right) => {
+      const timestampDelta = new Date(right.timestamp).getTime() - new Date(left.timestamp).getTime()
+      if (timestampDelta !== 0) return timestampDelta
+      return new Date(right.receivedAt || 0).getTime() - new Date(left.receivedAt || 0).getTime()
+    })
+    .slice(0, take)
+}
+
 function buildTelemetryCreateData(packet, receivedAt, rawPayload, identity = {}) {
   return {
     sourceStreamId: identity.streamId || null,
@@ -471,7 +531,8 @@ async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}
   return true
 }
 
-async function findCurrentTelemetry(requestedDeviceId = null) {
+export async function findCurrentTelemetry(requestedDeviceId = null) {
+  const accepted = hostIngressStore.latestAccepted(requestedDeviceId)
   const current = requestedDeviceId
     ? await prisma.deviceCurrentTelemetry.findUnique({
         where: { deviceId: requestedDeviceId },
@@ -481,12 +542,36 @@ async function findCurrentTelemetry(requestedDeviceId = null) {
         orderBy: [{ receivedAt: 'desc' }, { deviceId: 'asc' }],
         include: { telemetry: true }
       })
-  if (current?.telemetry) return current.telemetry
-
-  return prisma.telemetry.findFirst({
+  const processed = current?.telemetry || await prisma.telemetry.findFirst({
     where: requestedDeviceId ? { deviceId: requestedDeviceId } : undefined,
     orderBy: orderBySourceTimestampDesc()
   })
+  if (!accepted?.payload) return processed
+
+  const acceptedReceivedAt = new Date(accepted.receivedAt)
+  const processedReceivedAt = processed?.receivedAt instanceof Date
+    ? processed.receivedAt
+    : new Date(processed?.receivedAt || 0)
+  if (Number.isNaN(acceptedReceivedAt.getTime()) || acceptedReceivedAt <= processedReceivedAt) {
+    return processed
+  }
+
+  const packet = normalizeTelemetryPacket(accepted.payload)
+  if (Number.isNaN(packet.timestamp.getTime())) return processed
+  const processedTimestampMs = new Date(processed?.timestamp || 0).getTime()
+  if (Number.isFinite(processedTimestampMs) && packet.timestamp.getTime() < processedTimestampMs) {
+    return processed
+  }
+  return {
+    id: null,
+    sourceStreamId: accepted.streamId || null,
+    sourcePacketId: Number.isInteger(accepted.packetId) ? accepted.packetId : null,
+    receivedAt: acceptedReceivedAt,
+    ...packet,
+    wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
+    pipelineStatus: 'accepted',
+    processed: false
+  }
 }
 
 export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
@@ -541,7 +626,6 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       const telemetry = await prisma.telemetry.create({
         data: buildTelemetryCreateData(packet, receivedAt, rawPayload, identity)
       })
-      await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity)
       return {
         status: 'ok',
         id: telemetry.id,
@@ -1144,7 +1228,7 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
 router.get('/current', authenticate, requireReadAccess, async (req, res) => {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)
-    const data = await findCurrentTelemetry(requestedDeviceId);
+    let data = await findCurrentTelemetry(requestedDeviceId);
     
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
@@ -1170,6 +1254,9 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
       prisma.storageZone.findMany({ where: { active: true } }),
       getTelemetrySettings(prisma)
     ]);
+    if (data.pipelineStatus === 'accepted') {
+      data = applyWeightCalibration(data, telemetrySettings)
+    }
     const effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
       deviceId: data.deviceId,
       referenceTime: data.timestamp,
@@ -1278,8 +1365,11 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
 // ============================================================================
 router.get('/admin/latest', authenticate, requireAdmin, async (req, res) => {
   try {
-    const data = await prisma.telemetry.findFirst({ orderBy: orderBySourceTimestampDesc() });
+    let data = await findCurrentTelemetry(getRequestedDeviceId(req));
     if (!data) return res.json(buildEmptyLatestResponse());
+    if (data.pipelineStatus === 'accepted') {
+      data = applyWeightCalibration(data, await getTelemetrySettings(prisma))
+    }
     res.json({ ...serializeTelemetryForResponse(data), banner: null });
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });
@@ -1445,15 +1535,7 @@ router.get('/admin/history', authenticate, requireAdmin, async (req, res) => {
     const requestedDeviceId = getRequestedDeviceId(req)
     const includeCleared = String(req.query.includeCleared || '').trim() === '1'
     const clearSince = includeCleared ? null : await getHostTrackClearSince(prisma)
-    const where = {
-      ...(requestedDeviceId ? { deviceId: requestedDeviceId } : {}),
-      ...(clearSince ? { timestamp: { gt: clearSince } } : {})
-    }
-    const data = await prisma.telemetry.findMany({
-      where: Object.keys(where).length ? where : undefined,
-      orderBy: orderBySourceTimestampDesc(),
-      take: limit
-    });
+    const data = await findAdminHistoryTelemetry({ limit, requestedDeviceId, clearSince })
     res.json(data.map(serializeTelemetryForResponse));
   } catch (error) {
     res.status(500).json({ error: 'Internal server error' });

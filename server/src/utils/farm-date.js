@@ -1,4 +1,4 @@
-export const FARM_TIME_ZONE = 'Asia/Novosibirsk'
+export const FARM_TIME_ZONE = 'Asia/Barnaul'
 export const FARM_UTC_OFFSET_MINUTES = 7 * 60
 
 const DATE_ONLY_RE = /^(\d{4})-(\d{2})-(\d{2})$/

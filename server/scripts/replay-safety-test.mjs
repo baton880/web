@@ -10,8 +10,11 @@ import { fileURLToPath } from 'node:url'
 import Database from 'better-sqlite3'
 
 import { CalculatedReplayScheduler } from '../src/modules/telemetry/replay-scheduler.js'
+import { HostIngressStore } from '../src/modules/telemetry/host-ingress-store.js'
+import { startHostIngressWorker } from '../src/modules/telemetry/host-ingress-worker.js'
 import { startRtkIngressWorker } from '../src/modules/telemetry/rtk-ingress-worker.js'
 import { TelemetryWriteCoordinator } from '../src/modules/telemetry/telemetry-write-coordinator.js'
+import { findHistoricalRtkRange } from '../src/modules/telemetry/rtk-replay-window.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -59,7 +62,7 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   const rtkLease = coordinator.tryAcquire('rtk')
   assert.equal(rtkLease, null, 'SQLite coordinator must allow only one writer')
   for (let index = 0; index < 100; index += 1) {
-    scheduler.schedule('host-buffer-out-of-order', { index }, 10)
+    scheduler.schedule('host-buffer-out-of-order', { farmDay: '2026-07-23', index }, 10)
   }
 
   await waitFor(() => scheduler.getStatus().state === 'draining')
@@ -75,7 +78,7 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   assert.equal(coordinator.snapshot().accepting, true)
   assert.equal(children.length, 1)
 
-  scheduler.schedule('another-buffer-burst', {}, 10)
+  scheduler.schedule('another-buffer-burst', { farmDay: '2026-07-24' }, 10)
   await waitFor(() => children.length === 2)
   children[1].emit('close', 1, null)
   await waitFor(() => scheduler.getStatus().state === 'backoff')
@@ -83,6 +86,111 @@ async function testReplayWaitsForActiveWritersAndCoalescesRequests() {
   assert.equal(scheduler.getStatus().queued, true)
   assert.equal(coordinator.snapshot().accepting, true)
   scheduler.stop()
+}
+
+async function testFarmDayReplayEnvironmentIsBounded() {
+  const coordinator = new TelemetryWriteCoordinator()
+  let spawnCall = null
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 10,
+    maxQueueWaitMs: 50,
+    drainTimeoutMs: 500,
+    spawnProcess: (command, args, options) => {
+      spawnCall = { command, args, options }
+      return createFakeChild()
+    }
+  })
+
+  scheduler.schedule('host-ingress-history', {
+    farmDay: '2026-07-23',
+    dirtyFrom: '2026-07-23T05:50:00.000Z',
+    dirtyTo: '2026-07-23T06:10:00.000Z',
+    version: 4
+  }, 10)
+  await waitFor(() => spawnCall)
+  assert.equal(spawnCall.options.env.REPLAY_DAY, '2026-07-23')
+  assert.equal(spawnCall.options.env.REPLAY_DIRTY_FROM, '2026-07-23T05:50:00.000Z')
+  assert.equal(spawnCall.options.env.REPLAY_DIRTY_TO, '2026-07-23T06:10:00.000Z')
+  scheduler.stop()
+}
+
+async function testAutomaticReplayRejectsUnboundedScope() {
+  const coordinator = new TelemetryWriteCoordinator()
+  let spawnCount = 0
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    spawnProcess: () => {
+      spawnCount += 1
+      return createFakeChild()
+    }
+  })
+
+  const missing = scheduler.schedule('host-ingress-history', {}, 5)
+  const invalid = scheduler.schedule('rtk-history', { farmDay: 'not-a-date' }, 5)
+  await delay(25)
+  assert.equal(missing.scheduled, false)
+  assert.equal(missing.invalidScope, true)
+  assert.equal(invalid.scheduled, false)
+  assert.equal(invalid.invalidScope, true)
+  assert.equal(spawnCount, 0, 'background scheduler must never fall back to a global replay')
+  scheduler.stop()
+}
+
+async function testReplayCleanupFailureKeepsDirtyWorkQueued() {
+  const coordinator = new TelemetryWriteCoordinator()
+  let child = null
+  let failureCleanupCount = 0
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 5,
+    failureBackoffMs: 1000,
+    onReplaySuccess: () => { throw new Error('ingress cleanup unavailable') },
+    onReplayFailure: () => { failureCleanupCount += 1 },
+    spawnProcess: () => {
+      child = createFakeChild()
+      return child
+    }
+  })
+
+  scheduler.schedule('host-ingress-history', { farmDay: '2026-07-23' }, 5)
+  await waitFor(() => child)
+  child.emit('close', 0, null)
+  await waitFor(() => scheduler.getStatus().state === 'backoff')
+  assert.equal(failureCleanupCount, 1)
+  assert.equal(scheduler.getStatus().queued, true)
+  assert.equal(coordinator.snapshot().accepting, true)
+  scheduler.stop()
+}
+
+function testRtkReplayRequiresActuallyHistoricalPackets() {
+  const latest = new Date('2026-07-23T10:00:00Z')
+  assert.equal(findHistoricalRtkRange([
+    { timestamp: '2026-07-23T10:00:01Z' },
+    { timestamp: '2026-07-23T10:00:02Z' }
+  ], latest), null, 'sequential RTK catch-up must not request replay')
+  assert.deepEqual(findHistoricalRtkRange([
+    { timestamp: '2026-07-23T09:59:55Z' },
+    { timestamp: '2026-07-23T10:00:01Z' },
+    { timestamp: '2026-07-23T09:59:50Z' }
+  ], latest), {
+    from: new Date('2026-07-23T09:59:50Z'),
+    to: new Date('2026-07-23T09:59:55Z')
+  })
+  const perDevice = new Map([
+    ['loader-a', new Date('2026-07-23T10:00:00Z')],
+    ['loader-b', new Date('2026-07-23T09:00:00Z')]
+  ])
+  assert.equal(findHistoricalRtkRange([
+    { deviceId: 'loader-b', timestamp: '2026-07-23T09:30:00Z' }
+  ], perDevice), null, 'another device high-water mark must not cause a false replay')
+  assert.deepEqual(findHistoricalRtkRange([
+    { deviceId: 'loader-a', timestamp: '2026-07-23T09:59:59Z' }
+  ], perDevice), {
+    from: new Date('2026-07-23T09:59:59Z'),
+    to: new Date('2026-07-23T09:59:59Z')
+  }, 'a single genuinely historical RTK packet must dirty its farm day')
 }
 
 async function testRtkWorkerHonorsCoordinatorPauseAndResumes() {
@@ -130,6 +238,93 @@ async function testRtkWorkerHonorsCoordinatorPauseAndResumes() {
   await waitFor(() => processed.length === 2)
   worker.stop()
   assert.deepEqual(processed, [1, 2])
+}
+
+async function testHostPacketsAcceptedDuringReplayDoNotScheduleAnotherReplay() {
+  const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-replay-catchup-'))
+  const store = new HostIngressStore(path.join(tempDir, 'host-ingress.sqlite3'))
+  const coordinator = new TelemetryWriteCoordinator()
+  const children = []
+  const processedPacketIds = []
+  let latestStoredTimestampMs = new Date('2026-07-26T01:00:00Z').getTime()
+  let currentPacketId = null
+
+  const scheduler = new CalculatedReplayScheduler({
+    coordinator,
+    replayDebounceMs: 10,
+    bufferQuietDebounceMs: 10,
+    bufferDrainedDebounceMs: 10,
+    drainTimeoutMs: 500,
+    failureBackoffMs: 1000,
+    onReplayStart: () => store.beginCalculatedReplay(),
+    onReplaySuccess: ({ meta }) => store.finishCalculatedReplay({
+      clearHistoryDirty: true,
+      farmDay: meta.farmDay,
+      throughVersion: meta.version
+    }),
+    onReplayFailure: () => store.finishCalculatedReplay({ clearHistoryDirty: false }),
+    spawnProcess: () => {
+      const child = createFakeChild()
+      children.push(child)
+      return child
+    }
+  })
+
+  const worker = startHostIngressWorker(async (body, receivedAt, identity) => {
+    const timestampMs = new Date(body.timestamp).getTime()
+    const outOfOrder = timestampMs < latestStoredTimestampMs
+    latestStoredTimestampMs = Math.max(latestStoredTimestampMs, timestampMs)
+    processedPacketIds.push(identity.packetId)
+    if (identity.isLive) currentPacketId = identity.packetId
+    return { outOfOrder, timestamp: body.timestamp }
+  }, {
+    store,
+    pollMs: 25,
+    writeCoordinator: coordinator,
+    scheduleReplay: (reason, meta, options = {}) => scheduler.schedule(
+      reason,
+      meta,
+      options.bufferDrained ? scheduler.bufferDrainedDebounceMs : scheduler.bufferQuietDebounceMs
+    )
+  })
+
+  try {
+    scheduler.schedule('host-ingress-history', {
+      farmDay: '2026-07-26',
+      dirtyFrom: '2026-07-26T00:50:00.000Z',
+      dirtyTo: '2026-07-26T01:10:00.000Z',
+      version: 1
+    }, 10)
+    await waitFor(() => children.length === 1)
+    assert.equal(scheduler.getStatus().state, 'running')
+
+    store.enqueueBatch({
+      deviceId: 'Hozain_01',
+      streamId: 'stream-replay-catchup',
+      livePacketId: 4,
+      packets: [
+        { packetId: 1, payload: { timestamp: '2026-07-26T01:00:02Z' } },
+        { packetId: 2, payload: { timestamp: '2026-07-26T01:00:04Z' } },
+        { packetId: 3, payload: { timestamp: '2026-07-26T01:00:06Z' } },
+        { packetId: 4, payload: { timestamp: '2026-07-26T01:00:08Z' } }
+      ]
+    })
+    assert.equal(store.stats().pending, 4)
+
+    children[0].emit('close', 0, null)
+    await waitFor(() => processedPacketIds.length === 4)
+    await delay(100)
+
+    assert.deepEqual(processedPacketIds, [1, 2, 3, 4], 'replay-window packets must catch up in source order')
+    assert.equal(currentPacketId, 4, 'the newest accepted live packet must remain current')
+    assert.equal(store.stats().historyDirtyFrom, null)
+    assert.equal(children.length, 1, 'synthetic replay catch-up must not schedule a second replay')
+  } finally {
+    worker.stop()
+    scheduler.stop()
+    store.close()
+    fs.rmSync(tempDir, { recursive: true, force: true })
+  }
 }
 
 function prismaFileUrl(databasePath) {
@@ -181,6 +376,11 @@ function testReplayRollbackAfterForcedFailure() {
 }
 
 await testReplayWaitsForActiveWritersAndCoalescesRequests()
+await testFarmDayReplayEnvironmentIsBounded()
+await testAutomaticReplayRejectsUnboundedScope()
+await testReplayCleanupFailureKeepsDirtyWorkQueued()
+testRtkReplayRequiresActuallyHistoricalPackets()
 await testRtkWorkerHonorsCoordinatorPauseAndResumes()
+await testHostPacketsAcceptedDuringReplayDoNotScheduleAnotherReplay()
 testReplayRollbackAfterForcedFailure()
 console.log('Replay safety tests passed')

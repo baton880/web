@@ -19,7 +19,19 @@ export function startHostIngressWorker(processPacket, options = {}) {
   let running = false
   let timer = null
   let cleanupAt = Date.now() + 60 * 60 * 1000
-  let lastScheduledDirtyFrom = null
+  let lastScheduledDirtyKey = null
+
+  function scheduleNextDirtyReplay() {
+    const dirty = typeof store.nextReplayDirty === 'function' ? store.nextReplayDirty() : null
+    if (!dirty) {
+      lastScheduledDirtyKey = null
+      return
+    }
+    const dirtyKey = `${dirty.farmDay}:${dirty.version}`
+    if (dirtyKey === lastScheduledDirtyKey) return
+    scheduleReplay('host-ingress-history', dirty, { bufferDrained: false })
+    lastScheduledDirtyKey = dirtyKey
+  }
 
   async function tick() {
     if (stopped || running) return
@@ -37,16 +49,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
       }
       const row = store.claimNext()
       if (!row) {
-        const stats = store.stats()
-        const queueDrained = stats.pending + stats.retry + stats.processing === 0
-        if (!stats.historyDirtyFrom) {
-          lastScheduledDirtyFrom = null
-        } else if (queueDrained && stats.historyDirtyFrom !== lastScheduledDirtyFrom) {
-          scheduleReplay('host-ingress-history', {
-            historyDirtyFrom: stats.historyDirtyFrom
-          }, { bufferDrained: true })
-          lastScheduledDirtyFrom = stats.historyDirtyFrom
-        }
+        scheduleNextDirtyReplay()
         return
       }
       claimedRow = true
@@ -58,7 +61,10 @@ export function startHostIngressWorker(processPacket, options = {}) {
           packetId: row.packet_id,
           isLive: Boolean(row.is_live)
         })
-        if (result?.outOfOrder && result?.timestamp) store.markHistoryDirty(result.timestamp)
+        if (result?.outOfOrder && result?.timestamp) {
+          store.markHistoryDirty(result.timestamp)
+          scheduleNextDirtyReplay()
+        }
         store.markProcessed(row.id)
       } catch (error) {
         if (error?.permanent) {

@@ -7,9 +7,10 @@ import { HostIngressStore } from '../src/modules/telemetry/host-ingress-store.js
 
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'host-ingress-'))
 const databasePath = path.join(tempDir, 'inbox.sqlite3')
+let store = null
 
 try {
-  let store = new HostIngressStore(databasePath)
+  store = new HostIngressStore(databasePath)
   const envelope = {
     deviceId: 'Hozain_01',
     streamId: 'stream-test',
@@ -38,19 +39,78 @@ try {
   assert.equal(store.stats().pendingLive, 1, 'only the newest packet may remain live')
   assert.equal(store.stats().pendingHistory, 5)
 
+  store.beginCalculatedReplay()
+  const replayEnvelope = {
+    ...envelope,
+    livePacketId: 9,
+    packets: [
+      { packetId: 7, payload: { timestamp: '2026-07-17T10:00:06Z' } },
+      { packetId: 8, payload: { timestamp: '2026-07-17T10:00:07Z' } },
+      { packetId: 9, payload: { timestamp: '2026-07-17T10:00:08Z' } }
+    ]
+  }
+  store.enqueueBatch(replayEnvelope)
+  const replayFinish = store.finishCalculatedReplay({ clearHistoryDirty: false })
+  assert.ok(Number.isInteger(replayFinish.catchupThroughId))
+  assert.equal(store.stats().catchupThroughId, replayFinish.catchupThroughId)
+
   store.enqueueBatch(envelope)
   assert.equal(store.stats().pendingLive, 1, 'a delayed older batch must not replace the newest live packet')
 
-  const live = store.claimNext()
-  assert.equal(live.packet_id, 6, 'newest live packet must be processed before backlog')
-  store.markProcessed(live.id)
   const oldest = store.claimNext()
   assert.equal(oldest.packet_id, 1)
+  store.markProcessed(oldest.id)
+  const catchupPacketIds = []
+  for (let index = 0; index < 8; index += 1) {
+    const row = store.claimNext()
+    assert.ok(row, 'catch-up fence must remain claimable')
+    catchupPacketIds.push(row.packet_id)
+    store.markProcessed(row.id)
+  }
+  assert.deepEqual(catchupPacketIds, [2, 3, 4, 5, 6, 7, 8, 9])
+  assert.equal(store.claimNext(), null)
+  assert.equal(store.stats().catchupThroughId, null)
   store.markHistoryDirty('2026-07-17T10:00:00Z')
   store.markHistoryDirty('2026-07-17T10:00:01Z')
-  assert.equal(store.stats().historyDirtyFrom, '2026-07-17T10:00:00.000Z')
-  assert.equal(store.clearHistoryDirty(), 1)
+  assert.equal(store.stats().historyDirtyFrom, '2026-07-17T09:50:00.000Z')
+  assert.deepEqual(store.stats().replayDirty, {
+    farmDay: '2026-07-17',
+    dirtyFrom: '2026-07-17T09:50:00.000Z',
+    dirtyTo: '2026-07-17T10:10:01.000Z',
+    sources: ['host'],
+    version: 2,
+    updatedAt: store.stats().replayDirty.updatedAt
+  })
+  assert.equal(store.clearHistoryDirty(), 2)
   assert.equal(store.stats().historyDirtyFrom, null)
+  store.markHistoryDirty('2026-07-16T17:00:02Z')
+  assert.deepEqual(store.listReplayDirty().map(({ updatedAt, ...row }) => row), [
+    {
+      farmDay: '2026-07-16',
+      dirtyFrom: '2026-07-16T16:50:02.000Z',
+      dirtyTo: '2026-07-16T16:59:59.999Z',
+      sources: ['host'],
+      version: 1
+    },
+    {
+      farmDay: '2026-07-17',
+      dirtyFrom: '2026-07-16T17:00:00.000Z',
+      dirtyTo: '2026-07-16T17:10:02.000Z',
+      sources: ['host'],
+      version: 1
+    }
+  ])
+  assert.equal(store.clearHistoryDirty(), 3)
+  const firstDirtyGeneration = store.markHistoryDirty('2026-07-17T10:00:00Z')[0]
+  store.beginCalculatedReplay(firstDirtyGeneration)
+  store.markHistoryDirty('2026-07-17T10:00:05Z')
+  store.finishCalculatedReplay({
+    clearHistoryDirty: true,
+    farmDay: firstDirtyGeneration.farmDay,
+    throughVersion: firstDirtyGeneration.version
+  })
+  assert.equal(store.nextReplayDirty().version, firstDirtyGeneration.version + 1, 'newer dirty generation must survive replay cleanup')
+  store.clearHistoryDirty()
   store.markRetry(oldest.id, 'database busy', 1000)
   const legacy = { device_id: 'Hozain_01', timestamp: '2026-07-17T10:00:03Z' }
   assert.equal(store.enqueueLegacy(legacy).duplicate, false)
@@ -92,5 +152,6 @@ try {
   store.close()
   console.log('Host ingress store test passed')
 } finally {
+  try { store?.close() } catch {}
   fs.rmSync(tempDir, { recursive: true, force: true })
 }

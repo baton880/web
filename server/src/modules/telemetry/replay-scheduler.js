@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url'
 
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { getHostIngressStore } from './host-ingress-store.js'
+import { farmDateRange } from '../../utils/farm-date.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -15,6 +16,7 @@ const DEFAULT_BUFFER_QUIET_DEBOUNCE_MS = 30 * 60 * 1000
 const DEFAULT_BUFFER_DRAINED_DEBOUNCE_MS = 30 * 1000
 const DEFAULT_DRAIN_TIMEOUT_MS = 60 * 1000
 const DEFAULT_FAILURE_BACKOFF_MS = 60 * 1000
+const DEFAULT_MAX_QUEUE_WAIT_MS = 2 * 60 * 1000
 const MAX_FAILURE_BACKOFF_MS = 30 * 60 * 1000
 const MIN_REPLAY_DEBOUNCE_MS = 1000
 const MAX_REPLAY_DEBOUNCE_MS = 30 * 60 * 1000
@@ -52,11 +54,15 @@ export class CalculatedReplayScheduler {
     this.bufferDrainedDebounceMs = normalizeDelayMs(options.bufferDrainedDebounceMs, DEFAULT_BUFFER_DRAINED_DEBOUNCE_MS, 1)
     this.drainTimeoutMs = normalizeDelayMs(options.drainTimeoutMs, DEFAULT_DRAIN_TIMEOUT_MS, 1)
     this.failureBackoffMs = normalizeDelayMs(options.failureBackoffMs, DEFAULT_FAILURE_BACKOFF_MS, 1)
+    this.maxQueueWaitMs = normalizeDelayMs(options.maxQueueWaitMs, DEFAULT_MAX_QUEUE_WAIT_MS, 1)
+    this.onReplayStart = options.onReplayStart || (() => {})
     this.onReplaySuccess = options.onReplaySuccess || (() => {})
+    this.onReplayFailure = options.onReplayFailure || (() => {})
 
     this.timer = null
     this.state = 'idle'
     this.queued = false
+    this.queuedSinceMs = null
     this.pendingReason = null
     this.pendingMeta = null
     this.nextRunAtMs = null
@@ -90,8 +96,17 @@ export class CalculatedReplayScheduler {
 
   schedule(reason, meta, delayMs) {
     if (!this.enabled) return { scheduled: false, disabled: true }
+    if (!farmDateRange(meta?.farmDay)) {
+      return {
+        scheduled: false,
+        invalidScope: true,
+        error: 'Automatic calculated replay requires a valid farmDay'
+      }
+    }
 
+    const wasQueued = this.queued
     this.queued = true
+    if (!wasQueued || !Number.isFinite(this.queuedSinceMs)) this.queuedSinceMs = this.now()
     this.pendingReason = reason || this.pendingReason || 'telemetry-buffer'
     this.pendingMeta = meta || this.pendingMeta || {}
     this.lastRequestedAtMs = this.now()
@@ -101,12 +116,19 @@ export class CalculatedReplayScheduler {
       return { scheduled: true, queued: true, delayMs: requestedDelayMs }
     }
 
+    const effectiveDelayMs = this.queuedDelayMs(requestedDelayMs)
+    this.armTimer(effectiveDelayMs)
+    return { scheduled: true, delayMs: effectiveDelayMs }
+  }
+
+  queuedDelayMs(preferredDelayMs) {
     const backoffDelayMs = Number.isFinite(this.backoffUntilMs)
       ? Math.max(0, this.backoffUntilMs - this.now())
       : 0
-    const effectiveDelayMs = Math.max(requestedDelayMs, backoffDelayMs)
-    this.armTimer(effectiveDelayMs)
-    return { scheduled: true, delayMs: effectiveDelayMs }
+    const maxWaitDelayMs = Number.isFinite(this.queuedSinceMs)
+      ? Math.max(1, this.queuedSinceMs + this.maxQueueWaitMs - this.now())
+      : this.maxQueueWaitMs
+    return Math.max(backoffDelayMs, Math.min(preferredDelayMs, maxWaitDelayMs))
   }
 
   armTimer(delayMs) {
@@ -127,6 +149,7 @@ export class CalculatedReplayScheduler {
     const reason = this.pendingReason || 'telemetry-buffer'
     const meta = this.pendingMeta || {}
     this.queued = false
+    this.queuedSinceMs = null
     this.pendingReason = null
     this.pendingMeta = null
     this.state = 'draining'
@@ -139,7 +162,7 @@ export class CalculatedReplayScheduler {
       this.state = 'backoff'
       this.lastError = `Timed out waiting ${this.drainTimeoutMs}ms for telemetry writers to drain`
       this.queueRetry(reason, meta)
-      console.error('[RTK buffer replay] writer drain timed out', {
+      console.error('[Calculated replay] writer drain timed out', {
         reason,
         drainTimeoutMs: this.drainTimeoutMs,
         writers: this.coordinator.snapshot()
@@ -149,14 +172,24 @@ export class CalculatedReplayScheduler {
 
     this.state = 'running'
     this.lastStartedAtMs = this.now()
-    console.log('[RTK buffer replay] starting calculated batch replay', {
+    try {
+      this.onReplayStart({ reason, meta })
+    } catch (error) {
+      this.coordinator.resume()
+      this.state = 'backoff'
+      this.lastError = `Replay start hook failed: ${error?.message || String(error)}`
+      this.queueRetry(reason, meta)
+      console.error('[Calculated replay] start hook failed', { error: this.lastError })
+      return
+    }
+    console.log('[Calculated replay] starting calculated batch replay', {
       reason,
       ...summarizeMeta(meta)
     })
 
     let result
     try {
-      result = await this.runReplayProcess(reason)
+      result = await this.runReplayProcess(reason, meta)
     } catch (error) {
       result = {
         ok: false,
@@ -169,27 +202,43 @@ export class CalculatedReplayScheduler {
 
     if (result.ok) {
       try {
-        this.onReplaySuccess()
+        this.onReplaySuccess({ reason, meta })
       } catch (error) {
-        console.error('[RTK buffer replay] post-replay cleanup failed', {
+        console.error('[Calculated replay] post-replay cleanup failed', {
           error: error?.message || String(error)
         })
+        result = {
+          ok: false,
+          code: result.code,
+          signal: result.signal,
+          error: `Post-replay cleanup failed: ${error?.message || String(error)}`
+        }
       }
+    }
+
+    if (result.ok) {
       this.coordinator.resume()
       this.state = 'idle'
       this.failureCount = 0
       this.backoffUntilMs = null
       this.lastError = null
-      console.log('[RTK buffer replay] completed')
-      if (this.queued) this.armTimer(this.bufferQuietDebounceMs)
+      console.log('[Calculated replay] completed')
+      if (this.queued) this.armTimer(this.queuedDelayMs(this.bufferQuietDebounceMs))
       return
     }
 
+    try {
+      this.onReplayFailure({ reason, meta, result })
+    } catch (error) {
+      console.error('[Calculated replay] failure cleanup failed', {
+        error: error?.message || String(error)
+      })
+    }
     this.coordinator.resume()
     this.state = 'backoff'
     this.lastError = result.error
     this.queueRetry(reason, meta)
-    console.error('[RTK buffer replay] failed', {
+    console.error('[Calculated replay] failed', {
       code: result.code,
       signal: result.signal,
       error: result.error
@@ -204,31 +253,35 @@ export class CalculatedReplayScheduler {
     )
     this.backoffUntilMs = this.now() + backoffMs
     this.queued = true
+    if (!Number.isFinite(this.queuedSinceMs)) this.queuedSinceMs = this.now()
     this.pendingReason = this.pendingReason || reason || 'rtk-buffer-replay-retry'
     this.pendingMeta = this.pendingMeta || meta || {}
     this.armTimer(backoffMs)
   }
 
-  runReplayProcess(reason) {
+  runReplayProcess(reason, meta = {}) {
     return new Promise((resolveResult) => {
       let settled = false
       const child = this.spawnProcess(process.execPath, [this.replayScript], {
         cwd: this.serverRoot,
         env: {
           ...process.env,
-          REPLAY_TRIGGER: reason || 'rtk-buffer'
+          REPLAY_TRIGGER: reason || 'rtk-buffer',
+          ...(meta?.farmDay ? { REPLAY_DAY: String(meta.farmDay) } : {}),
+          ...(meta?.dirtyFrom ? { REPLAY_DIRTY_FROM: String(meta.dirtyFrom) } : {}),
+          ...(meta?.dirtyTo ? { REPLAY_DIRTY_TO: String(meta.dirtyTo) } : {})
         },
         stdio: ['ignore', 'pipe', 'pipe']
       })
 
       child.stdout?.on('data', (chunk) => {
         String(chunk).trimEnd().split(/\r?\n/).filter(Boolean).forEach((line) => {
-          console.log(`[RTK buffer replay] ${line}`)
+          console.log(`[Calculated replay] ${line}`)
         })
       })
       child.stderr?.on('data', (chunk) => {
         String(chunk).trimEnd().split(/\r?\n/).filter(Boolean).forEach((line) => {
-          console.error(`[RTK buffer replay] ${line}`)
+          console.error(`[Calculated replay] ${line}`)
         })
       })
 
@@ -263,7 +316,14 @@ const replayScheduler = new CalculatedReplayScheduler({
   bufferDrainedDebounceMs: process.env.RTK_BUFFER_DRAINED_REPLAY_DEBOUNCE_MS,
   drainTimeoutMs: process.env.REPLAY_WRITER_DRAIN_TIMEOUT_MS,
   failureBackoffMs: process.env.REPLAY_FAILURE_BACKOFF_MS,
-  onReplaySuccess: () => getHostIngressStore().clearHistoryDirty()
+  maxQueueWaitMs: process.env.REPLAY_MAX_QUEUE_WAIT_MS,
+  onReplayStart: ({ meta }) => getHostIngressStore().beginCalculatedReplay(meta),
+  onReplaySuccess: ({ meta }) => getHostIngressStore().finishCalculatedReplay({
+    clearHistoryDirty: true,
+    farmDay: meta?.farmDay || null,
+    throughVersion: meta?.version ?? meta?.dirtyVersion ?? null
+  }),
+  onReplayFailure: () => getHostIngressStore().finishCalculatedReplay({ clearHistoryDirty: false })
 })
 
 export function isCalculatedBatchReplayRunning() {
