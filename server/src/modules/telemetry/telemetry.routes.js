@@ -220,7 +220,12 @@ function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryS
   return false
 }
 
-function normalizeTelemetryPacket(packet) {
+const RAW_WEIGHT_INVALID_BELOW_KG = -2000
+
+export function normalizeTelemetryPacket(packet) {
+  const rawWeight = parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight)
+  const reportedWeightValid = parseBoolean(packet.weightValid ?? packet.weight_valid)
+
   return {
     deviceId: packet.deviceId || packet.device_id || 'host_01',
     timestamp: packet.timestamp ? new Date(packet.timestamp) : new Date(),
@@ -231,8 +236,8 @@ function normalizeTelemetryPacket(packet) {
     gpsAgeS: parseOptionalNumber(packet.gpsAgeS ?? packet.gps_age_s),
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
-    rawWeight: parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight),
-    weightValid: parseBoolean(packet.weightValid ?? packet.weight_valid),
+    rawWeight,
+    weightValid: reportedWeightValid && (rawWeight === null || rawWeight >= RAW_WEIGHT_INVALID_BELOW_KG),
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
     cpuTempC: packet.cpuTempC ?? packet.cpu_temp_c ?? null,
