@@ -626,7 +626,7 @@ function getRtkHeading(data) {
 function getMarkerOptions(kind, isOnline, data = null) {
     const color = kind === "rtk"
         ? getRtkFixColor(data, isOnline)
-        : HOST_TRACK_COLOR;
+        : (isOnline ? HOST_TRACK_COLOR : OFFLINE_MARKER_COLOR);
     const imageUrl = kind === "rtk" ? RTK_MARKER_IMAGE_URL : HOST_MARKER_IMAGE_URL;
     const heading = kind === "rtk" ? getRtkHeading(data) : null;
 
@@ -1265,40 +1265,51 @@ function updateMapPosition(data, isOnline, options = {}) {
         return;
     }
 
-    if (!hasFreshGpsCoordinates(data)) {
-        hidePlacemark();
-        hasLiveCoordinates = false;
+    const hasFreshGps = hasFreshGpsCoordinates(data);
+    const lastKnownPoint = hasFreshGps
+        ? null
+        : buildRoutePoints(filterVisibleTrackRows("host", latestTrackHistory.host)).at(-1);
+    const retainedCoords = hasLiveCoordinates
+        ? placemark?.geometry?.getCoordinates?.()
+        : (lastKnownPoint ? [lastKnownPoint.lat, lastKnownPoint.lon] : null);
+
+    if (!hasFreshGps && (!Array.isArray(retainedCoords) || retainedCoords.length < 2)) {
         syncMapActionButtons();
         return;
     }
 
-    const newCoords = [Number(data.lat), Number(data.lon)];
+    const newCoords = hasFreshGps
+        ? [Number(data.lat), Number(data.lon)]
+        : [Number(retainedCoords[0]), Number(retainedCoords[1])];
     const zoneName = getCurrentZoneName(newCoords[0], newCoords[1]) || data?.banner?.zoneName || data?.zone?.name || "Вне зоны";
     const packetState = isOnline ? "Свежий пакет" : "Нет свежих пакетов";
     const gpsValid = data?.gpsValid == null ? null : asBoolean(data.gpsValid);
     const gpsLabel = gpsValid === null
         ? (data?.gpsQuality != null ? `Q${data.gpsQuality}` : "--")
         : `${gpsValid ? "GPS fix" : "Нет GPS fix"}${data?.gpsQuality != null ? ` • Q${data.gpsQuality}` : ""}`;
+    const markerState = hasFreshGps
+        ? packetState
+        : (isOnline ? "Пакеты приходят, но GPS невалиден" : "Нет свежих пакетов • GPS невалиден");
     const balloonContent = buildMapBalloonContent({
         title: "Хозяин",
-        accentColor: HOST_TRACK_COLOR,
+        accentColor: hasFreshGps && isOnline ? HOST_TRACK_COLOR : OFFLINE_MARKER_COLOR,
         rows: [
             { label: "Устройство", value: data?.deviceId || "--" },
-            { label: "Статус", value: packetState },
+            { label: "Статус", value: markerState },
             { label: "Режим", value: data?.mode || "Ожидание" },
             { label: "GPS", value: gpsLabel },
             { label: "Спутники", value: data?.gpsSatellites ?? "--" },
             { label: "Вес", value: data?.weight != null ? `${formatMetric(data.weight, 1)} кг` : "--" },
-            { label: "Координаты", value: `${newCoords[0].toFixed(6)}, ${newCoords[1].toFixed(6)}` },
+            { label: "Координаты", value: `${newCoords[0].toFixed(6)}, ${newCoords[1].toFixed(6)}${hasFreshGps ? "" : " (последние валидные)"}` },
             { label: "Зона", value: zoneName },
         ],
     });
 
     ensurePlacemarkVisible();
-    updatePlacemarkStatus(isOnline);
+    updatePlacemarkStatus(isOnline && hasFreshGps);
     placemark.properties.set({
         balloonContent,
-        hintContent: `Хозяин - ${packetState}`,
+        hintContent: `Хозяин — ${markerState}`,
     });
     syncMapActionButtons();
 
@@ -1309,6 +1320,10 @@ function updateMapPosition(data, isOnline, options = {}) {
             centerMapOnMarker({ force: true, duration: 300 });
             hasTelemetryAutoFocus = true;
         }
+        return;
+    }
+
+    if (!hasFreshGps) {
         return;
     }
 
@@ -1827,6 +1842,11 @@ function renderRoute(historyRows) {
     latestTrackHistory.host = Array.isArray(historyRows) ? historyRows : [];
     rememberTrackHistoryMaxTimestamp("host", historyRows);
     rebuildDashboardReplayFrames();
+
+    if (!dashboardReplayActive && latestTelemetry && !hasFreshGpsCoordinates(latestTelemetry) && !hasLiveCoordinates) {
+        updateMapPosition(latestTelemetry, isTelemetryOnline(latestTelemetry), { instant: true });
+    }
+
     const routeSegments = buildTrackSegments(filterVisibleTrackRows("host", historyRows));
 
     if (!routeSegments.length) {
