@@ -86,7 +86,7 @@ runCase('unknown drift outside loading zones is not flushed when movement starts
   assert.deepEqual(actions, [])
 })
 
-runCase('zero-speed packet immediately leaves moving state', () => {
+runCase('sub-1 km/h packet immediately leaves moving state', () => {
   const processor = new TelemetryProcessor()
   const deviceId = 'motion-state-test'
   processor.processPacket(packet('2026-07-02T00:02:00.000Z', outside, 0, 0, deviceId), [], settings)
@@ -96,9 +96,24 @@ runCase('zero-speed packet immediately leaves moving state', () => {
 
   assert.equal(processor.getState(deviceId).isMoving, true)
 
-  processor.processPacket(packet('2026-07-02T00:02:12.000Z', outside, 80, 0, deviceId), [], settings)
+  processor.processPacket(packet('2026-07-02T00:02:12.000Z', outside, 80, 0.9, deviceId), [], settings)
 
   assert.equal(processor.getState(deviceId).isMoving, false)
+})
+
+runCase('exactly 1 km/h does not count as stopped', () => {
+  const processor = new TelemetryProcessor()
+  const deviceId = 'motion-stop-boundary-test'
+  processor.processPacket(packet('2026-07-02T00:02:30.000Z', outside, 0, 0, deviceId), [], settings)
+  processor.processPacket(packet('2026-07-02T00:02:33.000Z', outside, 40, 3, deviceId), [], settings)
+  processor.processPacket(packet('2026-07-02T00:02:36.000Z', outside, 45, 3, deviceId), [], settings)
+  processor.processPacket(packet('2026-07-02T00:02:39.000Z', outside, 50, 3, deviceId), [], settings)
+
+  assert.equal(processor.getState(deviceId).isMoving, true)
+
+  processor.processPacket(packet('2026-07-02T00:02:42.000Z', outside, 80, 1, deviceId), [], settings)
+
+  assert.equal(processor.getState(deviceId).isMoving, true)
 })
 
 runCase('real loading in a confirmed zone is recorded after motion settles', () => {

@@ -41,6 +41,7 @@ const LOADING_SCORE_FREEZE_LOOKBACK_MS = 3000;
 const ZONE_VISIT_SNAPSHOT_RETENTION_MS = 10 * 60 * 1000;
 const ZONE_VISIT_SNAPSHOT_LIMIT = 1000;
 const DEFAULT_LOADING_ZONE_STICKY_SECONDS = 180;
+const MOVEMENT_STOP_SPEED_THRESHOLD_KMH = 1;
 const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4;
 const LOADING_CURRENT_ZONE_EVIDENCE_MAX_AGE_MS = 120000;
 const HOST_ZONE_INTERSECTION_RADIUS_METERS = 20;
@@ -884,7 +885,7 @@ export class TelemetryProcessor {
   _updateMovementState(state, speedKmh, thresholds) {
     const speed = Number.isFinite(Number(speedKmh)) ? Math.max(0, Number(speedKmh)) : 0;
     const isAboveThreshold = speed >= thresholds.movementSpeedThresholdKmh;
-    const isStopped = speed === 0;
+    const isStopped = speed < MOVEMENT_STOP_SPEED_THRESHOLD_KMH;
 
     if (isAboveThreshold) {
       state.movingSpeedStreak = Number(state.movingSpeedStreak || 0) + 1;
