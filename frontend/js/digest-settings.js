@@ -4,7 +4,7 @@
         enabled: false,
         senderEmail: "",
         sendTime: "08:00",
-        timezone: "Asia/Novosibirsk",
+        timezone: "Asia/Barnaul",
         recipients: [],
         updatedAt: "",
     };

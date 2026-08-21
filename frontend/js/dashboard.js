@@ -209,7 +209,7 @@ function formatDateTime(value) {
     if (!value) return "--";
 
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Novosibirsk" });
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Barnaul" });
 }
 
 function formatTrackPointBalloon(label, point) {
@@ -2139,7 +2139,7 @@ function renderDashboardReplayFrame(index = dashboardReplayIndex, options = {}) 
     }
     if (elements.time) {
         elements.time.textContent = new Date(frame.timestampMs).toLocaleTimeString("ru-RU", {
-            timeZone: "Asia/Novosibirsk",
+            timeZone: "Asia/Barnaul",
             hour: "2-digit",
             minute: "2-digit",
             second: "2-digit",

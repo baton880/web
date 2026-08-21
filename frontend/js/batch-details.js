@@ -89,7 +89,7 @@ $(document).ready(function () {
     const rationsUrl = window.AppAuth?.getApiUrl?.("/api/rations") || "/api/rations";
     const groupsUrl = window.AppAuth?.getApiUrl?.("/api/groups") || "/api/groups";
     const zonesUrl = window.AppAuth?.getApiUrl?.("/api/telemetry/zones") || "/api/telemetry/zones";
-    const FARM_TIME_ZONE = "Asia/Novosibirsk";
+    const FARM_TIME_ZONE = "Asia/Barnaul";
     const POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY = "vikorm:batch-postprocess-debug-collapsed";
     const POSTPROCESS_DEBUG_REST_OPTIONS_STORAGE_KEY = "vikorm:batch-postprocess-rest-options";
     const INGREDIENT_CHART_COLORS = [

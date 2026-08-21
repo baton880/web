@@ -14,6 +14,7 @@ import { alignAmbiguousIngredientsWithRation } from './loading-zone-correction.j
 import { getHostIngressStore } from './host-ingress-store.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js'
+import { parseHostTimestamp } from './host-timestamp.js'
 
 const router = Router()
 const hostIngressStore = getHostIngressStore()
@@ -228,7 +229,7 @@ export function normalizeTelemetryPacket(packet) {
 
   return {
     deviceId: packet.deviceId || packet.device_id || 'host_01',
-    timestamp: packet.timestamp ? new Date(packet.timestamp) : new Date(),
+    timestamp: parseHostTimestamp(packet.timestamp),
     lat: Number(packet.lat || 0),
     lon: Number(packet.lon || 0),
     gpsValid: parseBoolean(packet.gpsValid ?? packet.gps_valid),

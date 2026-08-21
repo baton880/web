@@ -2,7 +2,7 @@ import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-se
 import { setHostTrackClearSince } from './track-state-store.js'
 
 const CHECK_INTERVAL_MS = 60 * 1000
-const DEFAULT_TIMEZONE = process.env.TELEMETRY_TIMEZONE || process.env.APP_TIMEZONE || 'Asia/Novosibirsk'
+const DEFAULT_TIMEZONE = process.env.TELEMETRY_TIMEZONE || process.env.APP_TIMEZONE || 'Asia/Barnaul'
 
 let schedulerTimer = null
 let isTickRunning = false

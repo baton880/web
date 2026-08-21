@@ -1915,7 +1915,7 @@ function formatDateTime(value) {
     }
 
     const date = new Date(value);
-    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Novosibirsk" });
+    return Number.isNaN(date.getTime()) ? "--" : date.toLocaleString("ru-RU", { timeZone: "Asia/Barnaul" });
 }
 
 function goToCurrentPoint() {

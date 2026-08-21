@@ -10,7 +10,7 @@ const DEFAULT_SETTINGS = {
     enabled: false,
     senderEmail: '',
     sendTime: '08:00',
-    timezone: 'Asia/Novosibirsk',
+    timezone: 'Asia/Barnaul',
     recipients: [],
     updatedAt: '',
 };
@@ -56,7 +56,7 @@ function serializeSettings(row) {
         enabled: Boolean(row.enabled),
         senderEmail: row.senderEmail || '',
         sendTime: row.sendTime || '08:00',
-        timezone: row.timezone || 'Asia/Novosibirsk',
+        timezone: row.timezone || 'Asia/Barnaul',
         recipients: parseRecipients(row.recipientsJson),
         lastSentAt: row.lastSentAt ? row.lastSentAt.toISOString() : '',
         updatedAt: row.updatedAt ? row.updatedAt.toISOString() : '',
@@ -78,7 +78,7 @@ async function ensureDigestSettings() {
             enabled: false,
             senderEmail: '',
             sendTime: '08:00',
-            timezone: 'Asia/Novosibirsk',
+            timezone: 'Asia/Barnaul',
             recipientsJson: '[]'
         }
     });

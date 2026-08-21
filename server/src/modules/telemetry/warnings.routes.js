@@ -4,8 +4,14 @@ import { authenticate, requireAdmin, requireWriteAccess } from '../../middleware
 import { getZoneByCoordinates, isFreshTimestamp, resolveEffectiveCoordinates } from './telemetry-helpers.js';
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js';
 import { syncTechnicalWarnings } from './technical-warning-service.js';
+import { FARM_TIME_ZONE } from '../../utils/farm-date.js';
 
 const router = Router();
+const farmDateTimeFormatter = new Intl.DateTimeFormat('ru-RU', {
+    timeZone: FARM_TIME_ZONE,
+    dateStyle: 'short',
+    timeStyle: 'medium'
+});
 
 function hasValidCoordinates(lat, lon) {
     return Number.isFinite(Number(lat))
@@ -134,7 +140,7 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
                 code: 'no_fresh_packets',
                 title: 'Нет свежих пакетов',
                 message: latestHost?.timestamp
-                    ? `Последний host пакет устарел: ${new Date(latestHost.timestamp).toLocaleString('ru-RU')}.`
+                    ? `Последний host пакет устарел: ${farmDateTimeFormatter.format(new Date(latestHost.timestamp))}.`
                     : 'Телеметрия от host ещё не поступала.',
                 severity: 'warning'
             };
@@ -176,7 +182,7 @@ router.get('/current', authenticate, requireAdmin, async (req, res) => {
                 code: 'no_rtk',
                 title: 'Нет RTK',
                 message: latestRtkReceivedAt
-                    ? `Последний RTK пакет устарел: ${new Date(latestRtkReceivedAt).toLocaleString('ru-RU')}.`
+                    ? `Последний RTK пакет устарел: ${farmDateTimeFormatter.format(new Date(latestRtkReceivedAt))}.`
                     : 'RTK телеметрия ещё не поступала.',
                 severity: 'warning'
             };

@@ -1,5 +1,5 @@
 const CHECK_INTERVAL_MS = 60 * 1000
-const DEFAULT_TIMEZONE = process.env.DATA_RETENTION_TIMEZONE || process.env.TELEMETRY_TIMEZONE || process.env.APP_TIMEZONE || 'Asia/Novosibirsk'
+const DEFAULT_TIMEZONE = process.env.DATA_RETENTION_TIMEZONE || process.env.TELEMETRY_TIMEZONE || process.env.APP_TIMEZONE || 'Asia/Barnaul'
 const DEFAULT_RUN_TIME = '03:20'
 const BATCH_DELETE_CHUNK_SIZE = 500
 
