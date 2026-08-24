@@ -88,6 +88,7 @@ let dashboardReplayPlaying = false;
 let dashboardReplayTimer = null;
 let dashboardReplayHistoryLoaded = false;
 let dashboardReplayHistoryLoading = false;
+let lastHostTrackVisualFilterStats = null;
 
 function isAdmin() {
     return Boolean(window.AppAuth?.isAdmin && window.AppAuth.isAdmin());
@@ -544,7 +545,7 @@ function getTelemetrySnapshotKey(data) {
         data.timestamp ?? "",
         data.lat ?? "",
         data.lon ?? "",
-        data.weight ?? "",
+        data.realtimeWeight ?? data.weight ?? "",
     ].join("|");
 }
 
@@ -729,6 +730,12 @@ function hasFreshGpsCoordinates(data) {
     }
 
     return true;
+}
+
+function hasStickyBarnPosition(data) {
+    return data?.positionSource === "barn_sticky" &&
+        Boolean(data?.positionEstimated) &&
+        hasValidCoordinates(data?.lat, data?.lon);
 }
 
 function normalizeShapeType(value) {
@@ -1266,19 +1273,21 @@ function updateMapPosition(data, isOnline, options = {}) {
     }
 
     const hasFreshGps = hasFreshGpsCoordinates(data);
-    const lastKnownPoint = hasFreshGps
+    const hasStickyBarn = hasStickyBarnPosition(data);
+    const hasDisplayPosition = hasFreshGps || hasStickyBarn;
+    const lastKnownPoint = hasDisplayPosition
         ? null
         : buildRoutePoints(filterVisibleTrackRows("host", latestTrackHistory.host)).at(-1);
     const retainedCoords = hasLiveCoordinates
         ? placemark?.geometry?.getCoordinates?.()
         : (lastKnownPoint ? [lastKnownPoint.lat, lastKnownPoint.lon] : null);
 
-    if (!hasFreshGps && (!Array.isArray(retainedCoords) || retainedCoords.length < 2)) {
+    if (!hasDisplayPosition && (!Array.isArray(retainedCoords) || retainedCoords.length < 2)) {
         syncMapActionButtons();
         return;
     }
 
-    const newCoords = hasFreshGps
+    const newCoords = hasDisplayPosition
         ? [Number(data.lat), Number(data.lon)]
         : [Number(retainedCoords[0]), Number(retainedCoords[1])];
     const zoneName = getCurrentZoneName(newCoords[0], newCoords[1]) || data?.banner?.zoneName || data?.zone?.name || "Вне зоны";
@@ -1289,24 +1298,26 @@ function updateMapPosition(data, isOnline, options = {}) {
         : `${gpsValid ? "GPS fix" : "Нет GPS fix"}${data?.gpsQuality != null ? ` • Q${data.gpsQuality}` : ""}`;
     const markerState = hasFreshGps
         ? packetState
+        : hasStickyBarn
+        ? `GPS потерян • позиция по зоне «${data?.positionZoneName || zoneName}»`
         : (isOnline ? "Пакеты приходят, но GPS невалиден" : "Нет свежих пакетов • GPS невалиден");
     const balloonContent = buildMapBalloonContent({
         title: "Хозяин",
-        accentColor: hasFreshGps && isOnline ? HOST_TRACK_COLOR : OFFLINE_MARKER_COLOR,
+        accentColor: hasDisplayPosition && isOnline ? HOST_TRACK_COLOR : OFFLINE_MARKER_COLOR,
         rows: [
             { label: "Устройство", value: data?.deviceId || "--" },
             { label: "Статус", value: markerState },
             { label: "Режим", value: data?.mode || "Ожидание" },
             { label: "GPS", value: gpsLabel },
             { label: "Спутники", value: data?.gpsSatellites ?? "--" },
-            { label: "Вес", value: data?.weight != null ? `${formatMetric(data.weight, 1)} кг` : "--" },
-            { label: "Координаты", value: `${newCoords[0].toFixed(6)}, ${newCoords[1].toFixed(6)}${hasFreshGps ? "" : " (последние валидные)"}` },
+            { label: "Вес", value: (data?.realtimeWeight ?? data?.weight) != null ? `${formatMetric(data.realtimeWeight ?? data.weight, 1)} кг` : "--" },
+            { label: "Координаты", value: `${newCoords[0].toFixed(6)}, ${newCoords[1].toFixed(6)}${hasStickyBarn ? " (центр зоны)" : hasFreshGps ? "" : " (последние валидные)"}` },
             { label: "Зона", value: zoneName },
         ],
     });
 
     ensurePlacemarkVisible();
-    updatePlacemarkStatus(isOnline && hasFreshGps);
+    updatePlacemarkStatus(isOnline && hasDisplayPosition);
     placemark.properties.set({
         balloonContent,
         hintContent: `Хозяин — ${markerState}`,
@@ -1323,11 +1334,11 @@ function updateMapPosition(data, isOnline, options = {}) {
         return;
     }
 
-    if (!hasFreshGps) {
+    if (!hasFreshGps && !hasStickyBarn) {
         return;
     }
 
-    if (options.instant) {
+    if (options.instant || hasStickyBarn) {
         placemark.geometry.setCoordinates(newCoords);
     } else {
         smoothMove(newCoords);
@@ -1488,7 +1499,7 @@ function renderDashboard(data) {
     }
 
     const isOnline = isTelemetryOnline(data);
-    const hasCoordinates = hasFreshGpsCoordinates(data);
+    const hasCoordinates = hasFreshGpsCoordinates(data) || hasStickyBarnPosition(data);
     const parsedLat = Number(data.lat);
     const parsedLon = Number(data.lon);
     const zoneName = hasCoordinates
@@ -1498,7 +1509,8 @@ function renderDashboard(data) {
     setVehicleStatus(isOnline);
     setText("dashboardCurrentZone", zoneName);
     setText("dashboardCurrentMode", data?.mode || "Ожидание");
-    setText("dashboardCurrentWeight", data.weight != null ? `${formatMetric(data.weight, 1)} кг` : "--");
+    const displayedWeight = data.realtimeWeight ?? data.weight;
+    setText("dashboardCurrentWeight", displayedWeight != null ? `${formatMetric(displayedWeight, 1)} кг` : "--");
     setText("dashboardLastPacketTime", formatDateTime(data.timestamp));
     renderUnloadProgress(data?.mode, data?.unload_progress);
     renderActiveBatch(data?.active_batch);
@@ -1642,6 +1654,22 @@ function buildRoutePoints(historyRows) {
         .sort((left, right) => left.timestampMs - right.timestampMs);
 }
 
+function buildHostRoutePoints(historyRows) {
+    if (!window.HostTrackVisualFilter?.filter) {
+        return buildRoutePoints(historyRows);
+    }
+
+    const result = window.HostTrackVisualFilter.filter(historyRows, {
+        maxGpsAgeS: HOST_GPS_MAX_FIX_AGE_S,
+        maxReportedSpeedKmh: 30,
+        maxImpliedSpeedKmh: 30,
+        minSatellites: 6,
+        stabilizationPoints: 3,
+    });
+    lastHostTrackVisualFilterStats = result.stats;
+    return result.points;
+}
+
 function calculateDistanceMeters(pointA, pointB) {
     const toRadians = (degrees) => degrees * Math.PI / 180;
     const earthRadiusMeters = 6371000;
@@ -1659,6 +1687,10 @@ function calculateDistanceMeters(pointA, pointB) {
 function shouldRenderDashedTrackGap(previousPoint, currentPoint) {
     if (!previousPoint || !currentPoint) {
         return false;
+    }
+
+    if (currentPoint.visualGapBefore) {
+        return true;
     }
 
     const distanceMeters = calculateDistanceMeters(previousPoint, currentPoint);
@@ -1679,7 +1711,7 @@ function shouldRenderDashedTrackGap(previousPoint, currentPoint) {
 }
 
 function buildTrackSegments(historyRows) {
-    const points = buildRoutePoints(historyRows);
+    const points = buildHostRoutePoints(historyRows);
     const segments = [];
     let currentSegment = [];
 

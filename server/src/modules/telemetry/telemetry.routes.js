@@ -3,7 +3,15 @@ import prisma from "../../database.js"
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from "../../middleware/auth.js"
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { buildIngredientSummary, buildUnloadProgress, recalculateBatchViolations } from '../batches/batch-violations.js'
-import { getZoneByCoordinates, resolveEffectiveCoordinates, resolveGroupByCoordinates } from './telemetry-helpers.js'
+import {
+  findLastUsableHostPosition,
+  getZoneByCoordinates,
+  getZoneByCoordinatesWithinRadius,
+  getZoneCenterCoordinates,
+  hasUsableHostCoordinates,
+  resolveEffectiveCoordinates,
+  resolveGroupByCoordinates
+} from './telemetry-helpers.js'
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
 import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../../../module-3/config.js'
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
@@ -15,6 +23,7 @@ import { getHostIngressStore } from './host-ingress-store.js'
 import { postprocessCompletedBatch } from '../batches/batch-postprocess-service.js'
 import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js'
 import { parseHostTimestamp } from './host-timestamp.js'
+import { filterRealtimeWeightSeries } from './realtime-weight-filter.js'
 
 const router = Router()
 const hostIngressStore = getHostIngressStore()
@@ -26,7 +35,10 @@ const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
 const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
+const STICKY_BARN_POSITION_MAX_AGE_MS = 30 * 60 * 1000
+const STICKY_BARN_ENTRY_TOLERANCE_M = 5
 const unloadGroupEvidenceByBatch = new Map()
+const lastBarnPositionByDevice = new Map()
 
 function normalizeZoneType(value) {
   if (!value) return ''
@@ -273,6 +285,7 @@ function buildEmptyLatestResponse(deviceId = null) {
   return {
     id: null, deviceId, timestamp: null, receivedAt: null, lat: null, lon: null,
     speedKmh: null, weight: null, rawWeight: null, weightValid: false, gpsValid: false, gpsSatellites: 0, gpsAgeS: null,
+    realtimeWeight: null, realtimeWeightSource: null, realtimeWeightSampleCount: 0,
     gpsQuality: 0, wifiClients: null, cpuTempC: null, lteRssiDbm: null,
     lteAccessTech: null, eventsReaderOk: false, banner: null,
     mode: 'Ожидание',
@@ -289,6 +302,112 @@ function serializeTelemetryForResponse(row) {
     ...row,
     weight: roundWeight(row.weight),
     rawWeight: roundOptionalWeight(row.rawWeight)
+  }
+}
+
+function rememberDirectBarnPosition(
+  deviceId,
+  telemetryLike,
+  activeZones,
+  linkedBarnZoneIds,
+  { preserveLatched = false } = {}
+) {
+  if (!deviceId || !hasUsableHostCoordinates(telemetryLike)) return null
+  const barnZones = activeZones.filter((zone) => isBarnZone(zone, linkedBarnZoneIds))
+  const zone = getZoneByCoordinatesWithinRadius(
+    telemetryLike.lat,
+    telemetryLike.lon,
+    barnZones,
+    STICKY_BARN_ENTRY_TOLERANCE_M
+  )
+  if (!zone) {
+    const remembered = lastBarnPositionByDevice.get(deviceId)
+    if (preserveLatched && remembered?.latched) {
+      return remembered
+    }
+    lastBarnPositionByDevice.delete(deviceId)
+    return null
+  }
+
+  const center = getZoneCenterCoordinates(zone)
+  const timestampMs = new Date(telemetryLike.timestamp).getTime()
+  if (!center || !Number.isFinite(timestampMs)) return null
+  const position = {
+    ...center,
+    zone,
+    sourceTimestamp: new Date(timestampMs),
+    sourceTimestampMs: timestampMs
+  }
+  lastBarnPositionByDevice.set(deviceId, position)
+  return position
+}
+
+async function resolveStickyBarnPosition(prismaClient, telemetryLike, activeZones, linkedBarnZoneIds, activeBatch) {
+  const deviceId = telemetryLike?.deviceId
+  if (!deviceId) return null
+  if (hasUsableHostCoordinates(telemetryLike)) {
+    rememberDirectBarnPosition(deviceId, telemetryLike, activeZones, linkedBarnZoneIds, {
+      preserveLatched: Boolean(activeBatch)
+    })
+    return null
+  }
+  if (!activeBatch) return null
+
+  const referenceMs = new Date(telemetryLike.timestamp).getTime()
+  if (!Number.isFinite(referenceMs)) return null
+  let remembered = lastBarnPositionByDevice.get(deviceId) || null
+  if (!remembered) {
+    const lastValid = await findLastUsableHostPosition(prismaClient, {
+      deviceId,
+      referenceTime: telemetryLike.timestamp,
+      maxAgeMs: STICKY_BARN_POSITION_MAX_AGE_MS
+    })
+    if (lastValid) {
+      remembered = rememberDirectBarnPosition(deviceId, lastValid, activeZones, linkedBarnZoneIds)
+    }
+  }
+
+  const ageMs = remembered ? referenceMs - remembered.sourceTimestampMs : Number.POSITIVE_INFINITY
+  if (!remembered || ageMs < 0 || ageMs > STICKY_BARN_POSITION_MAX_AGE_MS) {
+    lastBarnPositionByDevice.delete(deviceId)
+    return null
+  }
+  remembered = { ...remembered, latched: true }
+  lastBarnPositionByDevice.set(deviceId, remembered)
+  return { ...remembered, ageMs, source: 'barn_sticky' }
+}
+
+function buildRealtimeWeight(data, telemetrySettings = {}) {
+  if (!data?.deviceId || !data?.timestamp) return null
+  const currentTimestampMs = new Date(data.timestamp).getTime()
+  const samples = hostIngressStore.recentLiveAccepted(40, data.deviceId)
+    .map((entry) => {
+      const packet = applyWeightCalibration(normalizeTelemetryPacket(entry.payload), telemetrySettings)
+      return Number.isFinite(currentTimestampMs) && packet.timestamp.getTime() <= currentTimestampMs
+        ? packet
+        : null
+    })
+    .filter(Boolean)
+
+  samples.push({
+    timestamp: data.timestamp,
+    rawWeight: data.rawWeight,
+    weight: data.weight,
+    weightValid: data.weightValid
+  })
+
+  const byTimestamp = new Map()
+  for (const sample of samples) {
+    const key = new Date(sample.timestamp).getTime()
+    if (Number.isFinite(key)) byTimestamp.set(key, sample)
+  }
+  const latest = filterRealtimeWeightSeries([...byTimestamp.values()]).latest
+  if (!latest) return null
+
+  return {
+    weight: roundOptionalWeight(latest.realtimeWeight),
+    source: latest.source,
+    sampleCount: latest.sampleCount
   }
 }
 
@@ -675,12 +794,30 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       ? Number(telemetrySettings.emptyVehicleThresholdKg)
       : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
-    const effectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
+    const stickyBarnPosition = await resolveStickyBarnPosition(
+      prisma,
+      packet,
+      activeZones,
+      linkedBarnZoneIds,
+      activeBatchForHints
+    )
+    const resolvedEffectivePosition = await resolveEffectiveCoordinates(prisma, packet, {
       deviceId,
       referenceTime: packet.timestamp,
       loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
       loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
     });
+    const effectivePosition = stickyBarnPosition
+      ? {
+          lat: stickyBarnPosition.lat,
+          lon: stickyBarnPosition.lon,
+          source: 'barn_sticky',
+          zone: stickyBarnPosition.zone,
+          sourceTimestamp: stickyBarnPosition.sourceTimestamp,
+          ageMs: stickyBarnPosition.ageMs,
+          rtkPoint: null
+        }
+      : resolvedEffectivePosition
     const processorPacket = {
       ...packet,
       lat: effectivePosition.lat,
@@ -689,13 +826,19 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
       course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
     };
     const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
-    const hostResolvedGroup = await resolveGroupByCoordinates(prisma, packet.lat, packet.lon);
+    const hostResolvedGroup = await resolveGroupByCoordinates(
+      prisma,
+      stickyBarnPosition?.lat ?? packet.lat,
+      stickyBarnPosition?.lon ?? packet.lon
+    );
     const currentZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones)
     const hostLoadingZone = getZoneByCoordinates(packet.lat, packet.lon, loadingZones)
     const hostForceIngredientName = hostLoadingZone?.ingredient || hostLoadingZone?.name || null
     const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
     const currentZoneEvidenceAgeMs = effectivePosition.source === 'rtk'
       ? Math.max(0, new Date(packet.timestamp).getTime() - new Date(effectivePosition.rtkPoint?.timestamp).getTime())
+      : effectivePosition.source === 'barn_sticky'
+      ? Math.max(0, Number(effectivePosition.ageMs) || 0)
       : null
 
     // Вся валидация координат, смена зон и расчет дельт
@@ -947,6 +1090,7 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
             if (activeBatch) {
               const completedBatchId = activeBatch.id
               unloadGroupEvidenceByBatch.delete(completedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               await tx.batch.update({
                 where: { id: activeBatch.id },
                 data: {
@@ -966,6 +1110,7 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
               const closedBatchId = activeBatch.id
               const actionEndTime = action.endTime ? new Date(action.endTime) : telemetry.timestamp
               unloadGroupEvidenceByBatch.delete(closedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               stickyViolationBatchIds.add(closedBatchId)
               await tx.batch.update({
                 where: { id: activeBatch.id },
@@ -1043,6 +1188,7 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
             ) {
               const closedBatchId = activeBatch.id
               unloadGroupEvidenceByBatch.delete(closedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               await tx.batch.update({
                 where: { id: closedBatchId },
                 data: {
@@ -1239,7 +1385,7 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
     const memoryState = telemetryProcessor.getState(data.deviceId);
-    const [activeBatch, activeZones, telemetrySettings] = await Promise.all([
+    const [activeBatch, activeZones, telemetrySettings, groupsWithZones] = await Promise.all([
       prisma.batch.findFirst({
       where: { deviceId: data.deviceId, endTime: null },
       include: {
@@ -1258,20 +1404,30 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
       orderBy: { startTime: 'desc' }
       }),
       prisma.storageZone.findMany({ where: { active: true } }),
-      getTelemetrySettings(prisma)
+      getTelemetrySettings(prisma),
+      prisma.livestockGroup.findMany({
+        where: { storageZoneId: { not: null } },
+        select: { storageZoneId: true }
+      })
     ]);
+    const linkedBarnZoneIds = new Set(
+      groupsWithZones
+        .map((group) => Number(group.storageZoneId))
+        .filter((zoneId) => Number.isInteger(zoneId) && zoneId > 0)
+    )
     if (data.pipelineStatus === 'accepted') {
       data = applyWeightCalibration(data, telemetrySettings)
     }
-    const effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
+    const realtimeWeight = buildRealtimeWeight(data, telemetrySettings)
+    let effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
       deviceId: data.deviceId,
       referenceTime: data.timestamp,
       loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
       loaderOfflineTimeoutMinutes: telemetrySettings.loaderOfflineTimeoutMinutes
     });
-    const detectedZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
+    let detectedZone = getZoneByCoordinates(effectivePosition.lat, effectivePosition.lon, activeZones);
 
-    const machineState = await inferMachineStateFromDatabase(
+    let machineState = await inferMachineStateFromDatabase(
       data.deviceId,
       data,
       activeBatch,
@@ -1281,6 +1437,37 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
         currentZone: detectedZone?.name || null
       }
     );
+    let stickyBarnPosition = null
+    if (machineState?.isUnloading && !hasUsableHostCoordinates(data)) {
+      stickyBarnPosition = await resolveStickyBarnPosition(
+        prisma,
+        data,
+        activeZones,
+        linkedBarnZoneIds,
+        activeBatch
+      )
+      if (stickyBarnPosition) {
+        effectivePosition = {
+          lat: stickyBarnPosition.lat,
+          lon: stickyBarnPosition.lon,
+          source: 'barn_sticky',
+          zone: stickyBarnPosition.zone,
+          sourceTimestamp: stickyBarnPosition.sourceTimestamp,
+          ageMs: stickyBarnPosition.ageMs
+        }
+        detectedZone = stickyBarnPosition.zone
+        machineState = await inferMachineStateFromDatabase(
+          data.deviceId,
+          data,
+          activeBatch,
+          memoryState,
+          telemetrySettings,
+          { currentZone: detectedZone?.name || null }
+        )
+      }
+    } else if (hasUsableHostCoordinates(data)) {
+      rememberDirectBarnPosition(data.deviceId, data, activeZones, linkedBarnZoneIds)
+    }
 
     let mode = 'Ожидание';
     let unload_progress = null;
@@ -1299,7 +1486,7 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
 
       if (machineState.isUnloading) {
         mode = 'Выгрузка';
-        unload_progress = buildUnloadProgress(activeBatch, roundWeight(data.weight), machineState);
+        unload_progress = buildUnloadProgress(activeBatch, roundWeight(realtimeWeight?.weight ?? data.weight), machineState);
       } else if (machineState.isMixing) {
         mode = 'Загрузка';
       }
@@ -1308,9 +1495,21 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     // 2. СИСТЕМНЫЕ БАННЕРЫ (Приоритет: если есть ошибка GPS, она важнее зоны)
     if (data.lat === 0 && data.lon === 0) {
       if (data.gpsQuality === 0) {
-        active_banner = { type: 'gps_warning', message: 'Ожидание GPS fix' };
+        active_banner = stickyBarnPosition
+          ? {
+              type: 'gps_warning',
+              message: `GPS потерян, позиция удерживается в зоне: ${stickyBarnPosition.zone.name}`,
+              zoneName: stickyBarnPosition.zone.name
+            }
+          : { type: 'gps_warning', message: 'Ожидание GPS fix' };
       } else if (data.gpsQuality === 1) {
-        active_banner = { type: 'gps_error', message: 'Координаты не распознаны' };
+        active_banner = stickyBarnPosition
+          ? {
+              type: 'gps_warning',
+              message: `GPS потерян, позиция удерживается в зоне: ${stickyBarnPosition.zone.name}`,
+              zoneName: stickyBarnPosition.zone.name
+            }
+          : { type: 'gps_error', message: 'Координаты не распознаны' };
       }
     }
 
@@ -1324,8 +1523,22 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
       };
     }
 
+    const responseTelemetry = serializeTelemetryForResponse(data)
+    if (stickyBarnPosition) {
+      responseTelemetry.lat = stickyBarnPosition.lat
+      responseTelemetry.lon = stickyBarnPosition.lon
+    }
+
     res.json({
-      ...serializeTelemetryForResponse(data),
+      ...responseTelemetry,
+      positionSource: stickyBarnPosition ? 'barn_sticky' : 'host',
+      positionEstimated: Boolean(stickyBarnPosition),
+      positionZoneId: stickyBarnPosition?.zone?.id ?? null,
+      positionZoneName: stickyBarnPosition?.zone?.name ?? null,
+      positionSourceTimestamp: stickyBarnPosition?.sourceTimestamp ?? null,
+      realtimeWeight: realtimeWeight?.weight ?? null,
+      realtimeWeightSource: realtimeWeight?.source ?? null,
+      realtimeWeightSampleCount: realtimeWeight?.sampleCount ?? 0,
       selectedDeviceId: data.deviceId,
       banner: active_banner, // Вот тут будет висеть зона, пока трактор там
       mode,
@@ -1357,7 +1570,7 @@ router.get('/recent', authenticate, requireReadAccess, async (req, res) => {
     const data = await prisma.telemetry.findMany({ 
       where: Object.keys(where).length ? where : undefined,
       orderBy: orderBySourceTimestampDesc(), take: limit,
-      select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, gpsAgeS: true, deviceId: true }
+      select: { id: true, timestamp: true, receivedAt: true, lat: true, lon: true, speedKmh: true, weight: true, rawWeight: true, weightValid: true, gpsValid: true, gpsSatellites: true, gpsAgeS: true, deviceId: true }
     });
     res.json(data.map(serializeTelemetryForResponse));
   } catch (error) {

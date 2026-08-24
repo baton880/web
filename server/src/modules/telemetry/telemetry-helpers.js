@@ -1,8 +1,77 @@
-import { calculateHaversine, detectZoneObject } from '../../../../module-1/geo.js'
+import { calculateHaversine, detectZoneObject, detectZoneWithinRadius } from '../../../../module-1/geo.js'
 
 export const TELEMETRY_FRESHNESS_MS = 15000
 export const DEFAULT_LOADER_MAX_DISTANCE_METERS = 150
 export const DEFAULT_LOADER_OFFLINE_TIMEOUT_MINUTES = 4
+export const HOST_GPS_MAX_FIX_AGE_S = 3
+
+export function hasUsableHostCoordinates(telemetryLike = {}) {
+  const lat = Number(telemetryLike.lat)
+  const lon = Number(telemetryLike.lon)
+  if (!Number.isFinite(lat) || !Number.isFinite(lon)) return false
+  if (lat === 0 || lon === 0 || lat < -90 || lat > 90 || lon < -180 || lon > 180) return false
+  if (telemetryLike.gpsValid === false || telemetryLike.gps_valid === false) return false
+
+  const gpsAge = telemetryLike.gpsAgeS ?? telemetryLike.gps_age_s
+  if (gpsAge !== null && gpsAge !== undefined && gpsAge !== '') {
+    const parsedAge = Number(gpsAge)
+    if (!Number.isFinite(parsedAge) || parsedAge > HOST_GPS_MAX_FIX_AGE_S) return false
+  }
+  return true
+}
+
+export function getZoneCenterCoordinates(zone = {}) {
+  const polygonValue = zone.polygonCoords
+  if (polygonValue) {
+    try {
+      const polygon = typeof polygonValue === 'string' ? JSON.parse(polygonValue) : polygonValue
+      const validPoints = Array.isArray(polygon)
+        ? polygon.filter((point) => Number.isFinite(Number(point?.[0])) && Number.isFinite(Number(point?.[1])))
+        : []
+      if (validPoints.length >= 3) {
+        return {
+          lat: validPoints.reduce((sum, point) => sum + Number(point[0]), 0) / validPoints.length,
+          lon: validPoints.reduce((sum, point) => sum + Number(point[1]), 0) / validPoints.length
+        }
+      }
+    } catch {
+      // Fall through to the stored zone center.
+    }
+  }
+
+  const lat = Number(zone.lat)
+  const lon = Number(zone.lon)
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { lat, lon } : null
+}
+
+export async function findLastUsableHostPosition(prisma, { deviceId, referenceTime, maxAgeMs }) {
+  const reference = new Date(referenceTime || new Date())
+  if (!deviceId || Number.isNaN(reference.getTime())) return null
+  const from = new Date(reference.getTime() - Math.max(0, Number(maxAgeMs) || 0))
+  const rows = await prisma.telemetry.findMany({
+    where: {
+      deviceId,
+      timestamp: { gte: from, lte: reference },
+      lat: { not: 0 },
+      lon: { not: 0 }
+    },
+    orderBy: [
+      { timestamp: 'desc' },
+      { id: 'desc' }
+    ],
+    take: 20,
+    select: {
+      id: true,
+      deviceId: true,
+      timestamp: true,
+      lat: true,
+      lon: true,
+      gpsValid: true,
+      gpsAgeS: true
+    }
+  })
+  return rows.find(hasUsableHostCoordinates) || null
+}
 
 export function isFreshTimestamp(value, thresholdMs = TELEMETRY_FRESHNESS_MS) {
   if (!value) return false
@@ -160,6 +229,12 @@ export function getZoneByCoordinates(lat, lon, zones = []) {
   }
 
   return detectZoneObject(Number(lat), Number(lon), zones)
+}
+
+export function getZoneByCoordinatesWithinRadius(lat, lon, zones = [], radiusMeters = 0) {
+  if (!Array.isArray(zones) || !zones.length) return null
+  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) return null
+  return detectZoneWithinRadius(Number(lat), Number(lon), zones, Math.max(0, Number(radiusMeters) || 0))
 }
 
 function buildGroupZoneShape(group) {

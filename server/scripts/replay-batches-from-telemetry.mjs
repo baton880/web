@@ -2,11 +2,15 @@ import { PrismaClient } from '@prisma/client'
 import { writeFileSync } from 'node:fs'
 
 import telemetryProcessor from '../../module-3/telemetryProcessor.js'
-import { calculateHaversine, detectZoneObject } from '../../module-1/geo.js'
+import { calculateHaversine, detectZoneObject, detectZoneWithinRadius } from '../../module-1/geo.js'
 import { normalizeIngredientName } from '../../module-2/rationManager.js'
 import { roundNonNegativeWeight, roundWeight } from '../../module-2/weightRounding.js'
 import { DEFAULT_TELEMETRY_SETTINGS } from '../src/modules/telemetry/telemetry-settings.js'
-import { TELEMETRY_FRESHNESS_MS } from '../src/modules/telemetry/telemetry-helpers.js'
+import {
+  getZoneCenterCoordinates,
+  hasUsableHostCoordinates,
+  TELEMETRY_FRESHNESS_MS
+} from '../src/modules/telemetry/telemetry-helpers.js'
 import { recalculateBatchViolations } from '../src/modules/batches/batch-violations.js'
 import { postprocessCompletedBatch } from '../src/modules/batches/batch-postprocess-service.js'
 import { recordLeftoverViolation } from '../src/modules/violations/violation-service.js'
@@ -24,6 +28,8 @@ const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
 const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
+const STICKY_BARN_POSITION_MAX_AGE_MS = 30 * 60 * 1000
+const STICKY_BARN_ENTRY_TOLERANCE_M = 5
 const PRELUDE_BATCH_MAX_DURATION_MS = 3 * 60 * 1000
 const PRELUDE_BATCH_MAX_GAP_MS = 4 * 60 * 1000
 const PRELUDE_BATCH_MAX_INGREDIENTS = 1
@@ -401,6 +407,7 @@ function normalizeTelemetryRow(row) {
     lat: Number(row.lat || 0),
     lon: Number(row.lon || 0),
     gpsValid: parseBoolean(row.gpsValid),
+    gpsAgeS: row.gpsAgeS === null || row.gpsAgeS === undefined ? null : Number(row.gpsAgeS),
     gpsSatellites: Number(row.gpsSatellites || 0),
     speedKmh: row.speedKmh === null || row.speedKmh === undefined ? null : Number(row.speedKmh),
     weight: Number(row.weight || 0),
@@ -1159,6 +1166,7 @@ async function runReplay() {
 
   const activeBatchByDevice = new Map()
   const unloadGroupEvidenceByBatch = new Map()
+  const lastBarnPositionByDevice = new Map()
   const recentWeightsByDevice = new Map()
   const batchIdsToRecalculate = new Set()
   const stickyViolationBatchIds = new Set()
@@ -1173,6 +1181,7 @@ async function runReplay() {
     leftovers: 0
   }
 
+  const barnZones = activeZones.filter((zone) => isBarnZone(zone, linkedBarnZoneIds))
   const pageSize = 1000
   let cursor = null
   let rtkReplayCursor = 0
@@ -1205,7 +1214,53 @@ async function runReplay() {
         telemetrySettings
       })
       const recentWeights = rememberRecentWeight(recentWeightsByDevice, deviceId, packet.weight, autoCloseEmptyStreak)
-      const effectivePosition = resolveEffectivePosition(packet, rtkIndex, telemetrySettings)
+      const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
+      let stickyBarnPosition = null
+      if (hasUsableHostCoordinates(packet)) {
+        const directZone = detectZoneWithinRadius(
+          packet.lat,
+          packet.lon,
+          barnZones,
+          STICKY_BARN_ENTRY_TOLERANCE_M
+        )
+        if (directZone) {
+          const center = getZoneCenterCoordinates(directZone)
+          if (center) {
+            lastBarnPositionByDevice.set(deviceId, {
+              ...center,
+              zone: directZone,
+              sourceTimestampMs: packetTimeMs,
+              latched: false
+            })
+          }
+        } else {
+          const remembered = lastBarnPositionByDevice.get(deviceId)
+          if (!activeBatchForHints || !remembered?.latched) {
+            lastBarnPositionByDevice.delete(deviceId)
+          }
+        }
+      } else if (activeBatchForHints) {
+        const remembered = lastBarnPositionByDevice.get(deviceId) || null
+        const ageMs = remembered ? packetTimeMs - remembered.sourceTimestampMs : Number.POSITIVE_INFINITY
+        if (remembered && ageMs >= 0 && ageMs <= STICKY_BARN_POSITION_MAX_AGE_MS) {
+          const latched = { ...remembered, latched: true }
+          lastBarnPositionByDevice.set(deviceId, latched)
+          stickyBarnPosition = { ...latched, ageMs, source: 'barn_sticky' }
+        } else {
+          lastBarnPositionByDevice.delete(deviceId)
+        }
+      }
+      const resolvedEffectivePosition = resolveEffectivePosition(packet, rtkIndex, telemetrySettings)
+      const effectivePosition = stickyBarnPosition
+        ? {
+            lat: stickyBarnPosition.lat,
+            lon: stickyBarnPosition.lon,
+            source: 'barn_sticky',
+            zone: stickyBarnPosition.zone,
+            ageMs: stickyBarnPosition.ageMs,
+            rtkPoint: null
+          }
+        : resolvedEffectivePosition
       const processorPacket = {
         ...packet,
         lat: effectivePosition.lat,
@@ -1214,8 +1269,11 @@ async function runReplay() {
         course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
       }
       const resolvedGroup = resolveGroupFromList(livestockGroups, effectivePosition.lat, effectivePosition.lon)
-      const hostResolvedGroup = resolveGroupFromList(livestockGroups, packet.lat, packet.lon)
-      const activeBatchForHints = activeBatchByDevice.get(deviceId) || null
+      const hostResolvedGroup = resolveGroupFromList(
+        livestockGroups,
+        stickyBarnPosition?.lat ?? packet.lat,
+        stickyBarnPosition?.lon ?? packet.lon
+      )
       const expectedIngredients = activeBatchForHints?.expectedIngredients || resolveExpectedIngredientsFromGroup(resolvedGroup)
       const currentZone = detectZoneObject(effectivePosition.lat, effectivePosition.lon, activeZones)
       const hostLoadingZone = detectZoneObject(packet.lat, packet.lon, loadingZones)
@@ -1223,6 +1281,8 @@ async function runReplay() {
       const suppressLoading = isBarnZone(currentZone, linkedBarnZoneIds)
       const currentZoneEvidenceAgeMs = effectivePosition.source === 'rtk'
         ? Math.max(0, new Date(packet.timestamp).getTime() - new Date(effectivePosition.rtkPoint?.timestamp).getTime())
+        : effectivePosition.source === 'barn_sticky'
+        ? Math.max(0, Number(effectivePosition.ageMs) || 0)
         : null
       const result = telemetryProcessor.processPacket(processorPacket, loadingZones, telemetrySettings, {
         suppressLoading,
@@ -1456,6 +1516,7 @@ async function runReplay() {
             if (activeBatch) {
               const completedBatchId = activeBatch.id
               unloadGroupEvidenceByBatch.delete(completedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
                 data: {
@@ -1475,6 +1536,7 @@ async function runReplay() {
               const closedBatchId = activeBatch.id
               const actionEndTime = action.endTime ? new Date(action.endTime) : packet.timestamp
               unloadGroupEvidenceByBatch.delete(closedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               stickyViolationBatchIds.add(closedBatchId)
               await prisma.batch.update({
                 where: { id: activeBatch.id },
@@ -1538,6 +1600,7 @@ async function runReplay() {
             ) {
               const closedBatchId = activeBatch.id
               unloadGroupEvidenceByBatch.delete(closedBatchId)
+              lastBarnPositionByDevice.delete(deviceId)
               await prisma.batch.update({
                 where: { id: closedBatchId },
                 data: {

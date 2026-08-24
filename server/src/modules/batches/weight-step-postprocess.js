@@ -1,8 +1,8 @@
 const WEIGHT_FILTER = {
   source: 'rawWeight',
-  hampelRadius: 10,
-  hampelSigma: 1,
-  rollingMedianRadius: 8,
+  hampelRadius: 25,
+  hampelSigma: 0.8,
+  rollingMedianRadius: 12,
   roundToKg: 5
 }
 const HOST_SPEED_FILTER = {

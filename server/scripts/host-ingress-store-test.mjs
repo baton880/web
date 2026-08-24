@@ -118,6 +118,11 @@ try {
   const legacyRow = store.db.prepare(`SELECT stream_id, packet_id FROM host_ingress WHERE dedupe_key LIKE 'legacy:%'`).get()
   assert.match(legacyRow.stream_id, /^legacy:/)
   assert.equal(legacyRow.packet_id, 0)
+  assert.deepEqual(
+    store.recentLiveAccepted(5, 'Hozain_01').map((row) => row.packetId),
+    [0, 9],
+    'processed live packets must remain available for the causal weight window'
+  )
   store.close()
 
   store = new HostIngressStore(databasePath)

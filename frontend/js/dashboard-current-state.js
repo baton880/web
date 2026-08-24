@@ -542,7 +542,8 @@
         setVehicleStatus(isOnline);
         setText("dashboardCurrentZone", zoneName);
         renderModeBadge(data?.mode, { replay: isReplay });
-        setText("dashboardCurrentWeight", data.weight != null ? `${formatMetric(data.weight, 1)} кг` : "--");
+        const displayedWeight = data.realtimeWeight ?? data.weight;
+        setText("dashboardCurrentWeight", displayedWeight != null ? `${formatMetric(displayedWeight, 1)} кг` : "--");
         setText("dashboardLastPacketTime", formatDateTime(data.timestamp));
         renderUnloadProgress(data?.mode, data?.unload_progress);
         renderActiveBatch(data?.active_batch);

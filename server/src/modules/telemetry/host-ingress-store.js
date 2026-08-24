@@ -374,6 +374,36 @@ export class HostIngressStore {
     }
   }
 
+  recentLiveAccepted(limit = 40, deviceId = null) {
+    const take = Math.min(100, Math.max(1, Number(limit) || 40))
+    const rows = this.db.prepare(`
+      SELECT id, device_id, stream_id, packet_id, is_live, raw_body, received_at, status
+      FROM host_ingress
+      WHERE is_live = 1
+        AND status != 'permanent'
+        AND (? IS NULL OR device_id = ?)
+      ORDER BY id DESC
+      LIMIT ?
+    `).all(deviceId || null, deviceId || null, take)
+
+    return rows.flatMap((row) => {
+      try {
+        return [{
+          inboxId: row.id,
+          deviceId: row.device_id,
+          streamId: row.stream_id,
+          packetId: row.packet_id,
+          isLive: Boolean(row.is_live),
+          payload: JSON.parse(row.raw_body),
+          receivedAt: row.received_at,
+          status: row.status
+        }]
+      } catch {
+        return []
+      }
+    })
+  }
+
   recentAccepted(limit = 20, deviceId = null) {
     const take = Math.min(500, Math.max(1, Number(limit) || 20))
     const rows = this.db.prepare(`
