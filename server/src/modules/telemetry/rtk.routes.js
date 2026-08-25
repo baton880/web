@@ -867,7 +867,7 @@ function serializeRtkTelemetry(row, zones = [], settings = {}) {
     wifiSsid: readRawValue(raw, ['wifi_ssid', 'wifiSsid']) ?? null,
     wifiProfile,
     rssiDbm,
-    sdReady: parseRawBoolean(raw, ['sd_ready', 'sdReady']),
+    sdReady: parseRawBoolean(raw, ['sd_ok', 'sdOk', 'sd_ready', 'sdReady']),
     sdQueueLen: parseRawInteger(raw, ['sd_queue_len', 'sdQueueLen']),
     ramQueueLen: parseRawInteger(raw, ['ram_queue_len', 'ramQueueLen']),
     queueLen: parseRawInteger(raw, ['queue_len', 'queueLen']),

@@ -11,7 +11,7 @@ Important values in `jun30a.ino`:
 - Telemetry endpoint: `https://vi-korm.ru/api/telemetry/rtk`
 - Normal telemetry interval: `1000 ms`
 - Stationary telemetry interval: `60000 ms`
-- Firmware version: `2026.07.15-reliable-1`
+- Firmware version: `2026.08.25-sd-hotfix-1`
 
 ## Reliable telemetry behavior
 
@@ -23,6 +23,9 @@ Important values in `jun30a.ino`:
   acknowledges a durable byte offset; the file is compacted only after a large
   acknowledged prefix instead of being rewritten after every 16-row batch.
 - SD initialization tries `8 MHz`, `4 MHz`, `1 MHz`, then `400 kHz`.
+- SD initialization runs only during boot. If it fails, the firmware does not
+  retry or remount the card until the device reboots; fresh telemetry continues
+  through the RAM queue. Every telemetry packet reports `sd_ok` as `1` or `0`.
 - HTTP uses a reusable TLS connection. A response is accepted only for a `2xx`;
   retryable failures leave the packet buffered.
 - Every packet includes `firmware_version`, random `boot_id`, unique `packet_id`,

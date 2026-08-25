@@ -21,7 +21,7 @@ const char* WIFI_FALLBACK_PASS = "223334444";
 const char* TELEMETRY_URL = "https://vi-korm.ru/api/telemetry/rtk";
 const char* DEVICE_ID = "rtk_loader_01";
 const char* OTA_HOSTNAME = "rtk-loader-01";
-const char* FIRMWARE_VERSION = "2026.07.15-reliable-1";
+const char* FIRMWARE_VERSION = "2026.08.25-sd-hotfix-1";
 
 // --- UART pins for Ardusimple ---
 const int RTK_RX_PIN = 17;
@@ -745,6 +745,7 @@ String buildPayload(const GpsData& data, uint32_t sequence) {
   // Report the actual connected SSID, not the internal primary/fallback label.
   payload += "\"wifi_profile\":\"" + escapeJson(currentWifiNetworkName()) + "\",";
   payload += "\"rssi_dbm\":" + formatLongOrNull(wifiRssi, wifiConnected) + ",";
+  payload += "\"sd_ok\":" + String(sdReady ? 1 : 0) + ",";
   payload += "\"sd_queue_len\":" + String(sdQueueCount) + ",";
   payload += "\"ram_queue_len\":" + String(ramQueueCount) + ",";
   payload += "\"stationary\":" + formatBool(stationaryModeActive) + ",";
@@ -1732,8 +1733,6 @@ void telemetrySenderTask(void* parameter) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
-
-    ensureSdReady();
 
     String* livePayload = nullptr;
     if (xQueueReceive(telemetryWorkQueue, &livePayload, pdMS_TO_TICKS(20)) == pdTRUE) {

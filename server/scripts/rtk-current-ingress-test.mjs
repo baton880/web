@@ -68,6 +68,36 @@ try {
   assert.equal(current.lon, 85.70)
   assert.equal(current.pipelineStatus, 'accepted')
   assert.equal(current.processed, false)
+  assert.equal(current.sdReady, null)
+
+  const compatibilityTestNow = Date.now()
+  const newFormatResult = await routesModule.processRtkTelemetryBody({
+    device_id: 'loader-sd-ok-test',
+    timestamp: new Date(compatibilityTestNow - 2000).toISOString(),
+    lat: 52.421,
+    lon: 85.701,
+    speed: 0,
+    quality: 4,
+    fix_type: 'RTK_FIXED',
+    sd_ok: 0
+  }, new Date(compatibilityTestNow - 1000))
+  assert.equal(newFormatResult.count, 1)
+  const newFormatCurrent = await routesModule.buildLatestResponse('loader-sd-ok-test')
+  assert.equal(newFormatCurrent.sdReady, false)
+
+  const oldFormatResult = await routesModule.processRtkTelemetryBody({
+    device_id: 'loader-sd-ready-test',
+    timestamp: new Date(compatibilityTestNow).toISOString(),
+    lat: 52.422,
+    lon: 85.702,
+    speed: 0,
+    quality: 4,
+    fix_type: 'RTK_FIXED',
+    sd_ready: 1
+  }, new Date(compatibilityTestNow + 1000))
+  assert.equal(oldFormatResult.count, 1)
+  const oldFormatCurrent = await routesModule.buildLatestResponse('loader-sd-ready-test')
+  assert.equal(oldFormatCurrent.sdReady, true)
   console.log('RTK ingress current test passed')
 } finally {
   try { rtkStore?.close() } catch {}
