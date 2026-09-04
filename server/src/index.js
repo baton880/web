@@ -22,6 +22,8 @@
   import prisma, { databaseReady } from './database.js'
   import batchesRoutes from './modules/batches/batches.routes.js'
   import groupsRoutes from './modules/groups/groups.routes.js'
+  import { createLoaderRouter } from './modules/loader/loader.routes.js'
+  import { LoaderTaskStore } from './modules/loader/loader-task-store.js'
   import usersRoutes from './modules/users/users.routes.js';
   import reportsRoutes from './modules/reports/reports.routes.js';
   import violationsRoutes from './modules/violations/violations.routes.js';
@@ -179,6 +181,7 @@
 
   // Группы/коровники для селектов и справочников
   app.use('/api/groups', authenticate, requireReadAccess, groupsRoutes)
+  app.use('/api/loader', authenticate, createLoaderRouter({ prisma, store: new LoaderTaskStore() }))
 
   app.use('/api/reports', authenticate, requireReadAccess, reportsRoutes)
   app.use('/api/violations', authenticate, requireReadAccess, violationsRoutes)
