@@ -20,6 +20,7 @@
     const ROLE_GUEST = "GUEST";
 
     const APP_PAGES = new Set([
+        "loader-terminals.html",
         "index.html",
         "tables.html",
         VIOLATIONS_PAGE,
@@ -32,7 +33,7 @@
         ADMIN_TELEMETRY_PAGE,
     ]);
     const ADMIN_ONLY_PAGES = new Set([ADMIN_TELEMETRY_PAGE]);
-    const GUEST_RESTRICTED_PAGES = new Set([DIGEST_SETTINGS_PAGE]);
+    const GUEST_RESTRICTED_PAGES = new Set([DIGEST_SETTINGS_PAGE, "loader-terminals.html"]);
 
     const WRITE_ROLES = new Set([ROLE_ADMIN, ROLE_DIRECTOR]);
 
@@ -517,7 +518,7 @@
             return;
         }
 
-        document.querySelectorAll('a[href="digest-settings.html"], a[href="/digest/settings"]').forEach((link) => {
+        document.querySelectorAll('a[href="digest-settings.html"], a[href="/digest/settings"], a[href="loader-terminals.html"]').forEach((link) => {
             const navItem = link.closest(".nav-item");
             if (navItem) {
                 navItem.style.display = "none";

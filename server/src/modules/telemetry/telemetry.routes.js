@@ -1377,7 +1377,7 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
 // ============================================================================
 // GET /current - ДАННЫЕ ДЛЯ ГЛАВНОЙ СТРАНИЦЫ
 // ============================================================================
-router.get('/current', authenticate, requireReadAccess, async (req, res) => {
+export async function handleCurrentTelemetry(req, res) {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)
     let data = await findCurrentTelemetry(requestedDeviceId);
@@ -1552,7 +1552,8 @@ router.get('/current', authenticate, requireReadAccess, async (req, res) => {
     console.error('[Ошибка /current]:', error);
     res.status(500).json({ error: 'Internal server error' });
   }
-});
+}
+router.get('/current', authenticate, requireReadAccess, handleCurrentTelemetry);
 
 
 // ============================================================================

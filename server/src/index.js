@@ -4,7 +4,7 @@
   import cors from 'cors'
   import path from 'path'
   import { fileURLToPath } from 'url'
-  import telemetryRouter, { processHostTelemetryPacket } from './modules/telemetry/telemetry.routes.js'
+  import telemetryRouter, { processHostTelemetryPacket, handleCurrentTelemetry } from './modules/telemetry/telemetry.routes.js'
   import { startHostIngressWorker } from './modules/telemetry/host-ingress-worker.js'
   import { getHostIngressStats } from './modules/telemetry/host-ingress-store.js'
   import rtkTelemetryRouter, { handleRtkTelemetryPost, processRtkTelemetryBody } from './modules/telemetry/rtk.routes.js'
@@ -24,6 +24,7 @@
   import groupsRoutes from './modules/groups/groups.routes.js'
   import { createLoaderRouter } from './modules/loader/loader.routes.js'
   import { LoaderTaskStore } from './modules/loader/loader-task-store.js'
+  import { LoaderTerminalStore, createLoaderAuthentication, createTerminalManagementRouter } from './modules/loader/loader-terminals.js'
   import usersRoutes from './modules/users/users.routes.js';
   import reportsRoutes from './modules/reports/reports.routes.js';
   import violationsRoutes from './modules/violations/violations.routes.js';
@@ -181,7 +182,10 @@
 
   // Группы/коровники для селектов и справочников
   app.use('/api/groups', authenticate, requireReadAccess, groupsRoutes)
-  app.use('/api/loader', authenticate, createLoaderRouter({ prisma, store: new LoaderTaskStore() }))
+  const loaderTasks = new LoaderTaskStore()
+  const loaderTerminals = new LoaderTerminalStore(loaderTasks.db)
+  app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals }))
+  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, weightHandler: handleCurrentTelemetry }))
 
   app.use('/api/reports', authenticate, requireReadAccess, reportsRoutes)
   app.use('/api/violations', authenticate, requireReadAccess, violationsRoutes)

@@ -1,0 +1,9 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Терминалы — ВИ-КОРМ</title>
+<link rel="stylesheet" href="css/loader-terminals.css"><script src="js/app-auth.js?v=20260904term" defer></script><script src="js/loader-terminals.js" defer></script></head>
+<body><main class="page-wrapper"><header><a href="index.html" class="brand"><img src="img/cow.svg" alt="">ВИ-КОРМ</a><a href="index.html">← На главную</a></header>
+<h1>Планшеты погрузчика</h1><p class="intro">Зарегистрированные планшеты входят автоматически. Здесь можно отключить потерянный или больше не используемый терминал.</p>
+<div class="toolbar"><button id="reload">Обновить список</button><span id="status" role="status">Загрузка…</span></div><div id="terminals"></div>
+<p class="footnote">Новый планшет регистрируется из приложения после входа под директором или администратором. Отзыв доступа действует на последующие запросы; сохранённые задания и история остаются. Смена пароля учётной записи также отключает её терминалы.</p>
+<dialog id="revoke-dialog"><form method="dialog"><h2>Отключить планшет?</h2><p id="revoke-name"></p><p>Для восстановления доступа понадобится снова войти в приложении. История заданий сохранится.</p><div class="actions"><button value="cancel">Оставить доступ</button><button id="approve-revoke" class="danger" value="revoke">Отключить</button></div></form></dialog>
+</main></body></html>

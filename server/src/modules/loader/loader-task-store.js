@@ -80,19 +80,21 @@ export class LoaderTaskStore {
   row(id, actor) {
     const row = this.db.prepare('SELECT * FROM LoaderTask WHERE id=?').get(id)
     check(row, 'Задание не найдено', 404)
-    check(row.ownerId === actor.id || actor.role === 'ADMIN', 'Задание другого оператора', 403)
+    check(!actor.terminalDeviceId || row.deviceId === actor.terminalDeviceId, 'Задание другого Хозяина', 403)
+    check(row.ownerId === actor.id || (actor.role === 'ADMIN' && !actor.terminalId), 'Задание другого оператора', 403)
     return row
   }
   get(id, actor) { return JSON.parse(this.row(id, actor).state) }
   findExisting(id, actor) { return this.db.prepare('SELECT id FROM LoaderTask WHERE id=?').get(id) ? this.get(id, actor) : null }
   list(deviceId, actor) {
     return this.db.prepare(`SELECT state FROM LoaderTask WHERE deviceId=? AND (ownerId=? OR ?='ADMIN') ORDER BY createdAt DESC LIMIT 50`)
-      .all(deviceId, actor.id, actor.role).map(r => JSON.parse(r.state))
+      .all(deviceId, actor.id, actor.terminalId ? 'TERMINAL' : actor.role).map(r => JSON.parse(r.state))
   }
   active(deviceId, actor) {
     const row = this.db.prepare("SELECT * FROM LoaderTask WHERE deviceId=? AND status IN ('ready','active')").get(deviceId)
     if (!row) return null
-    check(row.ownerId === actor.id || actor.role === 'ADMIN', 'У Хозяина уже есть задание другого оператора', 409)
+    check(!actor.terminalDeviceId || row.deviceId === actor.terminalDeviceId, 'Задание другого Хозяина', 403)
+    check(row.ownerId === actor.id || (actor.role === 'ADMIN' && !actor.terminalId), 'У Хозяина уже есть задание другого оператора', 409)
     return JSON.parse(row.state)
   }
   create(body, plan, actor) {
