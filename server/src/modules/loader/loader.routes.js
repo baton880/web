@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { buildLoaderPlan } from './loader-plan.js'
+import { buildLoaderPlan, isLoaderGroupAvailable } from './loader-plan.js'
 import { TaskError } from './loader-task-store.js'
 
 // Authentication is mounted by index.js; the factory also enables isolated HTTP tests.
@@ -14,7 +14,7 @@ export function createLoaderRouter({ prisma, store }) {
   const include = { ration: { include: { ingredients: true } } }
   router.get('/groups', wrap(async (req, res) => {
     const groups = await prisma.livestockGroup.findMany({ include, orderBy: { name: 'asc' } })
-    res.json({ groups: groups.map(g => ({ id: g.id, name: g.name, plan: buildLoaderPlan(g) })) })
+    res.json({ groups: groups.filter(isLoaderGroupAvailable).map(g => ({ id: g.id, name: g.name, plan: buildLoaderPlan(g) })) })
   }))
   router.get('/tasks', wrap(async (req, res) => res.json({ tasks: store.list(String(req.query.deviceId || ''), req.user) })))
   router.get('/tasks/active', wrap(async (req, res) => res.json({ task: store.active(String(req.query.deviceId || ''), req.user) })))
