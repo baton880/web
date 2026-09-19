@@ -1,0 +1,427 @@
+generator client {
+  provider = "prisma-client-js"
+  output = "../../generated/postgresql-client"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Telemetry {
+  id             Int      @id @default(autoincrement())
+  sourceStreamId String?
+  sourcePacketId Int?
+  deviceId       String
+  timestamp      DateTime @db.Timestamptz(3)
+  receivedAt     DateTime @default(now()) @db.Timestamptz(3)
+  lat            Float
+  lon            Float
+  gpsValid       Boolean  @default(false)
+  gpsSatellites  Int      @default(0)
+  gpsAgeS        Float?
+  speedKmh       Float?
+  weight         Float
+  rawWeight      Float?
+  rawPayload     String
+  weightValid    Boolean  @default(false)
+  gpsQuality     Int      @default(0)
+  wifiClients    String?
+  cpuTempC       Float?
+  lteRssiDbm     Int?
+  lteAccessTech  String?
+  eventsReaderOk Boolean  @default(false)
+  currentFor     DeviceCurrentTelemetry?
+
+  @@index([deviceId, timestamp])
+  @@index([timestamp])
+  @@unique([deviceId, sourceStreamId, sourcePacketId])
+}
+
+model DeviceCurrentTelemetry {
+  deviceId       String    @id
+  telemetryId    Int       @unique
+  sourceStreamId String?
+  sourcePacketId Int?
+  receivedAt     DateTime @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+  telemetry      Telemetry @relation(fields: [telemetryId], references: [id], onDelete: Cascade)
+
+  @@index([receivedAt])
+}
+
+model RtkTelemetry {
+  id            Int      @id @default(autoincrement())
+  ingestKey     String?  @unique
+  deviceId      String
+  timestamp     DateTime @db.Timestamptz(3)
+  lat           Float
+  lon           Float
+  rtkQuality    String?
+  rtkAge        Float?
+  speed         Float?
+  course        Float?
+  supplyVoltage Float?
+  satellites    Int?
+  fixType       String?
+  rawPayload    String
+  createdAt     DateTime @default(now()) @db.Timestamptz(3)
+
+  @@index([deviceId, timestamp])
+  @@index([timestamp])
+}
+
+model StorageZone {
+  id         Int      @id @default(autoincrement())
+  name       String
+  lat        Float
+  lon        Float
+  radius     Float    @default(15.0)
+  shapeType  String   @default("CIRCLE")
+  sideMeters Float?
+  polygonCoords String?
+  squareMinLat Float?
+  squareMinLon Float?
+  squareMaxLat Float?
+  squareMaxLon Float?
+  loadingWallSide Int?
+  loadingNormalDeg Float?
+  zoneType   String   @default("STORAGE")
+  ingredient String
+  active     Boolean  @default(true)
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+
+  livestockGroups LivestockGroup[]
+}
+
+model DeviceEvent {
+  id         Int      @id @default(autoincrement())
+  deviceId   String
+  type       String
+  timestamp  DateTime @db.Timestamptz(3)
+  fromNumber String
+  text       String?
+  createdAt  DateTime @default(now()) @db.Timestamptz(3)
+}
+
+model DigestSettings {
+  id             Int      @id
+  enabled        Boolean  @default(false)
+  senderEmail    String   @default("")
+  sendTime       String   @default("08:00")
+  timezone       String   @default("Asia/Novosibirsk")
+  recipientsJson String   @default("[]")
+  lastSentAt     DateTime? @db.Timestamptz(3)
+  createdAt      DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model TelemetrySettings {
+  id                     Int      @id
+  batchStartThresholdKg  Int      @default(30)
+  leftoverThresholdKg    Int      @default(50)
+  unloadDropThresholdKg  Int      @default(200)
+  unloadMinPeakKg        Int      @default(400)
+  unloadUpdateDeltaKg    Int      @default(1)
+  unloadWeightBufferKg   Int      @default(50)
+  emptyVehicleThresholdKg Int     @default(50)
+  autoCloseZeroWeightKg  Int      @default(10)
+  autoCloseEmptyStreak   Int      @default(5)
+  autoCloseNegativeStreak Int     @default(3)
+  modeUnloadDropHintKg   Int      @default(30)
+  modeLoadingDeltaHintKg Int      @default(5)
+  anomalyThresholdKg     Int      @default(200)
+  anomalyConfirmDeltaKg  Int      @default(40)
+  anomalyConfirmPackets  Int      @default(3)
+  movementSpeedThresholdKmh Int   @default(3)
+  movementConfirmPackets  Int     @default(3)
+  loadingZoneStickySeconds Int    @default(180)
+  zoneChangeDebounceMs   Int      @default(3000)
+  nullZoneConfirmSeconds Int      @default(120)
+  zoneChangeConfirmPackets Int    @default(2)
+  zoneDwellScoreCapSeconds Int    @default(45)
+  zoneEntryFrontBonus      Int    @default(8)
+  zoneEntryRearPenalty     Int    @default(10)
+  zoneEntryFrontAngleDeg   Int    @default(75)
+  zoneEntryRearAngleDeg    Int    @default(120)
+  squareHeadingScorePerSecond Int @default(2)
+  squareHeadingScoreCap    Int    @default(30)
+  squareHeadingMaxAngleDeg Int    @default(90)
+  deviationPercentThreshold Int   @default(10)
+  deviationMinKgThreshold   Int   @default(10)
+  rtkTrackResetTime         String @default("03:00")
+  rtkHeadingOffsetDeg       Float  @default(0)
+  weightCalibrationFactor   Float  @default(1)
+  loaderMaxDistanceMeters   Int    @default(30)
+  loaderOfflineTimeoutMinutes Int   @default(4)
+  createdAt              DateTime @default(now()) @db.Timestamptz(3)
+  updatedAt              DateTime @updatedAt @db.Timestamptz(3)
+}
+
+model User {
+  id        Int      @id @default(autoincrement())
+  username  String   @unique
+  email     String?   @unique
+  password  String
+  role      UserRole @default(GUEST)
+  createdAt DateTime @default(now()) @db.Timestamptz(3)
+}
+
+model Ration {
+  id          Int      @id @default(autoincrement())
+  name        String   @unique
+  feedingsPerDay Int   @default(1)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  isActive        Boolean            @default(false)
+  ingredients     RationIngredient[]
+
+  // Связи для замесов и групп
+  livestockGroups LivestockGroup[]
+  batches         Batch[]
+}
+
+model RationIngredient {
+  id              Int      @id @default(autoincrement())
+  rationId        Int
+  ration          Ration   @relation(fields: [rationId], references: [id], onDelete: Cascade)
+
+  name            String
+  sortOrder       Int      @default(0)
+  plannedWeight   Float
+  dryMatterWeight Float
+  isCompound      Boolean  @default(false)
+  componentsJson  String?
+}
+
+enum UserRole {
+  ADMIN
+  DIRECTOR
+  GUEST
+}
+
+// =========================================================
+// НОВЫЕ МОДЕЛИ ДЛЯ ФАКТИЧЕСКИХ ЗАМЕСОВ И ПОГОЛОВЬЯ
+// =========================================================
+
+model LivestockGroup {
+  id          Int      @id @default(autoincrement())
+  name        String
+  headcount   Int
+
+  rationId    Int?
+  ration      Ration?  @relation(fields: [rationId], references: [id])
+
+  storageZoneId Int?
+  storageZone   StorageZone? @relation(fields: [storageZoneId], references: [id])
+
+  lat         Float?
+  lon         Float?
+  radius      Float    @default(30.0)
+
+  batches     Batch[]
+}
+
+model Batch {
+  id              Int      @id @default(autoincrement())
+  deviceId        String
+
+  startTime       DateTime @default(now()) @db.Timestamptz(3)
+  endTime         DateTime? @db.Timestamptz(3)
+
+  // Пока делаем опциональными для MVP-теста (так как мы еще не привязываем их жестко к Excel-рациону)
+  rationId        Int?
+  ration          Ration?  @relation(fields: [rationId], references: [id])
+  groupId         Int?
+  group           LivestockGroup? @relation(fields: [groupId], references: [id])
+
+  startWeight     Float    @default(0)
+  endWeight       Float?
+
+  hasViolations   Boolean  @default(false)
+
+  actualIngredients BatchIngredient[]
+  violations        Violation[]
+}
+
+model BatchIngredient {
+  id              Int      @id @default(autoincrement())
+
+  batchId         Int
+  batch           Batch    @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  ingredientName  String
+
+  plannedWeight   Float?   // Пока опционально
+  actualWeight    Float
+  startedAt       DateTime? @db.Timestamptz(3)
+  startLat        Float?
+  startLon        Float?
+  endLat          Float?
+  endLon          Float?
+
+  isViolation     Boolean  @default(false)
+
+  addedAt         DateTime @default(now()) @db.Timestamptz(3)
+}
+
+model Violation {
+  id               Int               @id @default(autoincrement())
+  batchId          Int?
+  batch            Batch?            @relation(fields: [batchId], references: [id], onDelete: SetNull)
+  deviceId         String
+  code             String
+  title            String
+  componentKey     String            @default("")
+  componentName    String?
+  message          String
+  category         ViolationCategory @default(BUSINESS)
+  status           ViolationStatus   @default(OPEN)
+  source           String            @default("system")
+  planWeight       Float?
+  actualWeight     Float?
+  deviation        Float?
+  deviationPercent Float?
+  detectedAt       DateTime          @default(now()) @db.Timestamptz(3)
+  resolvedAt       DateTime? @db.Timestamptz(3)
+  comment          String?
+  createdAt        DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt        DateTime          @updatedAt @db.Timestamptz(3)
+
+  @@unique([batchId, code, componentKey])
+  @@index([deviceId, detectedAt])
+  @@index([status, detectedAt])
+}
+
+model TechnicalWarning {
+  id         Int                    @id @default(autoincrement())
+  scopeKey   String
+  deviceId   String?
+  code       String
+  title      String
+  message    String
+  severity   String
+  status     TechnicalWarningStatus @default(OPEN)
+  detailsJson String?
+  firstSeenAt DateTime              @default(now()) @db.Timestamptz(3)
+  lastSeenAt  DateTime              @default(now()) @db.Timestamptz(3)
+  resolvedAt  DateTime? @db.Timestamptz(3)
+  createdAt   DateTime              @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime              @updatedAt @db.Timestamptz(3)
+
+  @@unique([scopeKey, code])
+  @@index([status, lastSeenAt])
+}
+
+enum ViolationStatus {
+  OPEN
+  IN_PROGRESS
+  CLOSED
+  RESOLVED
+}
+
+enum ViolationCategory {
+  BUSINESS
+  LEFTOVER
+  TECHNICAL
+}
+
+enum TechnicalWarningStatus {
+  OPEN
+  ACKNOWLEDGED
+  RESOLVED
+}
+
+model AppState {
+  key String @id
+  value String
+  updatedAt String
+}
+model LoaderTask {
+  id String @id
+  deviceId String
+  ownerId Int
+  status String
+  createdAt BigInt
+  state String
+  @@index([deviceId, createdAt])
+}
+model LoaderTaskEvent {
+  id String @id
+  taskId String
+  revision Int
+  receivedAt BigInt
+  payload String
+  @@unique([taskId, revision])
+}
+model LoaderTerminal {
+  id String @id
+  name String
+  deviceId String
+  ownerId Int
+  keyHash String
+  passwordVersion String
+  createdAt BigInt
+  lastSeenAt BigInt?
+  revokedAt BigInt?
+  @@index([ownerId])
+}
+
+model HostIngress {
+  id BigInt @id @default(autoincrement())
+  dedupe_key String @unique
+  device_id String?
+  stream_id String?
+  packet_id BigInt?
+  is_live Int @default(0)
+  raw_body String
+  received_at DateTime @db.Timestamptz(3)
+  status String @default("pending")
+  attempts Int @default(0)
+  next_attempt_at DateTime? @db.Timestamptz(3)
+  last_error String?
+  created_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  updated_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  processed_at DateTime? @db.Timestamptz(3)
+  lease_owner String? @db.Uuid
+  lease_token String? @db.Uuid
+  lease_until DateTime? @db.Timestamptz(3)
+  @@index([status,next_attempt_at,is_live(sort: Desc),id], map: "host_ingress_ready_pg_idx")
+  @@index([device_id,stream_id,packet_id(sort: Desc)], map: "host_ingress_device_stream_packet_pg_idx")
+  @@index([device_id,is_live,id(sort: Desc)], map: "host_ingress_device_live_id_pg_idx")
+  @@index([is_live,id(sort: Desc)], map: "host_ingress_live_id_pg_idx")
+  @@index([device_id,id(sort: Desc)], map: "host_ingress_device_id_pg_idx")
+  @@map("host_ingress")
+}
+model RtkIngress {
+  id BigInt @id @default(autoincrement())
+  request_hash String @unique
+  raw_body String
+  received_at DateTime @db.Timestamptz(3)
+  status String @default("pending")
+  attempts Int @default(0)
+  next_attempt_at DateTime? @db.Timestamptz(3)
+  last_error String?
+  created_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  updated_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  processed_at DateTime? @db.Timestamptz(3)
+  lease_owner String? @db.Uuid
+  lease_token String? @db.Uuid
+  lease_until DateTime? @db.Timestamptz(3)
+  @@map("rtk_ingress")
+}
+model HostIngressMeta {
+  key String @id
+  value String
+  updated_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  @@map("host_ingress_meta")
+}
+model CalculatedReplayDirty {
+  farm_day String @id
+  dirty_from DateTime @db.Timestamptz(3)
+  dirty_to DateTime @db.Timestamptz(3)
+  sources String @default("")
+  version BigInt @default(1)
+  updated_at DateTime @default(dbgenerated("clock_timestamp()")) @db.Timestamptz(3)
+  @@index([dirty_from,farm_day],map: "calculated_replay_dirty_from_pg_idx")
+  @@map("calculated_replay_dirty")
+}

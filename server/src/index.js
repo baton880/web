@@ -1,3 +1,6 @@
+import { ensureProcessorCheckpointLoaded } from './modules/telemetry/processor-checkpoint.js'
+import { acquireCalculationOwner, usePostgresIngress } from './modules/telemetry/ingress-postgres-pool.js'
+import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
   import './load-env.js'
   import express from 'express'
   import cookieParser from 'cookie-parser'
@@ -20,6 +23,8 @@
   import authRouter from './modules/auth/auth.routes.js'
   import rationsRouter from './modules/rations/rations.routes.js'
   import prisma, { databaseReady } from './database.js'
+  import { isPostgresDatabase } from './prisma-client.js'
+  import { PostgresLoaderTaskStore, PostgresLoaderTerminalStore } from './modules/loader/loader-postgres-store.js'
   import batchesRoutes from './modules/batches/batches.routes.js'
   import groupsRoutes from './modules/groups/groups.routes.js'
   import { createLoaderRouter } from './modules/loader/loader.routes.js'
@@ -101,7 +106,7 @@
 
       let rtkIngress
       try {
-        const stats = getRtkIngressStats()
+        const stats = await getRtkIngressStats()
         rtkIngress = {
           pending: stats.pending,
           retry: stats.retry,
@@ -115,7 +120,7 @@
       }
       let hostIngress
       try {
-        const stats = getHostIngressStats()
+        const stats = await getHostIngressStats()
         hostIngress = {
           pending: stats.pending,
           retry: stats.retry,
@@ -142,6 +147,7 @@
       // Формируем красивый ответ
       res.json({
         status: 'ok',
+        storage: { main: isPostgresDatabase ? 'postgres' : 'sqlite', ingress: usePostgresIngress ? 'postgres' : 'sqlite' },
         message: 'Сервер работает нормально',
         uptime: Math.floor(process.uptime()) + ' секунд',
         timestamp: new Date().toISOString(),
@@ -182,8 +188,8 @@
 
   // Группы/коровники для селектов и справочников
   app.use('/api/groups', authenticate, requireReadAccess, groupsRoutes)
-  const loaderTasks = new LoaderTaskStore()
-  const loaderTerminals = new LoaderTerminalStore(loaderTasks.db)
+  const loaderTasks = isPostgresDatabase ? new PostgresLoaderTaskStore(prisma) : new LoaderTaskStore()
+  const loaderTerminals = isPostgresDatabase ? new PostgresLoaderTerminalStore(prisma) : new LoaderTerminalStore(loaderTasks.db)
   app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals }))
   app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, weightHandler: handleCurrentTelemetry }))
 
@@ -231,17 +237,32 @@
     res.sendFile(path.join(frontendPath, 'index.html'))
   })
 
-  await databaseReady
+  // A validation/API-only process must not send digests, clean history, or claim
+  // production work merely because it was started to inspect an imported DB.
+  const backgroundEnabled = process.env.RUN_BACKGROUND_JOBS !== 'false'
+  const scheduledEnabled = process.env.RUN_SCHEDULED_JOBS === undefined ? backgroundEnabled : process.env.RUN_SCHEDULED_JOBS === 'true'
+  const telemetryEnabled = process.env.RUN_TELEMETRY_WORKERS === undefined ? backgroundEnabled : process.env.RUN_TELEMETRY_WORKERS === 'true'
 
-  app.listen(PORT, '0.0.0.0', () => {
+  await databaseReady
+  if (usePostgresIngress && (telemetryEnabled || scheduledEnabled)) {
+    await acquireCalculationOwner()
+    await ensureProcessorCheckpointLoaded(prisma)
+    await getHostIngressStore().recoverInterruptedReplay()
+  }
+
+  app.listen(PORT, process.env.BIND_HOST || '0.0.0.0', () => {
     console.log(`🚀 Server & Website running on http://127.0.0.1:${PORT}`)
   })
 
-  startDigestScheduler(prisma)
-  startRtkTrackScheduler(prisma)
-  startDataRetentionScheduler(prisma)
-  startHostIngressWorker(processHostTelemetryPacket)
-  startRtkIngressWorker(processRtkTelemetryBody)
+  if (scheduledEnabled) {
+    startDigestScheduler(prisma)
+    startRtkTrackScheduler(prisma)
+    startDataRetentionScheduler(prisma)
+  }
+  if (telemetryEnabled) {
+    startHostIngressWorker(processHostTelemetryPacket)
+    startRtkIngressWorker(processRtkTelemetryBody)
+  }
 
   // Запуск
   //app.listen(PORT, () => {

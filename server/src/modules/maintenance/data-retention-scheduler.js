@@ -137,7 +137,7 @@ async function runSqliteMaintenance(prisma, totalDeleted) {
     vacuum: false
   }
 
-  if (totalDeleted <= 0) {
+  if (/^postgres(?:ql)?:\/\//.test(process.env.DATABASE_URL || '') || totalDeleted <= 0) {
     return maintenance
   }
 

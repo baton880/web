@@ -77,12 +77,12 @@ export function createTerminalManagementRouter({ prisma, terminals }) {
     next()
   })
   const wrap = action => async (req,res,next) => { try { await action(req,res) } catch(error) { next(error) } }
-  router.get('/', wrap(async (req,res) => res.json({terminals:terminals.list(req.user)})))
+  router.get('/', wrap(async (req,res) => res.json({terminals:await terminals.list(req.user)})))
   router.post('/', wrap(async (req,res) => {
     const user = await prisma.user.findUnique({where:{id:req.user.id},select:{id:true,role:true,password:true}})
-    res.status(201).json({terminal:terminals.register(req.body,user)})
+    res.status(201).json({terminal:await terminals.register(req.body,user)})
   }))
-  router.post('/:id/revoke', wrap(async(req,res) => {terminals.revoke(req.params.id,req.user);res.json({ok:true})}))
+  router.post('/:id/revoke', wrap(async(req,res) => {await terminals.revoke(req.params.id,req.user);res.json({ok:true})}))
   router.use((error,req,res,next) => res.status(error instanceof TaskError ? error.status : 500).json({error:error instanceof TaskError ? error.message:'Не удалось обработать регистрацию'}))
   return router
 }

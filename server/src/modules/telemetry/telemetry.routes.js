@@ -1,5 +1,8 @@
+import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
+import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from './processor-checkpoint.js'
 import { Router } from 'express'
 import prisma from "../../database.js"
+import { isPostgresDatabase } from '../../prisma-client.js'
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from "../../middleware/auth.js"
 import telemetryProcessor from '../../../../module-3/telemetryProcessor.js'
 import { buildIngredientSummary, buildUnloadProgress, recalculateBatchViolations } from '../batches/batch-violations.js'
@@ -37,8 +40,7 @@ const UNLOAD_GROUP_CONFIRM_PACKETS = 2
 const MIN_UNLOAD_GROUP_CONFIRM_DROP_KG = 500
 const STICKY_BARN_POSITION_MAX_AGE_MS = 30 * 60 * 1000
 const STICKY_BARN_ENTRY_TOLERANCE_M = 5
-const unloadGroupEvidenceByBatch = new Map()
-const lastBarnPositionByDevice = new Map()
+
 
 function normalizeZoneType(value) {
   if (!value) return ''
@@ -377,10 +379,10 @@ async function resolveStickyBarnPosition(prismaClient, telemetryLike, activeZone
   return { ...remembered, ageMs, source: 'barn_sticky' }
 }
 
-function buildRealtimeWeight(data, telemetrySettings = {}) {
+async function buildRealtimeWeight(data, telemetrySettings = {}) {
   if (!data?.deviceId || !data?.timestamp) return null
   const currentTimestampMs = new Date(data.timestamp).getTime()
-  const samples = hostIngressStore.recentLiveAccepted(40, data.deviceId)
+  const samples = (await hostIngressStore.recentLiveAccepted(40, data.deviceId))
     .map((entry) => {
       const packet = applyWeightCalibration(normalizeTelemetryPacket(entry.payload), telemetrySettings)
       return Number.isFinite(currentTimestampMs) && packet.timestamp.getTime() <= currentTimestampMs
@@ -539,7 +541,7 @@ export async function findAdminHistoryTelemetry({
     }),
     getTelemetrySettings(prisma)
   ])
-  const accepted = hostIngressStore.recentAccepted(take, requestedDeviceId)
+  const accepted = (await hostIngressStore.recentAccepted(take, requestedDeviceId))
     .map((entry) => {
       const packet = normalizeTelemetryPacket(entry.payload)
       if (Number.isNaN(packet.timestamp.getTime())) return null
@@ -600,13 +602,27 @@ function buildTelemetryCreateData(packet, receivedAt, rawPayload, identity = {})
   }
 }
 
-async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}) {
+async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}, db = prisma) {
   if (!identity.isLive || !telemetry?.id || !telemetry?.deviceId) return false
 
   const candidateReceivedAt = receivedAt instanceof Date ? receivedAt : new Date(receivedAt)
   if (Number.isNaN(candidateReceivedAt.getTime())) return false
 
-  const existing = await prisma.deviceCurrentTelemetry.findUnique({
+  if (isPostgresDatabase) {
+    const changed = await db.$executeRawUnsafe(`INSERT INTO "DeviceCurrentTelemetry"
+      ("deviceId","telemetryId","sourceStreamId","sourcePacketId","receivedAt","updatedAt") VALUES($1,$2,$3,$4,$5,$6)
+      ON CONFLICT("deviceId") DO UPDATE SET "telemetryId"=excluded."telemetryId", "sourceStreamId"=excluded."sourceStreamId",
+        "sourcePacketId"=excluded."sourcePacketId", "receivedAt"=excluded."receivedAt", "updatedAt"=excluded."updatedAt"
+      WHERE excluded."receivedAt">="DeviceCurrentTelemetry"."receivedAt" AND NOT (
+        excluded."sourceStreamId" IS NOT NULL AND "DeviceCurrentTelemetry"."sourceStreamId" IS NOT DISTINCT FROM excluded."sourceStreamId"
+        AND "DeviceCurrentTelemetry"."sourcePacketId" IS NOT NULL AND excluded."sourcePacketId" IS NOT NULL
+        AND excluded."sourcePacketId"<="DeviceCurrentTelemetry"."sourcePacketId")`,
+      telemetry.deviceId, telemetry.id, identity.streamId || null,
+      Number.isInteger(identity.packetId) ? identity.packetId : null, candidateReceivedAt, new Date())
+    return changed === 1
+  }
+
+  const existing = await db.deviceCurrentTelemetry.findUnique({
     where: { deviceId: telemetry.deviceId },
     select: { receivedAt: true, sourceStreamId: true, sourcePacketId: true }
   })
@@ -635,7 +651,7 @@ async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}
     }
   }
 
-  await prisma.deviceCurrentTelemetry.upsert({
+  await db.deviceCurrentTelemetry.upsert({
     where: { deviceId: telemetry.deviceId },
     create: {
       deviceId: telemetry.deviceId,
@@ -657,7 +673,7 @@ async function updateDeviceCurrentTelemetry(telemetry, receivedAt, identity = {}
 }
 
 export async function findCurrentTelemetry(requestedDeviceId = null) {
-  const accepted = hostIngressStore.latestAccepted(requestedDeviceId)
+  const accepted = await hostIngressStore.latestAccepted(requestedDeviceId)
   const current = requestedDeviceId
     ? await prisma.deviceCurrentTelemetry.findUnique({
         where: { deviceId: requestedDeviceId },
@@ -700,6 +716,13 @@ export async function findCurrentTelemetry(requestedDeviceId = null) {
 }
 
 export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
+  await ensureProcessorCheckpointLoaded(prisma)
+  const previous = captureProcessorState()
+  try { return await processHostTelemetryPacketInternal(body, receivedAt, identity) }
+  catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+}
+
+async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
     let packet = normalizeTelemetryPacket(body);
     if (!(packet.timestamp instanceof Date) || Number.isNaN(packet.timestamp.getTime())) {
       throw new HostTelemetryValidationError('Invalid telemetry timestamp')
@@ -717,11 +740,12 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
         select: { id: true, deviceId: true, timestamp: true, receivedAt: true }
       })
       if (existing) {
+        await reloadProcessorCheckpoint(prisma)
         await updateDeviceCurrentTelemetry(existing, existing.receivedAt, identity)
         return {
           status: 'duplicate',
           id: existing.id,
-          outOfOrder: false,
+          outOfOrder: Boolean(await prisma.telemetry.findFirst({ where: { deviceId, timestamp: { gt: existing.timestamp } }, select: { id: true } })),
           timestamp: existing.timestamp.toISOString()
         }
       }
@@ -1215,6 +1239,9 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
           })
         }
       }
+      if (shouldClearDeviceState) telemetryProcessor.clearDeviceState(deviceId)
+      await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity, tx)
+      await persistProcessorCheckpoint(tx)
     })
 
     for (const batchId of postprocessBatchIds) {
@@ -1228,8 +1255,6 @@ export async function processHostTelemetryPacket(body, receivedAt = new Date(), 
     if (shouldClearDeviceState) {
       telemetryProcessor.clearDeviceState(deviceId)
     }
-
-    await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity)
 
     return {
       status: 'ok',
@@ -1273,9 +1298,9 @@ function normalizeBatchEnvelope(body) {
   return { deviceId, streamId, livePacketId, packets }
 }
 
-router.post('/batch', (req, res) => {
+router.post('/batch', async (req, res) => {
   try {
-    const accepted = hostIngressStore.enqueueBatch(normalizeBatchEnvelope(req.body), new Date())
+    const accepted = await hostIngressStore.enqueueBatch(normalizeBatchEnvelope(req.body), new Date())
     return res.status(202).json({ status: 'accepted', receipt_id: accepted.receiptId, acked_packet_ids: accepted.ackedPacketIds })
   } catch (error) {
     const status = error?.permanent ? 400 : 503
@@ -1284,12 +1309,12 @@ router.post('/batch', (req, res) => {
   }
 })
 
-router.post('/', (req, res) => {
+router.post('/', async (req, res) => {
   try {
     if (!req.body || typeof req.body !== 'object' || Array.isArray(req.body)) {
       throw new HostTelemetryValidationError('Telemetry body must be an object')
     }
-    const accepted = hostIngressStore.enqueueLegacy(req.body, new Date())
+    const accepted = await hostIngressStore.enqueueLegacy(req.body, new Date())
     return res.status(202).json({ status: 'accepted', receipt_id: accepted.receiptId })
   } catch (error) {
     const status = error?.permanent ? 400 : 503
@@ -1302,7 +1327,12 @@ router.post('/', (req, res) => {
 // POST /manual-stop - РУЧНАЯ ОСТАНОВКА АКТИВНОГО ЗАМЕСА
 // ============================================================================
 router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
+  const lease = getTelemetryWriteCoordinator().tryAcquire('manual-stop')
+  if (!lease) return res.status(503).json({ error: 'Расчёт занят, повторите остановку через несколько секунд' })
+  let before
   try {
+    await ensureProcessorCheckpointLoaded(prisma)
+    before = captureProcessorState()
     const rawBatchId = req.body?.batchId;
     const rawDeviceId = req.body?.deviceId;
     const batchId = rawBatchId === undefined || rawBatchId === null || rawBatchId === ''
@@ -1340,22 +1370,22 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
       : roundWeight(activeBatch.endWeight ?? activeBatch.startWeight ?? 0);
 
     const now = new Date();
-    const updatedBatch = await prisma.batch.update({
-      where: { id: activeBatch.id },
-      data: {
-        endTime: now,
-        endWeight
-      }
-    });
+    const updatedBatch = await prisma.$transaction(async tx => {
+      const updatedBatch = await tx.batch.update({
+        where: { id: activeBatch.id },
+        data: {
+          endTime: now,
+          endWeight
+        }
+      });
 
-    const telemetrySettings = await getTelemetrySettings(prisma)
-    await recalculateBatchViolations(prisma, updatedBatch.id, telemetrySettings);
-    try {
-      await postprocessCompletedBatch(prisma, updatedBatch.id, telemetrySettings, { persist: true })
-    } catch (postprocessError) {
-      console.error(`[Postprocess] Не удалось пересчитать вручную остановленный замес ${updatedBatch.id}:`, postprocessError)
-    }
-    telemetryProcessor.clearDeviceState(updatedBatch.deviceId);
+      const telemetrySettings = await getTelemetrySettings(tx)
+      await recalculateBatchViolations(tx, updatedBatch.id, telemetrySettings);
+      await postprocessCompletedBatch(tx, updatedBatch.id, telemetrySettings, { persist: true })
+      telemetryProcessor.clearDeviceState(updatedBatch.deviceId);
+      await persistProcessorCheckpoint(tx)
+      return updatedBatch
+    }, { timeout: 60000 })
 
     res.json({
       status: 'ok',
@@ -1368,15 +1398,39 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
       }
     });
   } catch (error) {
+    if (before) await reloadProcessorCheckpoint(prisma, before).catch(restoreError => console.error('Checkpoint reload failed', restoreError))
     console.error('[Ошибка POST /manual-stop]:', error);
     res.status(500).json({ error: 'Не удалось остановить замес' });
-  }
+  } finally { lease.release() }
 });
 
 
 // ============================================================================
 // GET /current - ДАННЫЕ ДЛЯ ГЛАВНОЙ СТРАНИЦЫ
 // ============================================================================
+// Reference data is shared by every tablet. Coalesce concurrent reads for at
+// most 250 ms; packet/current/weight and batch state are never cached here.
+let currentReferenceCache
+async function getCurrentReferenceData() {
+  if (!isPostgresDatabase) return loadCurrentReferenceData()
+  const now = Date.now()
+  if (currentReferenceCache && currentReferenceCache.expires > now) return currentReferenceCache.promise
+  const entry = { expires: now + 250 }
+  entry.promise = loadCurrentReferenceData().catch(error => {
+    if (currentReferenceCache === entry) currentReferenceCache = undefined
+    throw error
+  })
+  currentReferenceCache = entry
+  return entry.promise
+}
+async function loadCurrentReferenceData() {
+  const [activeZones, telemetrySettings, groupsWithZones] = await Promise.all([
+    prisma.storageZone.findMany({ where: { active: true } }),
+    getTelemetrySettings(prisma),
+    prisma.livestockGroup.findMany({ where: { storageZoneId: { not: null } }, select: { storageZoneId: true } })
+  ])
+  return { activeZones, telemetrySettings, groupsWithZones }
+}
 export async function handleCurrentTelemetry(req, res) {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)
@@ -1385,7 +1439,7 @@ export async function handleCurrentTelemetry(req, res) {
     if (!data) return res.json(buildEmptyLatestResponse(requestedDeviceId));
 
     const memoryState = telemetryProcessor.getState(data.deviceId);
-    const [activeBatch, activeZones, telemetrySettings, groupsWithZones] = await Promise.all([
+    const [activeBatch, { activeZones, telemetrySettings, groupsWithZones }] = await Promise.all([
       prisma.batch.findFirst({
       where: { deviceId: data.deviceId, endTime: null },
       include: {
@@ -1403,12 +1457,7 @@ export async function handleCurrentTelemetry(req, res) {
       },
       orderBy: { startTime: 'desc' }
       }),
-      prisma.storageZone.findMany({ where: { active: true } }),
-      getTelemetrySettings(prisma),
-      prisma.livestockGroup.findMany({
-        where: { storageZoneId: { not: null } },
-        select: { storageZoneId: true }
-      })
+      getCurrentReferenceData()
     ]);
     const linkedBarnZoneIds = new Set(
       groupsWithZones
@@ -1418,7 +1467,7 @@ export async function handleCurrentTelemetry(req, res) {
     if (data.pipelineStatus === 'accepted') {
       data = applyWeightCalibration(data, telemetrySettings)
     }
-    const realtimeWeight = buildRealtimeWeight(data, telemetrySettings)
+    const realtimeWeight = await buildRealtimeWeight(data, telemetrySettings)
     let effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
       deviceId: data.deviceId,
       referenceTime: data.timestamp,
@@ -1598,7 +1647,21 @@ router.get('/admin/latest', authenticate, requireAdmin, async (req, res) => {
 
 router.get('/admin/replay-days', authenticate, requireAdmin, async (req, res) => {
   try {
-    const rows = await prisma.$queryRawUnsafe(`
+    const rows = await prisma.$queryRawUnsafe(isPostgresDatabase ? `
+      WITH RECURSIVE days AS (
+        (SELECT date_trunc('day', timestamp AT TIME ZONE 'Asia/Barnaul') AS local_day, 1 AS depth
+         FROM "Telemetry" ORDER BY timestamp DESC LIMIT 1)
+        UNION ALL
+        SELECT previous.local_day, days.depth + 1
+        FROM days CROSS JOIN LATERAL (
+          SELECT date_trunc('day', timestamp AT TIME ZONE 'Asia/Barnaul') AS local_day
+          FROM "Telemetry"
+          WHERE timestamp < (days.local_day AT TIME ZONE 'Asia/Barnaul')
+          ORDER BY timestamp DESC LIMIT 1
+        ) AS previous WHERE days.depth < 120
+      )
+      SELECT to_char(local_day, 'YYYY-MM-DD') AS date FROM days ORDER BY date DESC
+    ` : `
       SELECT DISTINCT strftime('%Y-%m-%d', timestamp / 1000, 'unixepoch', '+7 hours') AS date
       FROM Telemetry
       WHERE timestamp IS NOT NULL

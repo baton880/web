@@ -24,23 +24,23 @@ export function createLoaderRouter({ prisma, store, weightHandler }) {
     const groups = await prisma.livestockGroup.findMany({ include, orderBy: { name: 'asc' } })
     res.json({ groups: groups.filter(isLoaderGroupAvailable).map(g => ({ id: g.id, name: g.name, plan: buildLoaderPlan(g) })) })
   }))
-  router.get('/tasks', assignedDevice, wrap(async (req, res) => res.json({ tasks: store.list(String(req.query.deviceId || ''), req.user) })))
-  router.get('/tasks/active', assignedDevice, wrap(async (req, res) => res.json({ task: store.active(String(req.query.deviceId || ''), req.user) })))
-  router.get('/tasks/:id', wrap(async (req, res) => res.json({ task: store.get(req.params.id, req.user), events: store.events(req.params.id, req.user) })))
+  router.get('/tasks', assignedDevice, wrap(async (req, res) => res.json({ tasks: await store.list(String(req.query.deviceId || ''), req.user) })))
+  router.get('/tasks/active', assignedDevice, wrap(async (req, res) => res.json({ task: await store.active(String(req.query.deviceId || ''), req.user) })))
+  router.get('/tasks/:id', wrap(async (req, res) => res.json({ task: await store.get(req.params.id, req.user), events: await store.events(req.params.id, req.user) })))
   router.post('/tasks', writer, assignedDevice, wrap(async (req, res) => {
     const body = req.body
     if (!body || !Number.isSafeInteger(body.groupId) || body.groupId <= 0) throw new TaskError(400, 'Некорректная группа')
     // Retry must return the original snapshot even if its source ration changed or was deleted.
-    const existing = typeof body.id === 'string' ? store.findExisting(body.id, req.user) : null
-    if (existing) return res.json({ task: store.create(body, existing, req.user) })
+    const existing = typeof body.id === 'string' ? await store.findExisting(body.id, req.user) : null
+    if (existing) return res.json({ task: await store.create(body, existing, req.user) })
     const group = await prisma.livestockGroup.findUnique({ where: { id: body.groupId }, include })
     const plan = buildLoaderPlan(group)
     if (!plan) throw new TaskError(400, 'У группы нет корректного плана загрузки')
-    res.status(201).json({ task: store.create(body, plan, req.user) })
+    res.status(201).json({ task: await store.create(body, plan, req.user) })
   }))
   router.post('/tasks/:id/events', writer, wrap(async (req, res) => {
     if (!req.body || typeof req.body.id !== 'string') throw new TaskError(400, 'Некорректное событие')
-    res.json(store.apply(req.params.id, req.body, req.user))
+    res.json(await store.apply(req.params.id, req.body, req.user))
   }))
   router.use((error, req, res, next) => {
     if (error instanceof TaskError) return res.status(error.status).json({ error: error.message })

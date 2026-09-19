@@ -1,3 +1,4 @@
+import { maintainLease } from './ingress-lease-heartbeat.js'
 import {
   getRtkIngressStore
 } from './rtk-ingress-store.js'
@@ -37,21 +38,24 @@ export function startRtkIngressWorker(processBody, options = {}) {
       return
     }
     running = true
+    let heartbeat = null
     try {
       if (Date.now() >= cleanupAt) {
-        store.cleanup()
+        await store.cleanup()
         cleanupAt = Date.now() + 60 * 60 * 1000
       }
 
-      const row = store.claimNext()
+      const row = await store.claimNext()
       if (!row) return
+      heartbeat = maintainLease(store, row)
 
       let body
       try {
         body = JSON.parse(row.raw_body)
       } catch (error) {
         await recordMalformed(row.raw_body, error, new Date(row.received_at), { alreadyAcknowledged: true })
-        store.markPermanent(row.id, `malformed JSON: ${error.message}`)
+        await heartbeat.stop(true)
+        await store.markPermanent(row.id, `malformed JSON: ${error.message}`, row.lease_token)
         return
       }
 
@@ -59,11 +63,12 @@ export function startRtkIngressWorker(processBody, options = {}) {
         const receivedAt = new Date(row.received_at)
         const result = await processBody(body, receivedAt)
         await recordResult(body, result, receivedAt)
+        await heartbeat.stop(true)
         if (result.received > 0 && result.accepted === 0 && result.dropped === result.received) {
           const summary = result.validationErrors?.map((entry) => entry.error).join('; ') || 'all packets invalid'
-          store.markPermanent(row.id, summary)
+          await store.markPermanent(row.id, summary, row.lease_token)
         } else {
-          store.markProcessed(row.id)
+          await store.markProcessed(row.id, row.lease_token)
         }
       } catch (error) {
         if (row.attempts === 1 || (row.attempts & (row.attempts - 1)) === 0) {
@@ -73,13 +78,15 @@ export function startRtkIngressWorker(processBody, options = {}) {
             error: error?.message || String(error)
           })
         }
-        store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts))
+        await heartbeat.stop(true)
+        await store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts), row.lease_token)
       }
     } catch (error) {
       console.warn('[RTK ingress worker] Queue operation will be retried', {
         error: error?.message || String(error)
       })
     } finally {
+      await heartbeat?.stop()
       writeLease.release()
       running = false
       if (!stopped) timer = setTimeout(tick, pollMs)

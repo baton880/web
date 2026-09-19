@@ -1,3 +1,5 @@
+import { getIngressPool, usePostgresIngress } from './ingress-postgres-pool.js'
+import { PostgresHostIngressStore } from './host-postgres-ingress-store.js'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -73,6 +75,14 @@ export class HostIngressStore {
       );
       CREATE INDEX IF NOT EXISTS host_ingress_ready_idx
         ON host_ingress(status, next_attempt_at, is_live DESC, id);
+      CREATE INDEX IF NOT EXISTS host_ingress_device_stream_packet_idx
+        ON host_ingress(device_id, stream_id, packet_id DESC);
+      CREATE INDEX IF NOT EXISTS host_ingress_device_live_id_idx
+        ON host_ingress(device_id, is_live, id DESC);
+      CREATE INDEX IF NOT EXISTS host_ingress_live_id_idx
+        ON host_ingress(is_live, id DESC);
+      CREATE INDEX IF NOT EXISTS host_ingress_device_id_idx
+        ON host_ingress(device_id, id DESC);
       CREATE TABLE IF NOT EXISTS host_ingress_meta (
         key TEXT PRIMARY KEY,
         value TEXT NOT NULL,
@@ -354,10 +364,10 @@ export class HostIngressStore {
       SELECT id, device_id, stream_id, packet_id, raw_body, received_at, status
       FROM host_ingress
       WHERE is_live = 1
-        AND (? IS NULL OR device_id = ?)
+        ${deviceId ? 'AND device_id = ?' : ''}
       ORDER BY id DESC
       LIMIT 1
-    `).get(deviceId || null, deviceId || null)
+    `).get(...(deviceId ? [deviceId] : []))
     if (!row) return null
     try {
       return {
@@ -381,10 +391,10 @@ export class HostIngressStore {
       FROM host_ingress
       WHERE is_live = 1
         AND status != 'permanent'
-        AND (? IS NULL OR device_id = ?)
+        ${deviceId ? 'AND device_id = ?' : ''}
       ORDER BY id DESC
       LIMIT ?
-    `).all(deviceId || null, deviceId || null, take)
+    `).all(...(deviceId ? [deviceId, take] : [take]))
 
     return rows.flatMap((row) => {
       try {
@@ -410,10 +420,10 @@ export class HostIngressStore {
       SELECT id, device_id, stream_id, packet_id, is_live, raw_body, received_at, status
       FROM host_ingress
       WHERE status != 'permanent'
-        AND (? IS NULL OR device_id = ?)
+        ${deviceId ? 'AND device_id = ?' : ''}
       ORDER BY id DESC
       LIMIT ?
-    `).all(deviceId || null, deviceId || null, take)
+    `).all(...(deviceId ? [deviceId, take] : [take]))
 
     return rows.flatMap((row) => {
       try {
@@ -666,7 +676,7 @@ export class HostIngressStore {
 let defaultStore = null
 
 export function getHostIngressStore() {
-  if (!defaultStore) defaultStore = new HostIngressStore()
+  if (!defaultStore) defaultStore = usePostgresIngress ? new PostgresHostIngressStore(getIngressPool()) : new HostIngressStore()
   return defaultStore
 }
 

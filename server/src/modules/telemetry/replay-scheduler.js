@@ -1,3 +1,4 @@
+import { restoreProcessorState } from './processor-checkpoint.js'
 import { spawn } from 'node:child_process'
 import { readFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -111,6 +112,7 @@ export class CalculatedReplayScheduler {
     }
 
     const wasQueued = this.queued
+    this.requestRevision = (this.requestRevision || 0) + 1
     this.queued = true
     if (!wasQueued || !Number.isFinite(this.queuedSinceMs)) this.queuedSinceMs = this.now()
     this.pendingReason = reason || this.pendingReason || 'telemetry-buffer'
@@ -150,13 +152,21 @@ export class CalculatedReplayScheduler {
   }
 
   async startQueuedReplay() {
+    if (this.starting) return
+    this.starting = true
+    try { return await this.startQueuedReplayOnce() }
+    finally { this.starting = false }
+  }
+
+  async startQueuedReplayOnce() {
     if (!this.enabled || !this.queued || this.isBlockingWrites()) return
 
     let reason = this.pendingReason || 'telemetry-buffer'
     let meta = this.pendingMeta || {}
     let ready = false
+    const requestRevision = this.requestRevision
     try {
-      ready = this.replayReady({ reason, meta })
+      ready = await this.replayReady({ reason, meta })
     } catch (error) {
       this.lastError = `Replay readiness check failed: ${error?.message || String(error)}`
       console.error('[Calculated replay] readiness check failed', {
@@ -165,6 +175,10 @@ export class CalculatedReplayScheduler {
     }
     if (!ready) {
       this.armTimer(Math.min(1000, this.bufferDrainedDebounceMs))
+      return
+    }
+    if (requestRevision !== this.requestRevision) {
+      this.armTimer(1)
       return
     }
     this.queued = false
@@ -206,7 +220,7 @@ export class CalculatedReplayScheduler {
     this.state = 'running'
     this.lastStartedAtMs = this.now()
     try {
-      const startResult = this.onReplayStart({ reason, meta })
+      const startResult = await this.onReplayStart({ reason, meta })
       if (startResult?.meta) meta = startResult.meta
     } catch (error) {
       this.coordinator.resume()
@@ -236,7 +250,7 @@ export class CalculatedReplayScheduler {
 
     if (result.ok && this.onReplayState) {
       try {
-        this.onReplayState(result.stateSnapshot)
+        await this.onReplayState(result.stateSnapshot)
       } catch (error) {
         console.error('[Calculated replay] processor state sync failed', {
           error: error?.message || String(error)
@@ -252,7 +266,7 @@ export class CalculatedReplayScheduler {
 
     if (result.ok) {
       try {
-        this.onReplaySuccess({ reason, meta })
+        await this.onReplaySuccess({ reason, meta })
       } catch (error) {
         console.error('[Calculated replay] post-replay cleanup failed', {
           error: error?.message || String(error)
@@ -278,7 +292,7 @@ export class CalculatedReplayScheduler {
     }
 
     try {
-      this.onReplayFailure({ reason, meta, result })
+      await this.onReplayFailure({ reason, meta, result })
     } catch (error) {
       console.error('[Calculated replay] failure cleanup failed', {
         error: error?.message || String(error)
@@ -380,18 +394,18 @@ const replayScheduler = new CalculatedReplayScheduler({
   drainTimeoutMs: process.env.REPLAY_WRITER_DRAIN_TIMEOUT_MS,
   failureBackoffMs: process.env.REPLAY_FAILURE_BACKOFF_MS,
   maxQueueWaitMs: process.env.REPLAY_MAX_QUEUE_WAIT_MS,
-  replayReady: () => {
+  replayReady: async () => {
     const store = getHostIngressStore()
-    return !store.replayDrainThroughId() && store.isReplayWindowReady()
+    return !await store.replayDrainThroughId() && await store.isReplayWindowReady()
   },
-  onReplayStart: ({ meta }) => {
+  onReplayStart: async ({ meta }) => {
     const store = getHostIngressStore()
-    const latestDirty = store.nextReplayDirty()
+    const latestDirty = await store.nextReplayDirty()
     const effectiveMeta = latestDirty?.farmDay === meta?.farmDay ? latestDirty : meta
-    store.beginCalculatedReplay(effectiveMeta)
+    await store.beginCalculatedReplay(effectiveMeta)
     return { meta: effectiveMeta }
   },
-  onReplayState: (snapshot) => telemetryProcessor.replaceStates(snapshot),
+  onReplayState: (snapshot) => snapshot?.checkpoint ? restoreProcessorState(snapshot.checkpoint) : telemetryProcessor.replaceStates(snapshot),
   onReplaySuccess: ({ meta }) => getHostIngressStore().finishCalculatedReplay({
     clearHistoryDirty: true,
     farmDay: meta?.farmDay || null,

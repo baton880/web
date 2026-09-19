@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily farm backup at 03:15 Asia/Barnaul
+
+[Timer]
+OnCalendar=*-*-* 20:15:00 UTC
+Persistent=true
+Unit=farm-platform-backup.service
+
+[Install]
+WantedBy=timers.target

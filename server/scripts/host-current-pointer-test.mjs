@@ -10,17 +10,20 @@ const projectTempRoot = path.resolve(serverRoot, '..', '..', 'tmp')
 fs.mkdirSync(projectTempRoot, { recursive: true })
 const tempDir = fs.mkdtempSync(path.join(projectTempRoot, 'host-current-test-'))
 const databasePath = path.join(tempDir, 'current.sqlite3')
-const databaseUrl = `file:${databasePath.replaceAll('\\', '/')}`
+const postgresTestUrl = process.env.TEST_POSTGRES_DATABASE_URL
+if (postgresTestUrl && !new URL(postgresTestUrl).pathname.startsWith('/farm_test')) throw new Error('Isolated farm_test database required')
+const databaseUrl = postgresTestUrl || `file:${databasePath.replaceAll('\\', '/')}`
 const prismaCli = path.join(serverRoot, 'node_modules', 'prisma', 'build', 'index.js')
 
 process.env.DATABASE_URL = databaseUrl
 process.env.HOST_INGRESS_DATABASE_PATH = path.join(tempDir, 'host-ingress.sqlite3')
+process.env.INGRESS_BACKEND = postgresTestUrl ? 'postgres' : 'sqlite'
 process.env.RTK_BUFFER_REPLAY_ENABLED = '0'
 process.env.DATA_RETENTION_ENABLED = 'false'
 
 try {
   fs.closeSync(fs.openSync(databasePath, 'w'))
-  execFileSync(process.execPath, [prismaCli, 'db', 'push', '--skip-generate'], {
+  execFileSync(process.execPath, [prismaCli, 'db', 'push', '--skip-generate', ...(postgresTestUrl ? ['--schema', 'prisma/postgresql/schema.prisma'] : [])], {
     cwd: serverRoot,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: 'inherit'
@@ -101,7 +104,7 @@ try {
   assert.equal(currentAfterHistoricalStream.telemetryId, liveResult.id)
   assert.equal(currentAfterHistoricalStream.telemetry.timestamp.toISOString(), '2026-07-18T07:00:04.000Z')
 
-  getHostIngressStore().enqueueBatch({
+  await getHostIngressStore().enqueueBatch({
     deviceId,
     streamId: 'rebooted-stream',
     livePacketId: 1,
@@ -111,7 +114,7 @@ try {
   assert.equal(currentAfterHistoricalAccepted.id, liveResult.id)
   assert.equal(currentAfterHistoricalAccepted.timestamp.toISOString(), '2026-07-18T07:00:04.000Z')
 
-  getHostIngressStore().enqueueBatch({
+  await getHostIngressStore().enqueueBatch({
     deviceId,
     streamId,
     livePacketId: 4,
@@ -133,5 +136,6 @@ try {
   await prisma.$disconnect()
   console.log('Host current pointer test passed')
 } finally {
+  await (await import('../src/modules/telemetry/ingress-postgres-pool.js')).closeIngressPool()
   fs.rmSync(tempDir, { recursive: true, force: true })
 }

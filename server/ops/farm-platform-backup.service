@@ -1,0 +1,21 @@
+[Unit]
+Description=Consistent PostgreSQL and telemetry inbox backup
+After=docker.service network.target
+Requires=docker.service
+
+[Service]
+Type=oneshot
+Nice=10
+IOSchedulingClass=best-effort
+IOSchedulingPriority=7
+User=root
+EnvironmentFile=/opt/farm-platform/secrets/farm-main-admin.env
+Environment=BACKUP_PM2_APP=farm-server-ingress
+Environment=BACKUP_RELEASE=/opt/farm-platform/releases/20260919-postgres-ingress
+Environment=BACKUP_INGRESS_BACKEND=postgres
+Environment=BACKUP_ROOT=/opt/backups/farm-site/pg-daily
+Environment=PM2_HOME=/root/.pm2
+WorkingDirectory=/opt/farm-platform/releases/20260919-postgres-ingress/server
+ExecStart=/usr/bin/flock -n /run/farm-platform-backup.lock /usr/bin/node scripts/backup-postgres-platform.mjs
+TimeoutStartSec=900
+UMask=0077

@@ -10,12 +10,15 @@ const projectTempRoot = path.resolve(serverRoot, '..', '..', 'tmp')
 fs.mkdirSync(projectTempRoot, { recursive: true })
 const tempDir = fs.mkdtempSync(path.join(projectTempRoot, 'rtk-current-test-'))
 const databasePath = path.join(tempDir, 'current.sqlite3')
-const databaseUrl = `file:${databasePath.replaceAll('\\', '/')}`
+const postgresTestUrl = process.env.TEST_POSTGRES_DATABASE_URL
+if (postgresTestUrl && !new URL(postgresTestUrl).pathname.startsWith('/farm_test')) throw new Error('Isolated farm_test database required')
+const databaseUrl = postgresTestUrl || `file:${databasePath.replaceAll('\\', '/')}`
 const prismaCli = path.join(serverRoot, 'node_modules', 'prisma', 'build', 'index.js')
 
 process.env.DATABASE_URL = databaseUrl
 process.env.RTK_INGRESS_DATABASE_PATH = path.join(tempDir, 'rtk-ingress.sqlite3')
 process.env.HOST_INGRESS_DATABASE_PATH = path.join(tempDir, 'host-ingress.sqlite3')
+process.env.INGRESS_BACKEND = postgresTestUrl ? 'postgres' : 'sqlite'
 process.env.RTK_BUFFER_REPLAY_ENABLED = '0'
 process.env.DATA_RETENTION_ENABLED = 'false'
 
@@ -25,7 +28,7 @@ let hostStore = null
 
 try {
   fs.closeSync(fs.openSync(databasePath, 'w'))
-  execFileSync(process.execPath, [prismaCli, 'db', 'push', '--skip-generate'], {
+  execFileSync(process.execPath, [prismaCli, 'db', 'push', '--skip-generate', ...(postgresTestUrl ? ['--schema', 'prisma/postgresql/schema.prisma'] : [])], {
     cwd: serverRoot,
     env: { ...process.env, DATABASE_URL: databaseUrl },
     stdio: 'inherit'
@@ -41,7 +44,7 @@ try {
   rtkStore = rtkStoreModule.getRtkIngressStore()
   hostStore = hostStoreModule.getHostIngressStore()
 
-  rtkStore.enqueue(JSON.stringify({
+  await rtkStore.enqueue(JSON.stringify({
     device_id: 'loader-current-test',
     timestamp: '2026-07-18T07:00:00Z',
     lat: 52.42,
@@ -51,7 +54,7 @@ try {
     fix_type: 'RTK_FIXED'
   }), new Date('2026-07-18T07:00:01Z'))
 
-  rtkStore.enqueue(JSON.stringify({
+  await rtkStore.enqueue(JSON.stringify({
     device_id: 'another-loader',
     timestamp: '2026-07-18T07:00:02Z',
     lat: 51.0,
@@ -100,6 +103,7 @@ try {
   assert.equal(oldFormatCurrent.sdReady, true)
   console.log('RTK ingress current test passed')
 } finally {
+  await (await import('../src/modules/telemetry/ingress-postgres-pool.js')).closeIngressPool()
   try { rtkStore?.close() } catch {}
   try { hostStore?.close() } catch {}
   try { await prisma?.$disconnect() } catch {}

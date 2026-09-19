@@ -1,4 +1,5 @@
-import { PrismaClient } from '@prisma/client'
+import { persistProcessorCheckpoint, captureProcessorState, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from '../src/modules/telemetry/processor-checkpoint.js'
+import { PrismaClient, isPostgresDatabase } from '../src/prisma-client.js'
 import { writeFileSync } from 'node:fs'
 
 import telemetryProcessor from '../../module-3/telemetryProcessor.js'
@@ -21,9 +22,11 @@ const prismaClient = new PrismaClient()
 let prisma = prismaClient
 
 await prismaClient.$connect()
+if (!isPostgresDatabase) {
 await prismaClient.$queryRawUnsafe('PRAGMA journal_mode=WAL')
 await prismaClient.$queryRawUnsafe('PRAGMA busy_timeout=10000')
 await prismaClient.$queryRawUnsafe('PRAGMA synchronous=NORMAL')
+}
 const SAME_INGREDIENT_MERGE_WINDOW_MS = 10000
 const UNLOAD_GROUP_STICKY_MS = 120000
 const UNLOAD_GROUP_CONFIRM_PACKETS = 2
@@ -577,10 +580,12 @@ async function resetCalculatedTables() {
   await prisma.violation.deleteMany({})
   await prisma.batchIngredient.deleteMany({})
   await prisma.batch.deleteMany({})
-  await prisma.$executeRawUnsafe("DELETE FROM sqlite_sequence WHERE name IN ('Violation', 'BatchIngredient', 'Batch')")
+  // PostgreSQL sequences are not transactional: resetting them inside a replay
+  // can collide with restored rows after rollback. Keep monotonically growing IDs.
+  if (!isPostgresDatabase) await prisma.$executeRawUnsafe("DELETE FROM sqlite_sequence WHERE name IN ('Violation', 'BatchIngredient', 'Batch')")
 
   const batchIdSequenceStart = Number.parseInt(process.env.REPLAY_BATCH_ID_SEQUENCE_START || '', 10)
-  if (Number.isInteger(batchIdSequenceStart) && batchIdSequenceStart > 0) {
+  if (!isPostgresDatabase && Number.isInteger(batchIdSequenceStart) && batchIdSequenceStart > 0) {
     await prisma.$executeRawUnsafe(
       `INSERT OR REPLACE INTO sqlite_sequence (name, seq) VALUES ('Batch', ${batchIdSequenceStart})`
     )
@@ -1165,8 +1170,8 @@ async function runReplay() {
   }))
 
   const activeBatchByDevice = new Map()
-  const unloadGroupEvidenceByBatch = new Map()
-  const lastBarnPositionByDevice = new Map()
+  unloadGroupEvidenceByBatch.clear()
+  lastBarnPositionByDevice.clear()
   const recentWeightsByDevice = new Map()
   const batchIdsToRecalculate = new Set()
   const stickyViolationBatchIds = new Set()
@@ -1752,7 +1757,9 @@ async function main() {
   const summary = await prismaClient.$transaction(async (transactionClient) => {
     prisma = transactionClient
     try {
-      return await runReplay()
+      const result = await runReplay()
+      await persistProcessorCheckpoint(transactionClient)
+      return result
     } finally {
       prisma = prismaClient
     }
@@ -1762,7 +1769,7 @@ async function main() {
   })
 
   if (REPLAY_STATE_OUTPUT) {
-    writeFileSync(REPLAY_STATE_OUTPUT, JSON.stringify(telemetryProcessor.exportStates()), {
+    writeFileSync(REPLAY_STATE_OUTPUT, JSON.stringify({ ...telemetryProcessor.exportStates(), checkpoint: captureProcessorState() }), {
       encoding: 'utf8',
       flag: 'wx'
     })

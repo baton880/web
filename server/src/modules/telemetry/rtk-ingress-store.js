@@ -1,3 +1,5 @@
+import { getIngressPool, usePostgresIngress } from './ingress-postgres-pool.js'
+import { PostgresRtkIngressStore } from './rtk-postgres-ingress-store.js'
 import crypto from 'node:crypto'
 import fs from 'node:fs'
 import path from 'node:path'
@@ -215,7 +217,7 @@ export class RtkIngressStore {
 let defaultStore = null
 
 export function getRtkIngressStore() {
-  if (!defaultStore) defaultStore = new RtkIngressStore()
+  if (!defaultStore) defaultStore = usePostgresIngress ? new PostgresRtkIngressStore(getIngressPool()) : new RtkIngressStore()
   return defaultStore
 }
 

@@ -30,21 +30,31 @@
     "test:rtk-current": "node scripts/rtk-current-ingress-test.mjs",
     "test:replay-safety": "node scripts/replay-safety-test.mjs",
     "test:day-replay": "node scripts/day-replay-validation-test.mjs",
-    "test:late-packet-replay": "node scripts/late-packet-day-replay-test.mjs"
+    "test:late-packet-replay": "node scripts/late-packet-day-replay-test.mjs",
+    "prisma:generate": "prisma generate && prisma generate --schema prisma/postgresql/schema.prisma",
+    "migrate:postgres": "prisma migrate deploy --schema prisma/postgresql/schema.prisma",
+    "import:postgres": "node scripts/import-sqlite-postgres.mjs",
+    "import:ingress-postgres": "node scripts/import-ingress-postgres.mjs",
+    "test:postgres-checkpoint": "node scripts/postgres-checkpoint-test.mjs",
+    "test:replay-async": "node scripts/replay-async-safety-test.mjs",
+    "backup:postgres": "node scripts/backup-postgres-platform.mjs",
+    "verify:postgres-backup": "node scripts/verify-postgres-backup.mjs"
   },
   "dependencies": {
     "@libsql/client": "^0.8.1",
     "@prisma/adapter-better-sqlite3": "^7.4.2",
     "@prisma/adapter-libsql": "^6.2.1",
     "@prisma/client": "^6.2.1",
-    "better-sqlite3": "^12.8.0",
     "bcrypt": "^6.0.0",
+    "better-sqlite3": "^12.8.0",
     "cookie-parser": "^1.4.7",
     "cors": "^2.8.6",
     "express": "^5.2.1",
     "fetch": "^1.1.0",
     "jsonwebtoken": "^9.0.3",
     "nodemailer": "^8.0.5",
+    "pg": "8.16.3",
+    "pg-copy-streams": "7.0.0",
     "prisma": "^6.2.1"
   },
   "devDependencies": {

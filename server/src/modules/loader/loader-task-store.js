@@ -6,9 +6,9 @@ import { fileURLToPath } from 'node:url'
 export class TaskError extends Error {
   constructor(status, message) { super(message); this.status = status }
 }
-function check(condition, message, status = 400) { if (!condition) throw new TaskError(status, message) }
-const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)
-function canonical(value) {
+export function check(condition, message, status = 400) { if (!condition) throw new TaskError(status, message) }
+export const uuid = value => typeof value === 'string' && /^[0-9a-f]{8}-[0-9a-f-]{27}$/i.test(value)
+export function canonical(value) {
   if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'
   if (value && typeof value === 'object') return '{' + Object.keys(value).sort().map(k => JSON.stringify(k) + ':' + canonical(value[k])).join(',') + '}'
   return JSON.stringify(value)

@@ -1,8 +1,10 @@
+import { isPostgresDatabase } from '../../prisma-client.js'
+
 const APP_STATE_TABLE_SQL = `
-CREATE TABLE IF NOT EXISTS AppState (
+CREATE TABLE IF NOT EXISTS "AppState" (
   key TEXT PRIMARY KEY,
   value TEXT NOT NULL,
-  updatedAt TEXT NOT NULL
+  "updatedAt" TEXT NOT NULL
 )
 `;
 
@@ -11,6 +13,9 @@ const HOST_TRACK_CLEAR_KEY = 'host_track_clear_since_iso';
 let tableReadyPromise = null;
 
 async function ensureAppStateTable(prismaClient) {
+  // PostgreSQL application roles intentionally have no schema DDL privileges.
+  // The initial migration creates this table before the application starts.
+  if (isPostgresDatabase) return
   if (!tableReadyPromise) {
     tableReadyPromise = prismaClient.$executeRawUnsafe(APP_STATE_TABLE_SQL).catch((error) => {
       tableReadyPromise = null;
@@ -35,7 +40,7 @@ export async function getHostTrackClearSince(prismaClient) {
 
   const rows = await prismaClient.$queryRaw`
     SELECT value
-    FROM AppState
+    FROM "AppState"
     WHERE key = ${HOST_TRACK_CLEAR_KEY}
     LIMIT 1
   `;
@@ -53,11 +58,11 @@ export async function setHostTrackClearSince(prismaClient, timestamp = new Date(
   const updatedAt = new Date().toISOString();
 
   await prismaClient.$executeRaw`
-    INSERT INTO AppState (key, value, updatedAt)
+    INSERT INTO "AppState" (key, value, "updatedAt")
     VALUES (${HOST_TRACK_CLEAR_KEY}, ${isoValue}, ${updatedAt})
     ON CONFLICT(key) DO UPDATE SET
       value = excluded.value,
-      updatedAt = excluded.updatedAt
+      "updatedAt" = excluded."updatedAt"
   `;
 
   return safeDate;

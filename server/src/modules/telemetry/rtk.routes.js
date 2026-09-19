@@ -1,3 +1,4 @@
+import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint } from './processor-checkpoint.js'
 import { Router } from 'express'
 import crypto from 'node:crypto'
 import prisma from '../../database.js'
@@ -900,7 +901,7 @@ export async function buildLatestResponse(deviceId) {
   let latest = await getLatestRtkPoint(deviceId, resolveLoaderOfflineTimeoutMs(settings))
   const processedReceivedAt = latest?.createdAt instanceof Date ? latest.createdAt : new Date(latest?.createdAt || 0)
   const processedTimestampMs = new Date(latest?.timestamp || 0).getTime()
-  const newestAccepted = getRtkIngressStore().recentAccepted(100)
+  const newestAccepted = (await getRtkIngressStore().recentAccepted(100))
     .flatMap((accepted) => {
       const acceptedReceivedAt = new Date(accepted.receivedAt)
       if (!Number.isFinite(acceptedReceivedAt.getTime()) || acceptedReceivedAt <= processedReceivedAt) return []
@@ -978,6 +979,16 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
 }
 
 export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
+  await ensureProcessorCheckpointLoaded(prisma)
+  const previous = captureProcessorState()
+  try {
+    const result = await processRtkTelemetryBodyInternal(body, receivedAt)
+    await persistProcessorCheckpoint(prisma)
+    return result
+  } catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+}
+
+async function processRtkTelemetryBodyInternal(body, receivedAt = new Date()) {
   const payloads = extractRtkPayloads(body)
   const transport = body && !Array.isArray(body) && typeof body.transport === 'object'
     ? body.transport
@@ -1068,7 +1079,9 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
     createdCount = await createManyRtkTelemetryInChunks(packets)
   }
 
-  if (createdCount > 0) {
+  // A previous attempt may have committed raw rows and failed before recording
+  // the dirty range. Retried historical input must finish that bookkeeping too.
+  if (packets.length > 0) {
     const historicalRange = findHistoricalRtkRange(packets, latestStoredBefore)
     const from = historicalRange?.from || null
     const to = historicalRange?.to || null
@@ -1076,8 +1089,8 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
       transport.buffer_remaining_after_ack ?? transport.bufferRemainingAfterAck
     )
     const dirtyStore = getHostIngressStore()
-    if (from && to) dirtyStore.markReplayDirtyRange(from, to, 'rtk')
-    const dirty = from && to ? dirtyStore.nextReplayDirty() : null
+    if (from && to) await dirtyStore.markReplayDirtyRange(from, to, 'rtk')
+    const dirty = from && to ? await dirtyStore.nextReplayDirty() : null
     const replay = dirty ? scheduleReplayAfterBufferedTelemetry('rtk-history', {
       ...dirty,
       receivedAt,
@@ -1111,14 +1124,14 @@ export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
   }
 }
 
-export function handleRtkTelemetryPost(req, res) {
+export async function handleRtkTelemetryPost(req, res) {
   const receivedAt = new Date()
   const rawBody = typeof req.rawBody === 'string'
     ? req.rawBody
     : JSON.stringify(req.body ?? {})
 
   try {
-    const accepted = enqueueRtkIngress(rawBody, receivedAt)
+    const accepted = await enqueueRtkIngress(rawBody, receivedAt)
     noteRtkRequestAcknowledged(req.body ?? rawBody)
     res.setHeader('X-RTK-Ingest-Id', accepted.requestHash)
     return res.status(202).end()
@@ -1134,7 +1147,7 @@ router.get('/admin/ingest-status', authenticate, requireAdmin, async (req, res) 
   try {
     res.json({
       ...(await getRtkIngestStatus()),
-      durableInbox: getRtkIngressStats()
+      durableInbox: await getRtkIngressStats()
     })
   } catch (error) {
     console.error('[Ошибка GET /api/telemetry/rtk/admin/ingest-status]:', error)

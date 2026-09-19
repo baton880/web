@@ -1,4 +1,5 @@
 import { getHostIngressStore } from './host-ingress-store.js'
+import { maintainLease } from './ingress-lease-heartbeat.js'
 import { scheduleReplayAfterBufferedTelemetry } from './replay-scheduler.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 
@@ -21,16 +22,16 @@ export function startHostIngressWorker(processPacket, options = {}) {
   let cleanupAt = Date.now() + 60 * 60 * 1000
   let lastScheduledDirtyKey = null
 
-  function scheduleNextDirtyReplay() {
-    if (typeof store.replayDrainThroughId === 'function' && store.replayDrainThroughId()) return
-    const dirty = typeof store.nextReplayDirty === 'function' ? store.nextReplayDirty() : null
+  async function scheduleNextDirtyReplay() {
+    if (typeof store.replayDrainThroughId === 'function' && await store.replayDrainThroughId()) return
+    const dirty = typeof store.nextReplayDirty === 'function' ? await store.nextReplayDirty() : null
     if (!dirty) {
       lastScheduledDirtyKey = null
       return
     }
     const dirtyKey = `${dirty.farmDay}:${dirty.version}`
     if (dirtyKey === lastScheduledDirtyKey) return
-    scheduleReplay('host-ingress-history', dirty, { bufferDrained: false })
+    await scheduleReplay('host-ingress-history', dirty, { bufferDrained: false })
     lastScheduledDirtyKey = dirtyKey
   }
 
@@ -43,17 +44,19 @@ export function startHostIngressWorker(processPacket, options = {}) {
     }
     running = true
     let claimedRow = false
+    let heartbeat = null
     try {
       if (Date.now() >= cleanupAt) {
-        store.cleanup()
+        await store.cleanup()
         cleanupAt = Date.now() + 60 * 60 * 1000
       }
-      const row = store.claimNext()
+      const row = await store.claimNext()
       if (!row) {
-        scheduleNextDirtyReplay()
+        await scheduleNextDirtyReplay()
         return
       }
       claimedRow = true
+      heartbeat = maintainLease(store, row)
       try {
         const payload = JSON.parse(row.raw_body)
         const result = await processPacket(payload, new Date(row.received_at), {
@@ -62,15 +65,21 @@ export function startHostIngressWorker(processPacket, options = {}) {
           packetId: row.packet_id,
           isLive: Boolean(row.is_live)
         })
-        if (result?.timestamp) store.noteProcessedTimestamp?.(result.timestamp)
-        if (result?.outOfOrder && result?.timestamp) {
-          store.markHistoryDirty(result.timestamp)
-          store.beginReplayDrain?.()
+        await heartbeat.stop(true)
+        if (typeof store.completeProcessed === 'function') {
+          await store.completeProcessed(row, result)
+        } else {
+          if (result?.timestamp) await store.noteProcessedTimestamp?.(result.timestamp)
+          if (result?.outOfOrder && result?.timestamp) {
+            await store.markHistoryDirty(result.timestamp)
+            await store.beginReplayDrain?.()
+          }
+          await store.markProcessed(row.id, row.lease_token)
         }
-        store.markProcessed(row.id)
       } catch (error) {
+        await heartbeat.stop(true)
         if (error?.permanent) {
-          store.markPermanent(row.id, error?.stack || error?.message || error)
+          await store.markPermanent(row.id, error?.stack || error?.message || error, row.lease_token)
         } else {
           if (row.attempts === 1 || (row.attempts & (row.attempts - 1)) === 0) {
             console.warn('[Host ingress worker] Main database write will be retried', {
@@ -79,7 +88,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
               error: error?.message || String(error)
             })
           }
-          store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts))
+          await store.markRetry(row.id, error?.stack || error?.message || error, retryDelayMs(row.attempts), row.lease_token)
         }
       }
     } catch (error) {
@@ -87,6 +96,7 @@ export function startHostIngressWorker(processPacket, options = {}) {
         error: error?.message || String(error)
       })
     } finally {
+      await heartbeat?.stop()
       lease.release()
       running = false
       // Drain continuously while work exists, but keep the normal polling
