@@ -280,6 +280,12 @@ export async function resolveGroupByCoordinates(prisma, lat, lon) {
     orderBy: { id: 'asc' },
   })
 
+  return resolveGroupFromSnapshot(groups, lat, lon)
+}
+
+// A packet can resolve HOST and effective positions from one consistent read.
+export function resolveGroupFromSnapshot(groups, lat, lon) {
+  if (!Number.isFinite(Number(lat)) || !Number.isFinite(Number(lon))) return null
   for (const group of groups) {
     const zoneCandidate = buildGroupZoneShape(group)
     if (!zoneCandidate) continue

@@ -1,3 +1,4 @@
+import { withCalculationDatabase } from '../../database.js'
 import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint } from './processor-checkpoint.js'
 import { Router } from 'express'
 import crypto from 'node:crypto'
@@ -979,13 +980,15 @@ async function findLatestZonePoint(zoneId, seconds, deviceId) {
 }
 
 export async function processRtkTelemetryBody(body, receivedAt = new Date()) {
-  await ensureProcessorCheckpointLoaded(prisma)
-  const previous = captureProcessorState()
-  try {
-    const result = await processRtkTelemetryBodyInternal(body, receivedAt)
-    await persistProcessorCheckpoint(prisma)
-    return result
-  } catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+  return withCalculationDatabase(async () => {
+    await ensureProcessorCheckpointLoaded(prisma)
+    const previous = captureProcessorState()
+    try {
+      const result = await processRtkTelemetryBodyInternal(body, receivedAt)
+      await persistProcessorCheckpoint(prisma)
+      return result
+    } catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+  })
 }
 
 async function processRtkTelemetryBodyInternal(body, receivedAt = new Date()) {

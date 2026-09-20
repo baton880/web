@@ -1,7 +1,33 @@
 import { PrismaClient, isPostgresDatabase } from './prisma-client.js'
+import { inCalculationContext, withCalculationContext } from './calculation-context.js'
 
 // Стандартная инициализация. Prisma сама возьмет DATABASE_URL из .env
-const prisma = new PrismaClient()
+const apiClient = new PrismaClient()
+let calculationClient
+function getCalculationClient() {
+  if (!calculationClient) {
+    const url = new URL(process.env.DATABASE_URL)
+    url.searchParams.set('connection_limit', '4')
+    calculationClient = new PrismaClient({ datasources: { db: { url: url.toString() } } })
+  }
+  return calculationClient
+}
+// Keep tablet bursts from consuming every connection needed to drain inboxes.
+// Async context selects a pool, not another database; transactions stay on the
+// selected client and the existing calculation coordinator still serializes FSM.
+export function withCalculationDatabase(action) {
+  return isPostgresDatabase ? withCalculationContext(action) : action()
+}
+const prisma = new Proxy(apiClient, {
+  get(target, property) {
+    if (property === '$disconnect') return async () => {
+      await Promise.all([apiClient.$disconnect(), calculationClient?.$disconnect()])
+    }
+    const client = isPostgresDatabase && inCalculationContext() ? getCalculationClient() : target
+    const value = Reflect.get(client, property)
+    return typeof value === 'function' ? value.bind(client) : value
+  }
+})
 
 export const databaseReady = prisma.$connect()
   .then(async () => {

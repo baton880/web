@@ -1,3 +1,4 @@
+import { withCalculationDatabase } from '../../database.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from './processor-checkpoint.js'
 import { Router } from 'express'
@@ -13,7 +14,7 @@ import {
   getZoneCenterCoordinates,
   hasUsableHostCoordinates,
   resolveEffectiveCoordinates,
-  resolveGroupByCoordinates
+  resolveGroupFromSnapshot
 } from './telemetry-helpers.js'
 import { DEFAULT_TELEMETRY_SETTINGS, getTelemetrySettings } from './telemetry-settings.js'
 import { MOVEMENT_CONFIRM_PACKETS, MOVEMENT_SPEED_THRESHOLD_KMH } from '../../../../module-3/config.js'
@@ -716,10 +717,12 @@ export async function findCurrentTelemetry(requestedDeviceId = null) {
 }
 
 export async function processHostTelemetryPacket(body, receivedAt = new Date(), identity = {}) {
-  await ensureProcessorCheckpointLoaded(prisma)
-  const previous = captureProcessorState()
-  try { return await processHostTelemetryPacketInternal(body, receivedAt, identity) }
-  catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+  return withCalculationDatabase(async () => {
+    await ensureProcessorCheckpointLoaded(prisma)
+    const previous = captureProcessorState()
+    try { return await processHostTelemetryPacketInternal(body, receivedAt, identity) }
+    catch (error) { await reloadProcessorCheckpoint(prisma, previous); throw error }
+  })
 }
 
 async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
@@ -785,11 +788,11 @@ async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
     }
 
     // 1. Достаем геозоны из базы
-    const [activeZones, groupsWithZones, activeBatchForHints] = await Promise.all([
+    const [activeZones, packetGroups, activeBatchForHints] = await Promise.all([
       prisma.storageZone.findMany({ where: { active: true } }),
       prisma.livestockGroup.findMany({
-        where: { storageZoneId: { not: null } },
-        select: { storageZoneId: true }
+        include: { storageZone: true, ration: { include: { ingredients: true } } },
+        orderBy: { id: 'asc' }
       }),
       prisma.batch.findFirst({
         where: { deviceId, endTime: null },
@@ -801,7 +804,7 @@ async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
       })
     ]);
     const linkedBarnZoneIds = new Set(
-      groupsWithZones
+      packetGroups
         .map((group) => Number(group.storageZoneId))
         .filter((zoneId) => Number.isInteger(zoneId) && zoneId > 0)
     )
@@ -849,9 +852,9 @@ async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
       headingDeg: effectivePosition.rtkPoint?.course ?? packet.headingDeg ?? packet.heading ?? packet.course,
       course: effectivePosition.rtkPoint?.course ?? packet.course ?? packet.heading
     };
-    const resolvedGroup = await resolveGroupByCoordinates(prisma, effectivePosition.lat, effectivePosition.lon);
-    const hostResolvedGroup = await resolveGroupByCoordinates(
-      prisma,
+    const resolvedGroup = resolveGroupFromSnapshot(packetGroups, effectivePosition.lat, effectivePosition.lon);
+    const hostResolvedGroup = resolveGroupFromSnapshot(
+      packetGroups,
       stickyBarnPosition?.lat ?? packet.lat,
       stickyBarnPosition?.lon ?? packet.lon
     );
