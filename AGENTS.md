@@ -12,9 +12,10 @@
 - Для перехода создана отдельная ветка `refactor/server-platform-postgres` от актуального `origin/main` (`ae052d1`). Работы перехода выполнять отдельно от main. 2026-09-19 пользователь явно поручил закончить перенос и опубликовать изменения в Git; commit/push этой ветки разрешены.
 - Raspberry Pi, её код, настройки и протокол не менять. HOST отправляет 1 пакет/с; планшет читает current через сервер 2 раза/с. Планшет получает последнее принятое измерение, поэтому соседние ответы могут содержать один пакет; сохранять timestamp/age/quality.
 - Плановый масштаб: 2–3 хозяйства, 20 устройств и 20 одновременных пользователей (в плане принято суммарно). Цель включает PostgreSQL, изоляцию хозяйств, реестр/связи устройств, отдельные API/workers, восстанавливаемый расчёт и проверку нагрузки/backup.
-- Первый этап развёрнут: main + loader + AppState в PostgreSQL farm_main; HOST/RTK inbox пока SQLite. Актуальные пути, проверки, backup и граница отката: `docs/server-platform/MIGRATION-STATUS.md`. Рабочий PM2 `farm-server-postgres`, выпуск `/opt/farm-platform/releases/20260912-postgres`, порт 3002. Старый `/opt/farm-server` сохранён, но больше не обслуживает сайт. Не запускать его поверх новых данных.
-
-- Этап 2 в работе только локально/на стенде: PostgreSQL HOST/RTK queues с leases, replay metadata и async workers. Статус/тесты: `docs/server-platform/QUEUE-MIGRATION-STATUS.md`. Не путать эти изменения с уже развёрнутым выпуском первого этапа; подключение API/replay, importer и production migration очередей ещё не завершены.
+- Переход серверного SQLite завершён 2026-09-20: основная БД, loader, AppState и HOST/RTK inbox работают в PostgreSQL farm_main. Точный статус и ограничения: `docs/server-platform/MIGRATION-STATUS.md`; очереди/проверки: `QUEUE-MIGRATION-STATUS.md`; эксплуатация: `OPERATIONS.md`.
+- Рабочий выпуск `/opt/farm-platform/releases/20260919-postgres-ingress`, PM2 `farm-server-ingress`, loopback 3004. Код `ac127835b4eda10c1e1fa1c9d64c5fa7cc09977a`, опубликован в ветке перехода. Nginx сохраняет vi-korm.ru и порт устройств 3000. Старые выпуски сохранены, но не запущены.
+- Один расчётный процесс на farm DB; API/worker пулы раздельные, до 24 соединений суммарно, PG max_connections=50. Масштабирование на 2–3 хозяйства требует отдельных DB/roles и доверенного выбора хозяйства; этот интерфейс ещё не реализован.
+- Проверены 20 HOST 1 Гц + 20 планшетов 2 Гц на изолированном стенде, восстановление FSM, rollback, replay parity и восстановление backup до и после переноса (24 таблицы, online pauseMs=0). После PG ACK не возвращать старые SQLite очереди поверх новых данных. RTK replay и raw retention оставлены выключенными. Raspberry Pi и !LOADER_CODE не менялись.
 
 ## Репозиторий и границы изменений
 
@@ -27,7 +28,7 @@
 
 ## Структура
 
-- `server/` — Express API, Prisma, SQLite и фоновые scheduler-ы.
+- `server/` — Express API, Prisma/PostgreSQL и фоновые scheduler-ы; SQLite сохранён для миграции и тестовых фикстур.
 - `server/src/modules/telemetry/` — приём host/RTK-телеметрии, effective position и replay scheduler.
 - `server/src/modules/batches/` — замесы, нарушения и batch postprocessing.
 - `server/scripts/replay-batches-from-telemetry.mjs` — полный replay исходной телеметрии в вычисляемые замесы.
