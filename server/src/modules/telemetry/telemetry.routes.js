@@ -1,4 +1,5 @@
 import { withCalculationDatabase } from '../../database.js'
+import { scaleMeasurement } from '../loader/scale-measurement.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from './processor-checkpoint.js'
 import { Router } from 'express'
@@ -712,6 +713,7 @@ export async function findCurrentTelemetry(requestedDeviceId = null) {
     ...packet,
     wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
     pipelineStatus: 'accepted',
+    rawPayload: JSON.stringify(accepted.payload),
     processed: false
   }
 }
@@ -1434,6 +1436,20 @@ async function loadCurrentReferenceData() {
   ])
   return { activeZones, telemetrySettings, groupsWithZones }
 }
+export async function handleLoaderScaleWeight(req, res) {
+  try {
+    const data = await findCurrentTelemetry(getRequestedDeviceId(req))
+    const scale = data && scaleMeasurement(data)
+    if (scale) return res.json({ deviceId: data.deviceId, id: scale.packetId,
+      timestamp: new Date(scale.timestampMs).toISOString(), weight: scale.weightKg,
+      realtimeWeight: scale.weightKg, weightValid: scale.valid, scaleMeasurement: scale })
+    return handleCurrentTelemetry(req, res) // Compatibility with older Pi firmware.
+  } catch (error) {
+    console.error('[Loader scale]', error.message)
+    return res.status(500).json({ error: 'Не удалось получить вес' })
+  }
+}
+
 export async function handleCurrentTelemetry(req, res) {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)

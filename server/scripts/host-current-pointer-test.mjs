@@ -3,6 +3,7 @@ import { execFileSync } from 'node:child_process'
 import fs from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { scaleMeasurement } from '../src/modules/loader/scale-measurement.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const serverRoot = path.resolve(path.dirname(__filename), '..')
@@ -54,7 +55,9 @@ try {
     cpu_temp_c: 50,
     lte_rssi_dbm: -70,
     lte_access_tech: 'LTE',
-    events_reader_ok: true
+    events_reader_ok: true,
+    scale_measurement: { version: 1, deviceId, calibrationId: 'cal-test', packetId: 'measurement-' + weight,
+      timestampMs: new Date(timestamp).getTime(), weightKg: weight + .25, valid: true }
   })
 
   await processHostTelemetryPacket(
@@ -90,6 +93,7 @@ try {
   assert.equal(current.sourcePacketId, 3)
   assert.equal(current.telemetry.timestamp.toISOString(), '2026-07-18T07:00:04.000Z')
   assert.equal(current.telemetry.weight, 120)
+  assert.equal(scaleMeasurement(current.telemetry).weightKg, 120.25, 'Persisted source measurement survives processing')
   assert.equal(current.telemetry.gpsAgeS, 0.2)
 
   await processHostTelemetryPacket(
@@ -125,6 +129,7 @@ try {
   assert.equal(acceptedCurrent.sourcePacketId, 4)
   assert.equal(acceptedCurrent.weight, 130)
   assert.equal(acceptedCurrent.pipelineStatus, 'accepted')
+  assert.equal(scaleMeasurement(acceptedCurrent).weightKg, 130.25, 'Accepted inbox keeps source measurement before processing')
 
   const adminHistory = await findAdminHistoryTelemetry({ limit: 20, requestedDeviceId: deviceId })
   assert.equal(adminHistory[0].sourcePacketId, 4)

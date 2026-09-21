@@ -17,7 +17,8 @@ function measurement(value, deviceId, at) {
   check(value && value.deviceId === deviceId && value.valid === true, 'Нет валидного измерения Хозяина')
   check(typeof value.weightKg === 'number' && Number.isFinite(value.weightKg), 'Некорректный вес')
   check(Number.isSafeInteger(value.timestampMs) && value.timestampMs > 0 && Math.abs(at - value.timestampMs) <= 5000, 'Подтверждение требует свежего измерения')
-  return { weightKg: value.weightKg, timestampMs: value.timestampMs, packetId: value.packetId ?? null, deviceId, valid: true }
+  return { weightKg: value.weightKg, timestampMs: value.timestampMs, packetId: value.packetId ?? null, deviceId, valid: true,
+    ...(value.calibrationId ? { calibrationId: value.calibrationId } : {}) }
 }
 
 export function reduceTask(task, event) {
@@ -41,6 +42,7 @@ export function reduceTask(task, event) {
     } else if (event.type === 'confirm') {
       check(task.status === 'active' && event.stepIndex === task.currentIndex, 'Компонент уже изменился', 409)
       const step = next.steps[next.currentIndex]
+      check(!step.baseline.calibrationId || reading.calibrationId === step.baseline.calibrationId, 'Калибровка весов изменилась', 409)
       check(reading.timestampMs >= step.baseline.timestampMs, 'Измерение старее начала компонента')
       const actual = reading.weightKg - step.baseline.weightKg
       check(actual >= -5, 'Вес уменьшился. Проверьте весы и задание')
@@ -53,6 +55,7 @@ export function reduceTask(task, event) {
     } else if (event.type === 'undo') {
       check(task.currentIndex > 0 && task.lastEventType === 'confirm', 'Можно отменить только последнее подтверждение', 409)
       const previous = next.steps[next.currentIndex - 1]
+      check(!previous.end.calibrationId || reading.calibrationId === previous.end.calibrationId, 'Калибровка весов изменилась', 409)
       check(reading.timestampMs >= previous.end.timestampMs && Math.abs(reading.weightKg - previous.end.weightKg) <= 5, 'Следующий компонент уже загружается: автоматический возврат запрещён', 409)
       if (next.currentIndex < next.steps.length) delete next.steps[next.currentIndex].baseline
       delete previous.end; delete previous.actualKg; delete previous.confirmedAt

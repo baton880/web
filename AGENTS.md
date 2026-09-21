@@ -1,5 +1,20 @@
 # AGENTS.md — рабочие правила проекта site_korovki
 
+## with-tablet, 2026-09-21
+
+Пользователь разрешил совместную реализацию Pi/Android/backend и push веток.
+Для серверной части создана отдельная рабочая копия `C:\Users\Windows\projects\web-with-tablet`,
+ветка `with-tablet` от `54ab8bc` PostgreSQL-платформы. Основной checkout не изменять.
+Новый план/установка: `server/docs/with-tablet.md`. Production не развёрнут.
+Новая Pi выдаёт `scale_measurement` с общими для LAN/server packetId, timestampMs,
+weightKg и calibrationId. Не применять к этому объекту серверную калибровку или
+realtime-фильтр. Не ретаймстампить backlog. `/loader/weight` использует лёгкий
+обработчик исходного веса; legacy fallback сохранён.
+Автономные планы подписаны постоянным LOADER_OFFLINE_PLAN_KEY (fallback JWT_SECRET),
+привязаны к owner/terminal/device. Ключ не ротировать до сверки offline очередей.
+Тесты: loader-tasks-test, loader-terminals-test, with-tablet-test и
+host-current-pointer-test с отдельным тестовым JWT_SECRET. Схема БД не менялась.
+
 ## Назначение
 
 Этот файл — краткая карта проекта для Codex и других разработчиков. Перед изменениями нужно проверить `git status`, прочитать этот файл и не затирать чужие незакоммиченные изменения.

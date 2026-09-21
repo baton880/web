@@ -1,9 +1,10 @@
 import { Router } from 'express'
 import { buildLoaderPlan, isLoaderGroupAvailable } from './loader-plan.js'
 import { TaskError } from './loader-task-store.js'
+import { signPlan, verifyPlan } from './offline-plan.js'
 
 // Authentication is mounted by index.js; the factory also enables isolated HTTP tests.
-export function createLoaderRouter({ prisma, store, weightHandler }) {
+export function createLoaderRouter({ prisma, store, weightHandler, offlineKey = process.env.LOADER_OFFLINE_PLAN_KEY || process.env.JWT_SECRET }) {
   const router = Router()
   router.use((req, res, next) => {
     if (!req.user || !['ADMIN', 'DIRECTOR', 'GUEST'].includes(req.user.role)) return res.status(403).json({ error: 'Нет доступа к заданиям' })
@@ -22,7 +23,7 @@ export function createLoaderRouter({ prisma, store, weightHandler }) {
   const include = { ration: { include: { ingredients: true } } }
   router.get('/groups', wrap(async (req, res) => {
     const groups = await prisma.livestockGroup.findMany({ include, orderBy: { name: 'asc' } })
-    res.json({ groups: groups.filter(isLoaderGroupAvailable).map(g => ({ id: g.id, name: g.name, plan: buildLoaderPlan(g) })) })
+    res.json({ groups: groups.filter(isLoaderGroupAvailable).map(g => ({ id: g.id, name: g.name, plan: signPlan(buildLoaderPlan(g), req.user, offlineKey) })) })
   }))
   router.get('/tasks', assignedDevice, wrap(async (req, res) => res.json({ tasks: await store.list(String(req.query.deviceId || ''), req.user) })))
   router.get('/tasks/active', assignedDevice, wrap(async (req, res) => res.json({ task: await store.active(String(req.query.deviceId || ''), req.user) })))
@@ -33,6 +34,11 @@ export function createLoaderRouter({ prisma, store, weightHandler }) {
     // Retry must return the original snapshot even if its source ration changed or was deleted.
     const existing = typeof body.id === 'string' ? await store.findExisting(body.id, req.user) : null
     if (existing) return res.json({ task: await store.create(body, existing, req.user) })
+    if (body.offlineToken) {
+      const plan = verifyPlan(body.offlineToken, req.user, body.deviceId, offlineKey)
+      if (plan.groupId !== body.groupId) throw new TaskError(400, 'Группа не совпадает с автономным планом')
+      return res.status(201).json({ task: await store.create(body, plan, req.user) })
+    }
     const group = await prisma.livestockGroup.findUnique({ where: { id: body.groupId }, include })
     const plan = buildLoaderPlan(group)
     if (!plan) throw new TaskError(400, 'У группы нет корректного плана загрузки')
