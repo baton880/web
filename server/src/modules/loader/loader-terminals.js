@@ -69,7 +69,7 @@ export function createLoaderAuthentication({ authenticate, prisma, terminals }) 
 }
 
 // Mounted before terminal-capable routes, with regular site JWT authentication only.
-export function createTerminalManagementRouter({ prisma, terminals }) {
+export function createTerminalManagementRouter({ prisma, terminals, remote }) {
   const router = Router()
   router.use((req,res,next) => {
     res.set('Cache-Control','no-store')
@@ -77,6 +77,16 @@ export function createTerminalManagementRouter({ prisma, terminals }) {
     next()
   })
   const wrap = action => async (req,res,next) => { try { await action(req,res) } catch(error) { next(error) } }
+  const visible = async (req) => {
+    const terminal=(await terminals.list(req.user)).find(t=>t.id===req.params.id)
+    if(!terminal || terminal.revokedAt)throw new TaskError(404,'Терминал недоступен')
+    return terminal
+  }
+  if(remote) {
+    router.get('/:id/remote',wrap(async(req,res)=>{await visible(req);res.json(remote.status(req.params.id))}))
+    router.post('/:id/remote',wrap(async(req,res)=>{await visible(req);res.json({command:remote.enqueue(req.params.id,req.body?.type,req.user)})}))
+    router.get('/:id/screenshot',wrap(async(req,res)=>{await visible(req);res.type('png').send(remote.screenshot(req.params.id))}))
+  }
   router.get('/', wrap(async (req,res) => res.json({terminals:await terminals.list(req.user)})))
   router.post('/', wrap(async (req,res) => {
     const user = await prisma.user.findUnique({where:{id:req.user.id},select:{id:true,role:true,password:true}})

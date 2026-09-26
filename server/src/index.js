@@ -27,6 +27,7 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
   import { PostgresLoaderTaskStore, PostgresLoaderTerminalStore } from './modules/loader/loader-postgres-store.js'
   import batchesRoutes from './modules/batches/batches.routes.js'
   import groupsRoutes from './modules/groups/groups.routes.js'
+  import { TerminalRemote } from './modules/loader/terminal-remote.js'
   import { createLoaderRouter } from './modules/loader/loader.routes.js'
   import { LoaderTaskStore } from './modules/loader/loader-task-store.js'
   import { LoaderTerminalStore, createLoaderAuthentication, createTerminalManagementRouter } from './modules/loader/loader-terminals.js'
@@ -188,10 +189,11 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
 
   // Группы/коровники для селектов и справочников
   app.use('/api/groups', authenticate, requireReadAccess, groupsRoutes)
+  const terminalRemote = new TerminalRemote()
   const loaderTasks = isPostgresDatabase ? new PostgresLoaderTaskStore(prisma) : new LoaderTaskStore()
   const loaderTerminals = isPostgresDatabase ? new PostgresLoaderTerminalStore(prisma) : new LoaderTerminalStore(loaderTasks.db)
-  app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals }))
-  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, weightHandler: handleLoaderScaleWeight }))
+  app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals, remote: terminalRemote }))
+  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, remote: terminalRemote, weightHandler: handleLoaderScaleWeight }))
 
   app.use('/api/reports', authenticate, requireReadAccess, reportsRoutes)
   app.use('/api/violations', authenticate, requireReadAccess, violationsRoutes)
