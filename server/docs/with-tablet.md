@@ -97,3 +97,8 @@ Nginx продолжает обслуживать неизменённый front
 Android опрашивает сервер раз в 10 секунд. Снимается только рабочий WebView, без PIN/логина и других приложений. APK берётся с фиксированного HTTPS-адреса, подпись/пакет/большая версия проверяются на устройстве. Обновление ждёт завершения задания. Результат установки переживает перезапуск приложения. Сервер хранит только последнюю команду и последний снимок; это обслуживание по запросу, не постоянная видеозапись.
 
 Проверка: `node scripts/terminal-remote-test.mjs` — доступ владельца, запрет чужому пользователю и ключу планшета на управленческие маршруты, запрет JWT на poll, валидация PNG, восстановление очереди, статусы, изоляция ID. `loader-terminals-test` проходит после добавления маршрутов. Реальный снимок получен от RugKing и виден в браузере на странице планшетов.
+# 27.09.2026 — единый вес Pi
+
+Production farm-server-tablet обновлён: normal current и loader current используют canonical scale_measurement без повторной калибровки и realtime-фильтра. Невалидный canonical-пакет выдаёт null, без fallback на raw. При сохранении нового пакета canonical weight приоритетен; история не пересчитывалась. Диагностический rawWeight не округляется. Legacy фильтр остаётся для старых приборов без scale_measurement.
+
+Проверены host-current-pointer (включая серверный множитель 2 и invalid), raw-weight-validity, realtime-weight-filter, with-tablet, loader-tasks, loader-terminals. Production health/current/loader HTTP200, source=pi-scale; текущий вес невалиден, Pi отсутствует. Резервная копия изменённого файла: /opt/farm-platform/telemetry.routes.before-filter-20260927.js. APK 0.7.5 опубликован в обоих frontend roots.

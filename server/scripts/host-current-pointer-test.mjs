@@ -30,13 +30,14 @@ try {
     stdio: 'inherit'
   })
 
-  const [{ default: prisma }, { processHostTelemetryPacket, findCurrentTelemetry, findAdminHistoryTelemetry }, { getHostIngressStore }] = await Promise.all([
+  const [{ default: prisma }, { processHostTelemetryPacket, findCurrentTelemetry, findAdminHistoryTelemetry, handleCurrentTelemetry, handleLoaderScaleWeight }, { getHostIngressStore }] = await Promise.all([
     import('../src/database.js'),
     import('../src/modules/telemetry/telemetry.routes.js'),
     import('../src/modules/telemetry/host-ingress-store.js')
   ])
 
   const deviceId = 'host-current-test'
+  await prisma.telemetrySettings.upsert({ where: { id: 1 }, create: { id: 1, weightCalibrationFactor: 2 }, update: { weightCalibrationFactor: 2 } })
   const streamId = 'stream-current-test'
   const makePacket = (timestamp, weight) => ({
     device_id: deviceId,
@@ -92,7 +93,7 @@ try {
   assert.equal(current.telemetryId, liveResult.id)
   assert.equal(current.sourcePacketId, 3)
   assert.equal(current.telemetry.timestamp.toISOString(), '2026-07-18T07:00:04.000Z')
-  assert.equal(current.telemetry.weight, 120)
+  assert.equal(current.telemetry.weight, 120.25)
   assert.equal(scaleMeasurement(current.telemetry).weightKg, 120.25, 'Persisted source measurement survives processing')
   assert.equal(current.telemetry.gpsAgeS, 0.2)
 
@@ -133,9 +134,31 @@ try {
 
   const adminHistory = await findAdminHistoryTelemetry({ limit: 20, requestedDeviceId: deviceId })
   assert.equal(adminHistory[0].sourcePacketId, 4)
-  assert.equal(adminHistory[0].weight, 130)
+  assert.equal(adminHistory[0].weight, 130.25)
   assert.equal(adminHistory[0].pipelineStatus, 'pending')
   assert.equal(adminHistory.filter((row) => row.sourcePacketId === 3).length, 1, 'processed ingress rows must be deduplicated')
+
+  const request = { query: { deviceId } }
+  const capture = async handler => {
+    let result
+    await handler(request, { json: value => { result = value }, status: status => { throw Error('HTTP ' + status) } })
+    return result
+  }
+  const site = await capture(handleCurrentTelemetry)
+  const tablet = await capture(handleLoaderScaleWeight)
+  assert.equal(site.realtimeWeight, 130.25, 'Site preserves the canonical Pi value even for older fractional packets')
+  assert.equal(site.weight, tablet.weight)
+  assert.equal(site.realtimeWeightSource, 'pi-scale')
+  assert.equal(site.rawWeight, 130, 'Raw diagnostics remain independent')
+  const invalidPacket = makePacket('2026-07-18T07:00:08Z', 500)
+  invalidPacket.scale_measurement.valid = false
+  invalidPacket.scale_measurement.weightKg = null
+  await getHostIngressStore().enqueueBatch({ deviceId, streamId, livePacketId: 5,
+    packets: [{ packetId: 5, payload: invalidPacket }] }, new Date('2026-07-18T07:10:11Z'))
+  const invalidSite = await capture(handleCurrentTelemetry)
+  assert.equal(invalidSite.realtimeWeight, null, 'Invalid canonical weight must not fall back to raw')
+  assert.equal(invalidSite.weight, null)
+  assert.equal(invalidSite.weightValid, false)
 
   getHostIngressStore().close()
   await prisma.$disconnect()

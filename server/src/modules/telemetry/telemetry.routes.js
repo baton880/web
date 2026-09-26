@@ -254,6 +254,7 @@ export function normalizeTelemetryPacket(packet) {
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
     rawWeight,
+    rawPayload: stringifyRawPayload(packet),
     weightValid: reportedWeightValid && (rawWeight === null || rawWeight >= RAW_WEIGHT_INVALID_BELOW_KG),
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
@@ -273,6 +274,8 @@ function stringifyRawPayload(payload) {
 }
 
 function applyWeightCalibration(packet, telemetrySettings = {}) {
+  const scale = scaleMeasurement(packet)
+  if (scale) return { ...packet, weight: scale.valid ? scale.weightKg : 0, weightValid: scale.valid }
   const factor = Number(telemetrySettings.weightCalibrationFactor)
   if (!Number.isFinite(factor) || factor <= 0 || factor === 1) {
     return packet
@@ -302,10 +305,12 @@ function buildEmptyLatestResponse(deviceId = null) {
 
 function serializeTelemetryForResponse(row) {
   if (!row) return row
+  const scale = scaleMeasurement(row)
   return {
     ...row,
-    weight: roundWeight(row.weight),
-    rawWeight: roundOptionalWeight(row.rawWeight)
+    weight: scale ? (scale.valid ? scale.weightKg : null) : roundWeight(row.weight),
+    weightValid: scale ? scale.valid : row.weightValid,
+    rawWeight: row.rawWeight
   }
 }
 
@@ -382,6 +387,8 @@ async function resolveStickyBarnPosition(prismaClient, telemetryLike, activeZone
 }
 
 async function buildRealtimeWeight(data, telemetrySettings = {}) {
+  const scale = scaleMeasurement(data)
+  if (scale) return { weight: scale.valid ? scale.weightKg : null, source: 'pi-scale', sampleCount: 1 }
   if (!data?.deviceId || !data?.timestamp) return null
   const currentTimestampMs = new Date(data.timestamp).getTime()
   const samples = (await hostIngressStore.recentLiveAccepted(40, data.deviceId))
