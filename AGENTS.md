@@ -5,7 +5,7 @@
 Пользователь разрешил совместную реализацию Pi/Android/backend и push веток.
 Для серверной части создана отдельная рабочая копия `C:\Users\Windows\projects\web-with-tablet`,
 ветка `with-tablet` от `54ab8bc` PostgreSQL-платформы. Основной checkout не изменять.
-Новый план/установка: `server/docs/with-tablet.md`. Production не развёрнут.
+Новый план/установка: `server/docs/with-tablet.md`. Production обновлён 26.09.2026: release `20260926-with-tablet`, PM2 `farm-server-tablet`; backup и PostgreSQL-проверки выполнены.
 Новая Pi выдаёт `scale_measurement` с общими для LAN/server packetId, timestampMs,
 weightKg и calibrationId. Не применять к этому объекту серверную калибровку или
 realtime-фильтр. Не ретаймстампить backlog. `/loader/weight` использует лёгкий
