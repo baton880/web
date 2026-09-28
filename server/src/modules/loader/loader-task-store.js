@@ -36,12 +36,15 @@ export function reduceTask(task, event) {
   } else {
     const reading = measurement(event.reading, task.deviceId, event.at)
     if (event.type === 'begin') {
-      check(task.status === 'ready', 'Задание уже начато', 409)
+      check((event.stepIndex ?? task.currentIndex) === task.currentIndex, 'Компонент уже изменился', 409)
+      check(task.status === 'ready' || (task.status === 'active' && task.explicitStepStart === true && !task.steps[task.currentIndex].baseline), 'Компонент уже начат', 409)
+      if (event.explicitStepStart === true) next.explicitStepStart = true
       next.status = 'active'
-      next.steps[0].baseline = reading
+      next.steps[next.currentIndex].baseline = reading
     } else if (event.type === 'confirm') {
       check(task.status === 'active' && event.stepIndex === task.currentIndex, 'Компонент уже изменился', 409)
       const step = next.steps[next.currentIndex]
+      check(step.baseline, 'Сначала нажмите «Начать загрузку»', 409)
       check(!step.baseline.calibrationId || reading.calibrationId === step.baseline.calibrationId, 'Калибровка весов изменилась', 409)
       check(reading.timestampMs >= step.baseline.timestampMs, 'Измерение старее начала компонента')
       const actual = reading.weightKg - step.baseline.weightKg
@@ -50,8 +53,9 @@ export function reduceTask(task, event) {
       step.actualKg = Math.max(0, actual)
       step.confirmedAt = event.at
       next.currentIndex++
+      if (event.explicitStepStart === true) next.explicitStepStart = true
       if (next.currentIndex === next.steps.length) next.status = 'completed'
-      else next.steps[next.currentIndex].baseline = reading
+      else if (!next.explicitStepStart) next.steps[next.currentIndex].baseline = reading
     } else if (event.type === 'undo') {
       check(task.currentIndex > 0 && task.lastEventType === 'confirm', 'Можно отменить только последнее подтверждение', 409)
       const previous = next.steps[next.currentIndex - 1]
