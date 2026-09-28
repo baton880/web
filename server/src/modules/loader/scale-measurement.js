@@ -11,5 +11,6 @@ export function scaleMeasurement(row) {
   return { version: 1, deviceId: value.deviceId, packetId: value.packetId,
     calibrationId: value.calibrationId, timestampMs: value.timestampMs,
     weightKg: Number.isFinite(value.weightKg) ? value.weightKg : null,
+    ...(Number.isFinite(value.tareKg) ? { tareKg: value.tareKg } : {}),
     valid: value.valid === true && Number.isFinite(value.weightKg) }
 }

@@ -46,6 +46,9 @@ try {
   const packet={version:1,deviceId:'host',packetId:'boot:2',calibrationId:'cal1',timestampMs:Date.now()-100000,weightKg:123.5,valid:true}
   const result=scaleMeasurement({deviceId:'host',rawPayload:JSON.stringify({scale_measurement:packet})})
   assert.deepEqual(result,packet,'No retimestamp, rounding, tare or server filter')
+  const tared=scaleMeasurement({deviceId:'host',rawPayload:{scale_measurement:{...packet,tareKg:100}}})
+  assert.equal(tared.weightKg,123.5,'Tare never changes canonical task weight')
+  assert.equal(tared.tareKg,100,'Display tare survives server fallback')
   assert.equal(scaleMeasurement({deviceId:'other',rawPayload:JSON.stringify({scale_measurement:packet})}),null)
   assert.equal(scaleMeasurement({deviceId:'host',rawPayload:'broken'}),null)
   assert.equal(scaleMeasurement({deviceId:'host',rawPayload:{scale_measurement:{...packet,valid:false}}}).valid,false)
