@@ -5,6 +5,8 @@ import { TelemetryProcessor } from '../../../../module-3/telemetryProcessor.js'
 import { getBatchPlan, recalculateBatchViolations } from './batch-violations.js'
 import { buildPostprocessedHostTrack, detectWeightStepMarkup, resolveWeightStepOptions } from './weight-step-postprocess.js'
 import { resolveEffectiveCoordinatesFromRtkPoint } from '../telemetry/telemetry-helpers.js'
+import { singleFlight } from '../../utils/single-flight.js'
+import { nearestTimestampIndex } from '../../utils/nearest-timestamp.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
 const STRAW_INGREDIENT_KEY = normalizeIngredientName('Солома')
@@ -12,6 +14,8 @@ const ALFALFA_INGREDIENT_KEY = normalizeIngredientName('Люцерна')
 const DEFAULT_FALLBACK_LEFT_BOUNDARY_MS = 10 * 60 * 1000
 const MAX_DYNAMIC_LEFT_BOUNDARY_GAP_MS = 3 * 60 * 60 * 1000
 const POSTPROCESS_CACHE = new Map()
+const POSTPROCESS_FLIGHTS = new WeakMap()
+const TIMESTAMP_INDEXES = new WeakMap()
 
 function timestampMs(value) {
   const parsed = new Date(value).getTime()
@@ -85,16 +89,8 @@ function eventCenterMs(event) {
 
 function findClosestTelemetryPoint(points, referenceMs) {
   if (!Array.isArray(points) || !points.length || !Number.isFinite(referenceMs)) return null
-  let best = null
-  for (const point of points) {
-    const pointMs = timestampMs(point.timestamp)
-    if (!Number.isFinite(pointMs)) continue
-    const distance = Math.abs(pointMs - referenceMs)
-    if (!best || distance < best.distance) {
-      best = { point, distance }
-    }
-  }
-  return best?.point || null
+  if (!TIMESTAMP_INDEXES.has(points)) TIMESTAMP_INDEXES.set(points, nearestTimestampIndex(points))
+  return TIMESTAMP_INDEXES.get(points)(referenceMs)
 }
 
 function findExistingIngredientName(batch, event, usedIds = new Set()) {
@@ -759,6 +755,15 @@ export function buildPostprocessMeta(result) {
 }
 
 export async function buildBatchPostprocess(prismaClient, batch, telemetrySettings = {}, options = {}) {
+  if (options.disableCache || options.telemetryRows || options.rtkRows) {
+    return calculateBatchPostprocess(prismaClient, batch, telemetrySettings, options)
+  }
+  if (!POSTPROCESS_FLIGHTS.has(prismaClient)) POSTPROCESS_FLIGHTS.set(prismaClient, singleFlight())
+  const key = JSON.stringify([batch, telemetrySettings, options], (_key, value) => typeof value === 'bigint' ? String(value) : value)
+  return POSTPROCESS_FLIGHTS.get(prismaClient)(key, () => calculateBatchPostprocess(prismaClient, batch, telemetrySettings, options))
+}
+
+async function calculateBatchPostprocess(prismaClient, batch, telemetrySettings = {}, options = {}) {
   if (!batch) {
     return { status: 'missing', reason: 'batch_missing' }
   }

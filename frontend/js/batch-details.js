@@ -307,9 +307,9 @@ $(document).ready(function () {
 
     function getPostprocessDebugCollapsedPreference() {
         try {
-            return window.localStorage.getItem(POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY) === "true";
+            return window.localStorage.getItem(POSTPROCESS_DEBUG_COLLAPSED_STORAGE_KEY) !== "false";
         } catch (_error) {
-            return false;
+            return true;
         }
     }
 
@@ -334,6 +334,8 @@ $(document).ready(function () {
 
         if (!collapsed && state.postprocessDebug) {
             window.requestAnimationFrame(() => renderPostprocessDebug());
+        } else if (!collapsed && state.batch && !state.postprocessDebugLoading) {
+            loadPostprocessDebug();
         }
     }
 
@@ -2548,8 +2550,11 @@ $(document).ready(function () {
         const debugBounds = bounds && typeof bounds === "object" ? bounds : null;
         const showEventLabels = options.showEventLabels !== false;
 
+        const indexCache = new Map();
         const getX = (scale, value) => {
-            const index = getClosestDebugPointIndex(rows, value);
+            const key = String(value);
+            if (!indexCache.has(key)) indexCache.set(key, getClosestDebugPointIndex(rows, value));
+            const index = indexCache.get(key);
             return index === null ? null : (scale.getPixelForTick ? scale.getPixelForTick(index) : scale.getPixelForValue(null, index));
         };
 
@@ -2793,6 +2798,8 @@ $(document).ready(function () {
     }
 
     function renderPostprocessDebugHostChart(timeline) {
+        timeline = window.BatchChartSampling.sample(timeline, row =>
+            getFiniteNumber(row.hostPoint?.filteredWeight ?? row.hostPoint?.weight));
         if (!postprocessDebugHostCanvas || !postprocessDebugHostEmpty) {
             return;
         }
@@ -2866,6 +2873,9 @@ $(document).ready(function () {
                 buildTabletMarkerPlugin(timelinePoints),
             ],
             options: {
+                animation: { duration: 0 },
+                hover: { animationDuration: 0 },
+                responsiveAnimationDuration: 0,
                 responsive: true,
                 maintainAspectRatio: false,
                 legend: { display: false },
@@ -2890,6 +2900,7 @@ $(document).ready(function () {
     }
 
     function renderPostprocessDebugSpeedChart({ canvas, empty, previousChart, timeline, debug, label, color, valueForRow }) {
+        timeline = window.BatchChartSampling.sample(timeline, row => getFiniteNumber(valueForRow(row)));
         if (!canvas || !empty) {
             return null;
         }
@@ -2925,6 +2936,9 @@ $(document).ready(function () {
             },
             plugins: [buildPostprocessDebugOverlayPlugin(timelinePoints, debug?.events, debug?.bounds, { showEventLabels: false })],
             options: {
+                animation: { duration: 0 },
+                hover: { animationDuration: 0 },
+                responsiveAnimationDuration: 0,
                 responsive: true,
                 maintainAspectRatio: false,
                 legend: { display: false },
@@ -3078,16 +3092,18 @@ $(document).ready(function () {
 
     function buildTabletMarkerPlugin(rows) {
         const times = rows.map(row => parseTimestampMs(row.timestamp));
+        const markers = tabletMarkerGroups().map((marker, index) => {
+            const at = Date.parse(marker.timestamp);
+            const right = times.findIndex(time => time >= at);
+            const left = Math.max(0, right - 1);
+            const fraction = times[right] > times[left] ? (at - times[left]) / (times[right] - times[left]) : 0;
+            return { at, index, right, left, fraction };
+        }).filter(marker => marker.at >= times[0] && marker.at <= times[times.length - 1]);
         return { afterDatasetsDraw(chart) {
             const xScale = chart.scales?.["x-axis-0"], area = chart.chartArea, ctx = chart.chart?.ctx;
             if (!xScale || !area || !ctx || times.length < 2) return;
             ctx.save();
-            tabletMarkerGroups().forEach((marker, index) => {
-                const at = Date.parse(marker.timestamp);
-                if (at < times[0] || at > times[times.length - 1]) return;
-                const right = times.findIndex(time => time >= at);
-                const left = Math.max(0, right - 1);
-                const fraction = times[right] > times[left] ? (at - times[left]) / (times[right] - times[left]) : 0;
+            markers.forEach(({index, right, left, fraction}) => {
                 const x = xScale.getPixelForValue(null, left) + fraction * (xScale.getPixelForValue(null, right) - xScale.getPixelForValue(null, left));
                 ctx.strokeStyle = "#7c3aed"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
                 ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke();
@@ -3123,8 +3139,10 @@ $(document).ready(function () {
         destroyTelemetryChart();
 
         normalizeTelemetryZoom(rows.length);
-        const visibleRows = canAdmin ? getTelemetryZoomRows(rows) : rows;
-        updateTelemetryZoomControls(rows, visibleRows);
+        const zoomRows = canAdmin ? getTelemetryZoomRows(rows) : rows;
+        updateTelemetryZoomControls(rows, zoomRows);
+        const visibleRows = window.BatchChartSampling.sample(zoomRows, row =>
+            row.weightValid === false || row.invalidWeight || row.weight == null ? null : Number(row.weight));
 
         const componentDatasets = buildComponentTelemetryDatasets(visibleRows, chartIngredientRows);
         const plateauDataset = canAdmin
@@ -3175,6 +3193,9 @@ $(document).ready(function () {
             },
             plugins: [componentZonePlugin, buildTabletMarkerPlugin(visibleRows)],
             options: {
+                animation: { duration: 0 },
+                hover: { animationDuration: 0 },
+                responsiveAnimationDuration: 0,
                 responsive: true,
                 maintainAspectRatio: false,
                 legend: {
@@ -3376,6 +3397,7 @@ $(document).ready(function () {
     }
 
     function buildComponentZonePlugin() {
+        const rangeCache = new WeakMap();
         return {
             beforeDatasetsDraw: function (chart) {
                 const xScale = chart.scales?.["x-axis-0"];
@@ -3392,7 +3414,8 @@ $(document).ready(function () {
                         return;
                     }
 
-                    const ranges = getDatasetValueRanges(dataset.data);
+                    if (!rangeCache.has(dataset.data)) rangeCache.set(dataset.data, getDatasetValueRanges(dataset.data));
+                    const ranges = rangeCache.get(dataset.data);
                     context.save();
                     context.fillStyle = toRgba(dataset.backgroundColor || dataset.borderColor, 0.18);
 
@@ -4238,7 +4261,7 @@ $(document).ready(function () {
             renderTelemetry(telemetryPayload.hostTrack);
             await renderBatchTrack(telemetryPayload, actualRows);
             renderBatchEditor(batch);
-            if (canAdmin) {
+            if (canAdmin && !postprocessDebugBody?.classList.contains("d-none")) {
                 loadPostprocessDebug();
             }
             return true;
