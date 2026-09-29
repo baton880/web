@@ -45,3 +45,5 @@ tools/
 korovki_page1.png
 server/tmp/
 server/runtime/
+
+server/private-terminal-remote/

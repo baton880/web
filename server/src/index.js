@@ -7,7 +7,7 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
   import cors from 'cors'
   import path from 'path'
   import { fileURLToPath } from 'url'
-  import telemetryRouter, { processHostTelemetryPacket, handleCurrentTelemetry } from './modules/telemetry/telemetry.routes.js'
+  import telemetryRouter, { processHostTelemetryPacket, handleCurrentTelemetry, handleLoaderScaleWeight } from './modules/telemetry/telemetry.routes.js'
   import { startHostIngressWorker } from './modules/telemetry/host-ingress-worker.js'
   import { getHostIngressStats } from './modules/telemetry/host-ingress-store.js'
   import rtkTelemetryRouter, { handleRtkTelemetryPost, processRtkTelemetryBody } from './modules/telemetry/rtk.routes.js'
@@ -193,7 +193,7 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
   const loaderTasks = isPostgresDatabase ? new PostgresLoaderTaskStore(prisma) : new LoaderTaskStore()
   const loaderTerminals = isPostgresDatabase ? new PostgresLoaderTerminalStore(prisma) : new LoaderTerminalStore(loaderTasks.db)
   app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals, remote: terminalRemote }))
-  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, remote: terminalRemote, weightHandler: handleCurrentTelemetry }))
+  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, remote: terminalRemote, weightHandler: handleLoaderScaleWeight }))
 
   app.use('/api/reports', authenticate, requireReadAccess, reportsRoutes)
   app.use('/api/violations', authenticate, requireReadAccess, violationsRoutes)

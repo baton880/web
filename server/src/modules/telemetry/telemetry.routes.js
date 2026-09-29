@@ -1,4 +1,5 @@
 import { withCalculationDatabase } from '../../database.js'
+import { scaleMeasurement } from '../loader/scale-measurement.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from './processor-checkpoint.js'
 import { Router } from 'express'
@@ -252,6 +253,7 @@ export function normalizeTelemetryPacket(packet) {
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
     rawWeight,
+    rawPayload: stringifyRawPayload(packet),
     weightValid: reportedWeightValid && parseOptionalNumber(packet.weight) !== null,
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
@@ -271,6 +273,8 @@ function stringifyRawPayload(payload) {
 }
 
 function applyWeightCalibration(packet, telemetrySettings = {}) {
+  const scale = scaleMeasurement(packet)
+  if (scale) return { ...packet, weight: scale.valid ? scale.weightKg : 0, weightValid: scale.valid }
   // The device already supplies calibrated weight with a 5 kg step.
   return { ...packet, weight: packet.weight == null ? null : roundWeight(packet.weight) }
 }
@@ -293,10 +297,12 @@ function buildEmptyLatestResponse(deviceId = null) {
 
 function serializeTelemetryForResponse(row) {
   if (!row) return row
+  const scale = scaleMeasurement(row)
   return {
     ...row,
-    weight: roundWeight(row.weight),
-    rawWeight: roundOptionalWeight(row.rawWeight)
+    weight: scale ? (scale.valid ? scale.weightKg : null) : roundWeight(row.weight),
+    weightValid: scale ? scale.valid : row.weightValid,
+    rawWeight: row.rawWeight
   }
 }
 
@@ -373,6 +379,8 @@ async function resolveStickyBarnPosition(prismaClient, telemetryLike, activeZone
 }
 
 async function buildRealtimeWeight(data, telemetrySettings = {}) {
+  const scale = scaleMeasurement(data)
+  if (scale) return { weight: scale.valid ? scale.weightKg : null, source: 'pi-scale', sampleCount: 1 }
   if (!data?.deviceId || !data?.timestamp) return null
   const currentTimestampMs = new Date(data.timestamp).getTime()
   const samples = (await hostIngressStore.recentLiveAccepted(40, data.deviceId))
@@ -704,6 +712,7 @@ export async function findCurrentTelemetry(requestedDeviceId = null) {
     ...packet,
     wifiClients: Array.isArray(packet.wifiClients) ? JSON.stringify(packet.wifiClients) : String(packet.wifiClients || '[]'),
     pipelineStatus: 'accepted',
+    rawPayload: JSON.stringify(accepted.payload),
     processed: false
   }
 }
@@ -1426,6 +1435,20 @@ async function loadCurrentReferenceData() {
   ])
   return { activeZones, telemetrySettings, groupsWithZones }
 }
+export async function handleLoaderScaleWeight(req, res) {
+  try {
+    const data = await findCurrentTelemetry(getRequestedDeviceId(req))
+    const scale = data && scaleMeasurement(data)
+    if (scale) return res.json({ deviceId: data.deviceId, id: scale.packetId,
+      timestamp: new Date(scale.timestampMs).toISOString(), weight: scale.weightKg,
+      realtimeWeight: scale.weightKg, weightValid: scale.valid, scaleMeasurement: scale })
+    return handleCurrentTelemetry(req, res) // Compatibility with older Pi firmware.
+  } catch (error) {
+    console.error('[Loader scale]', error.message)
+    return res.status(500).json({ error: 'Не удалось получить вес' })
+  }
+}
+
 export async function handleCurrentTelemetry(req, res) {
   try {
     const requestedDeviceId = getRequestedDeviceId(req)

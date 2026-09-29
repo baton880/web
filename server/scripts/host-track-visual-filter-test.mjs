@@ -58,4 +58,30 @@ assert.equal(roadGap.points.length, 6)
 assert.equal(roadGap.points[3].visualGapBefore, true)
 assert.ok(globalThis.HostTrackVisualFilter.calculateImpliedSpeedKmh(roadGap.points[2], roadGap.points[3]) < 30)
 
+// Reversed API history and out-of-order DB ids must follow source packets.
+const twoHz = Array.from({ length: 12 }, (_, i) => ({
+  ...point(Math.floor(i / 2), i * 1.5),
+  id: 100 - i, deviceId: 'host', sourceStreamId: 'stream', sourcePacketId: i,
+  receivedAt: timestamp(100),
+}))
+const ordered = filter([...twoHz].reverse())
+assert.equal(ordered.points.length, twoHz.length)
+assert.deepEqual(ordered.points.map(p => p.source.sourcePacketId), twoHz.map(p => p.sourcePacketId))
+assert.equal(ordered.stats.rejectedImpliedSpeed, 0)
+assert.equal(ordered.stats.recoveryCount, 0)
+assert.deepEqual(ordered.points.map(p => p.timestampMs), twoHz.map(p => Date.parse(p.timestamp)))
+
+// Non-admin history has no stream identity; receivedAt preserves packet order.
+const recent = twoHz.map((p, i) => ({ ...p, sourceStreamId: undefined, sourcePacketId: undefined, receivedAt: timestamp(i * 0.5) }))
+assert.deepEqual(filter([...recent].reverse()).points.map(p => p.source.id), recent.map(p => p.id))
+
+const sameSecondJump = twoHz.map(p => ({ ...p }))
+sameSecondJump[5].lat += 150 / 111320
+const jumpResult = filter(sameSecondJump)
+assert.ok(!jumpResult.points.some(p => p.source.sourcePacketId === 5))
+assert.equal(jumpResult.stats.rejectedImpliedSpeed, 1)
+assert.equal(jumpResult.stats.recoveryCount, 1)
+
+// Future precise source timestamps keep their real elapsed time.
+assert.equal(filter([point(0), point(0.5, 1.5), point(1, 3), point(1.01, 5)]).stats.rejectedImpliedSpeed, 1)
 console.log('Host visual track filter tests passed')

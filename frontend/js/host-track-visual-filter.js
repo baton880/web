@@ -94,7 +94,13 @@
 
     function calculateImpliedSpeedKmh(previousPoint, currentPoint) {
         if (!previousPoint || !currentPoint) return 0;
-        const elapsedSeconds = (currentPoint.timestampMs - previousPoint.timestampMs) / 1000;
+        let elapsedSeconds = (currentPoint.timestampMs - previousPoint.timestampMs) / 1000;
+        // Legacy HOST timestamps have whole-second precision at 2 packets/s.
+        // Use packet order only for tied timestamps; never rewrite source time
+        // or substitute network arrival time (buffered packets arrive together).
+        if (elapsedSeconds === 0 && currentPoint.sequenceIndex > previousPoint.sequenceIndex) {
+            elapsedSeconds = (currentPoint.sequenceIndex - previousPoint.sequenceIndex) * 0.5;
+        }
         const distanceMeters = calculateDistanceMeters(previousPoint, currentPoint);
         if (elapsedSeconds <= 0) {
             return distanceMeters <= 1 ? 0 : Number.POSITIVE_INFINITY;
@@ -118,9 +124,25 @@
             .sort((left, right) => {
                 const timeDiff = (left.timestampMs ?? Number.POSITIVE_INFINITY) - (right.timestampMs ?? Number.POSITIVE_INFINITY);
                 if (timeDiff !== 0) return timeDiff;
+                const leftRow = left.source;
+                const rightRow = right.source;
+                if (leftRow?.sourceStreamId && leftRow.sourceStreamId === rightRow?.sourceStreamId &&
+                    leftRow.deviceId === rightRow.deviceId) {
+                    const leftPacket = parseOptionalNumber(leftRow.sourcePacketId);
+                    const rightPacket = parseOptionalNumber(rightRow.sourcePacketId);
+                    if (leftPacket !== null && rightPacket !== null && leftPacket !== rightPacket) {
+                        return leftPacket - rightPacket;
+                    }
+                }
+                const leftReceived = parseTimestampMs(leftRow?.receivedAt);
+                const rightReceived = parseTimestampMs(rightRow?.receivedAt);
+                if (leftReceived !== null && rightReceived !== null && leftReceived !== rightReceived) {
+                    return leftReceived - rightReceived;
+                }
                 const idDiff = Number(left.source?.id || 0) - Number(right.source?.id || 0);
                 return idDiff !== 0 ? idDiff : left.sourceIndex - right.sourceIndex;
-            });
+            })
+            .map((point, sequenceIndex) => ({ ...point, sequenceIndex }));
 
         const accepted = [];
         const stats = {
