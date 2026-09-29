@@ -739,3 +739,32 @@
         font-size: 0.74rem;
     }
 }
+
+/* The home page has two columns; do not inherit the wide detail-table minimum. */
+@media (max-width: 768px) {
+    #dashboardActiveBatchCard .dashboard-mini-table {
+        width: 100%;
+        min-width: 0;
+        table-layout: fixed;
+    }
+    #dashboardActiveBatchCard .dashboard-mini-table th,
+    #dashboardActiveBatchCard .dashboard-mini-table td {
+        white-space: normal;
+        overflow-wrap: anywhere;
+        padding: .65rem .55rem;
+    }
+    #dashboardActiveBatchCard .dashboard-mini-table th:first-child {
+        width: 50%;
+    }
+    #dashboardActiveBatchCard .dashboard-mini-table th:last-child,
+    #dashboardActiveBatchCard .dashboard-mini-table td:last-child:not([colspan]) {
+        text-align: right;
+    }
+}
+
+@media (max-width: 400px) {
+    #dashboardActiveBatchCard .dashboard-mini-table thead th {
+        font-size: .66rem;
+        letter-spacing: 0;
+    }
+}

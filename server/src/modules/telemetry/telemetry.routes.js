@@ -236,7 +236,6 @@ function resolveMovementState(recentPoints = [], telemetrySettings = {}, memoryS
   return false
 }
 
-const RAW_WEIGHT_INVALID_BELOW_KG = -2000
 
 export function normalizeTelemetryPacket(packet) {
   const rawWeight = parseOptionalNumber(packet.raw ?? packet.rawWeight ?? packet.raw_weight)
@@ -253,7 +252,7 @@ export function normalizeTelemetryPacket(packet) {
     speedKmh: parseOptionalNumber(packet.speedKmh ?? packet.speed_kmh ?? packet.speed),
     weight: Number(packet.weight || 0),
     rawWeight,
-    weightValid: reportedWeightValid && (rawWeight === null || rawWeight >= RAW_WEIGHT_INVALID_BELOW_KG),
+    weightValid: reportedWeightValid && parseOptionalNumber(packet.weight) !== null,
     gpsQuality: Number(packet.gpsQuality ?? packet.gps_quality ?? 0),
     wifiClients: packet.wifiClients ?? packet.wifi_clients ?? [],
     cpuTempC: packet.cpuTempC ?? packet.cpu_temp_c ?? null,
@@ -272,15 +271,8 @@ function stringifyRawPayload(payload) {
 }
 
 function applyWeightCalibration(packet, telemetrySettings = {}) {
-  const factor = Number(telemetrySettings.weightCalibrationFactor)
-  if (!Number.isFinite(factor) || factor <= 0 || factor === 1) {
-    return packet
-  }
-
-  return {
-    ...packet,
-    weight: Number(packet.weight || 0) * factor
-  }
+  // The device already supplies calibrated weight with a 5 kg step.
+  return { ...packet, weight: packet.weight == null ? null : roundWeight(packet.weight) }
 }
 
 // Хелпер для пустых ответов

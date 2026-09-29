@@ -1,8 +1,8 @@
 const WEIGHT_FILTER = {
-  source: 'rawWeight',
-  hampelRadius: 25,
-  hampelSigma: 0.8,
-  rollingMedianRadius: 12,
+  source: 'weight',
+  hampelRadius: 0,
+  hampelSigma: 0,
+  rollingMedianRadius: 0,
   roundToKg: 5
 }
 const HOST_SPEED_FILTER = {
@@ -33,7 +33,7 @@ export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   maxLoadTransitionSec: 100000,
   maxUnloadTransitionSec: 545000,
   anchorSec: 15,
-  weightScale: 1.048,
+  weightScale: 1,
   loadDriftMaxKg: 70,
   loadForceKg: 120,
   loadMovingSpeedKmh: 0,
@@ -59,8 +59,6 @@ export const DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS = {
   startSoftMinLoadKg: 30,
   startSoftPlateauMinSec: 20,
   startSoftPlateauRangeKg: 30,
-  rawCutoffKg: -1000,
-  rawCutoffDropKg: 500,
   excludeBounceDips: true,
   speedOffsetSec: 0
 }
@@ -106,6 +104,7 @@ export function resolveWeightStepOptions(overrides = {}) {
     options.analysisStartMs = analysisStartMs
   }
 
+  options.weightScale = 1 // Packet weight is already calibrated on the device.
   return options
 }
 
@@ -182,6 +181,7 @@ function removeOverlappingBufferedTrackPoints(points = []) {
 }
 
 function finiteNumber(value) {
+  if (value === null || value === undefined || value === '') return null
   const parsed = Number(value)
   return Number.isFinite(parsed) ? parsed : null
 }
@@ -225,7 +225,7 @@ function hampel(values, radius, sigma) {
 }
 
 function roundStep(value, step = WEIGHT_FILTER.roundToKg) {
-  if (!Number.isFinite(Number(value))) return value
+  if (value === null || value === undefined || value === '' || !Number.isFinite(Number(value))) return null
   const rounded = Math.round(Number(value) / step) * step
   return Object.is(rounded, -0) ? 0 : rounded
 }
@@ -239,9 +239,7 @@ function eventDelta(beforeLevel, afterLevel) {
   return eventLevel(afterLevel) - eventLevel(beforeLevel)
 }
 
-function scaleWeight(value, scale) {
-  return Number.isFinite(value) ? value * scale : value
-}
+
 
 function summarizePoints(points, anchorMs = null, preferEnd = false) {
   let selected = points
@@ -302,15 +300,14 @@ function decoratePlateaus(plateaus, opts) {
 }
 
 function normalizeTelemetryRows(rows = [], opts) {
-  const scale = Number.isFinite(opts.weightScale) && opts.weightScale > 0 ? opts.weightScale : 1
   const speedOffsetMs = Number.isFinite(Number(opts.speedOffsetSec)) ? Number(opts.speedOffsetSec) * 1000 : 0
   const points = (Array.isArray(rows) ? rows : [])
     .map((row) => ({
       id: row.id ?? null,
       x: timestampMs(row.timestamp ?? row.t),
       receivedAt: row.receivedAt ?? row.received_at ?? null,
-      raw: scaleWeight(finiteNumber(row.rawWeight ?? row.raw_weight ?? row.r), scale),
-      weight: scaleWeight(finiteNumber(row.weight ?? row.w), scale),
+      raw: null,
+      weight: roundStep(finiteNumber(row.weight ?? row.w), 5),
       weightValid: row.weightValid ?? row.weight_valid ?? null,
       rawSpeed: finiteNumber(row.speedKmh ?? row.speed_kmh ?? row.s),
       lat: finiteNumber(row.lat),
@@ -331,10 +328,10 @@ function normalizeTelemetryRows(rows = [], opts) {
     }))
 }
 
-export function hasUsableRawWeight(rows = []) {
+export function hasUsablePacketWeight(rows = []) {
   const points = Array.isArray(rows) ? rows : []
   const rawCount = points.reduce((sum, row) => (
-    sum + (Number.isFinite(Number(row?.rawWeight ?? row?.raw_weight ?? row?.r)) ? 1 : 0)
+    sum + (Number.isFinite(finiteNumber(row?.weight ?? row?.w)) && !isExplicitlyInvalidWeight(row) ? 1 : 0)
   ), 0)
   return rawCount >= Math.max(10, Math.ceil(points.length * 0.2))
 }
@@ -345,37 +342,9 @@ export function buildFilteredWeightPoints(rows = [], rawOptions = {}) {
     .filter((point) => !isExplicitlyInvalidWeight(point))
     .filter((point) => Number.isFinite(point.raw) || Number.isFinite(point.weight))
 
-  const cutoffKg = Number(opts.rawCutoffKg)
-  const cutoffDropKg = Number(opts.rawCutoffDropKg)
-  let usablePoints = points
-  let terminalCutoff = false
-  if (Number.isFinite(cutoffKg) && Number.isFinite(cutoffDropKg) && cutoffDropKg >= 0) {
-    for (let index = 1; index < points.length; index += 1) {
-      const previous = points[index - 1]
-      const current = points[index]
-      if (
-        Number.isFinite(previous.raw) &&
-        Number.isFinite(current.raw) &&
-        previous.raw > cutoffKg &&
-        current.raw < cutoffKg &&
-        previous.raw - current.raw >= cutoffDropKg
-      ) {
-        usablePoints = points.slice(0, index)
-        terminalCutoff = true
-        break
-      }
-    }
-  }
-
-  const rawValues = usablePoints.map((point) => Number.isFinite(point.raw) ? point.raw : point.weight)
-  const filtered = rollingMedian(
-    hampel(rawValues, WEIGHT_FILTER.hampelRadius, WEIGHT_FILTER.hampelSigma),
-    WEIGHT_FILTER.rollingMedianRadius
-  ).map((value) => roundStep(value, WEIGHT_FILTER.roundToKg))
-
-  if (terminalCutoff && filtered.length) {
-    filtered[filtered.length - 1] = roundStep(rawValues[rawValues.length - 1], WEIGHT_FILTER.roundToKg)
-  }
+  const usablePoints = points
+  // Use the displayed 5 kg packet weight, without re-filtering or raw cutoffs.
+  const filtered = usablePoints.map(point => point.weight)
 
   return usablePoints
     .map((point, index) => ({
@@ -1131,10 +1100,10 @@ export function detectWeightStepMarkup(batch, telemetryRows = [], rawOptions = {
     }
   }
 
-  if (!hasUsableRawWeight(telemetryRows)) {
+  if (!hasUsablePacketWeight(telemetryRows)) {
     return {
       status: 'processing',
-      reason: 'raw_weight_missing',
+      reason: 'packet_weight_missing',
       filter: WEIGHT_FILTER,
       speedFilter: HOST_SPEED_FILTER,
       options: resolveWeightStepOptions(rawOptions),

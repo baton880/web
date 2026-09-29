@@ -1,17 +1,6 @@
 (function () {
     const DESKTOP_MIN_WIDTH = 769;
     const STORAGE_KEY = "app-sidebar-collapsed";
-    const DIGEST_ITEM_ID = "sidebar-digest-settings";
-    const DIGEST_PAGE = "digest-settings.html";
-    const DIGEST_ROUTE = "/digest/settings";
-    const VIOLATIONS_ITEM_ID = "sidebar-violations";
-    const VIOLATIONS_PAGE = "violations.html";
-    const VIOLATIONS_ROUTE = "/violations";
-    const REPORTS_ITEM_ID = "sidebar-reports";
-    const REPORTS_PAGE = "reports.html";
-    const REPORTS_ROUTE = "/reports";
-    const ADMIN_PAGE = "telemetry-admin.html";
-    const ADMIN_ROUTE = "/telemetry-admin";
     const body = document.body;
     const sidebar = document.getElementById("accordionSidebar");
     const content = document.getElementById("content");
@@ -157,7 +146,9 @@
         mobileMenuList.innerHTML = "";
 
         sidebar.querySelectorAll(".nav-item .nav-link[href]").forEach((link) => {
-            mobileMenuList.appendChild(createMobileNavLink(link));
+            if (window.getComputedStyle(link.closest('.nav-item')).display !== 'none') {
+                mobileMenuList.appendChild(createMobileNavLink(link));
+            }
         });
     }
 
@@ -207,113 +198,6 @@
         return pageName || "index.html";
     }
 
-    function ensureNavigationItem(config) {
-        const {
-            id,
-            page,
-            route,
-            label,
-            icon,
-            insertAfterHref,
-        } = config;
-
-        if (sidebar.querySelector(`[data-sidebar-item="${id}"]`)) {
-            return;
-        }
-
-        const divider = sidebar.querySelector(".sidebar-divider.d-none.d-md-block");
-        const insertAfterLink = insertAfterHref ? sidebar.querySelector(`a[href="${insertAfterHref}"]`) : null;
-        const insertAfterItem = insertAfterLink ? insertAfterLink.closest(".nav-item") : null;
-
-        if (!divider && !insertAfterItem) {
-            return;
-        }
-
-        const navItem = document.createElement("li");
-        const isActive = getCurrentPageName() === page || getNormalizedPathname() === route;
-
-        navItem.className = `nav-item${isActive ? " active" : ""}`;
-        navItem.dataset.sidebarItem = id;
-        navItem.innerHTML = `
-            <a class="nav-link" href="${page}"${isActive ? ' aria-current="page"' : ""}>
-                <i class="fas fa-fw ${icon}"></i>
-                <span>${label}</span>
-            </a>
-        `;
-
-        if (insertAfterItem) {
-            insertAfterItem.insertAdjacentElement("afterend", navItem);
-            return;
-        }
-
-        sidebar.insertBefore(navItem, divider);
-    }
-
-    function ensureViolationsNavigationItem() {
-        const isDirector = window.AppAuth?.getRole?.() === window.AppAuth?.ROLE_DIRECTOR;
-        if (isDirector) {
-            sidebar.querySelector(`[data-sidebar-item="${VIOLATIONS_ITEM_ID}"]`)?.remove();
-            return;
-        }
-
-        ensureNavigationItem({
-            id: VIOLATIONS_ITEM_ID,
-            page: VIOLATIONS_PAGE,
-            route: VIOLATIONS_ROUTE,
-            label: "Нарушения",
-            icon: "fa-exclamation-triangle",
-            insertAfterHref: "tables.html",
-        });
-    }
-
-    function ensureDigestNavigationItem() {
-        if (window.AppAuth?.isGuest?.()) {
-            return;
-        }
-
-        ensureNavigationItem({
-            id: DIGEST_ITEM_ID,
-            page: DIGEST_PAGE,
-            route: DIGEST_ROUTE,
-            label: "Уведомления",
-            icon: "fa-envelope-open-text",
-        });
-    }
-
-    function ensureReportsNavigationItem() {
-        ensureNavigationItem({
-            id: REPORTS_ITEM_ID,
-            page: REPORTS_PAGE,
-            route: REPORTS_ROUTE,
-            label: "Отчеты",
-            icon: "fa-chart-bar",
-            insertAfterHref: VIOLATIONS_PAGE,
-        });
-    }
-
-    function syncAdminNavigationItem() {
-        const adminLink = sidebar.querySelector(`a[href="${ADMIN_PAGE}"]`);
-        const divider = sidebar.querySelector(".sidebar-divider.d-none.d-md-block");
-        const adminItem = adminLink ? adminLink.closest(".nav-item") : null;
-
-        if (!adminLink || !adminItem || !divider) {
-            return;
-        }
-
-        const isActive = getCurrentPageName() === ADMIN_PAGE || getNormalizedPathname() === ADMIN_ROUTE;
-        const label = "Админ панель";
-        const labelElement = adminLink.querySelector("span");
-
-        if (labelElement) {
-            labelElement.textContent = label;
-        }
-
-        adminLink.setAttribute("aria-label", label);
-        adminLink.classList.toggle("active", isActive);
-        adminItem.classList.toggle("active", isActive);
-        sidebar.insertBefore(adminItem, divider);
-    }
-
     function syncFromCurrentMarkup() {
         syncToggleButtons(getCurrentState());
     }
@@ -343,10 +227,6 @@
         applyState(readSavedState());
     }
 
-    ensureViolationsNavigationItem();
-    ensureReportsNavigationItem();
-    ensureDigestNavigationItem();
-    syncAdminNavigationItem();
     syncNavLabels();
     syncActiveNavigationState();
     ensureMobileNavigation();

@@ -14,9 +14,10 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260506e" rel="stylesheet">
+    <link href="css/custom.css?v=20260929b" rel="stylesheet">
     <link href="css/responsive.css" rel="stylesheet">
-    <script src="js/app-auth.js?v=20260419a"></script>
+    <link href="css/loader-terminals.css?v=20260929remote" rel="stylesheet">
+    <script src="js/app-auth.js?v=20260929a"></script>
 </head>
 
 <body id="page-top">
@@ -24,6 +25,7 @@
     <div id="wrapper">
 
         <ul class="navbar-nav bg-gradient-primary sidebar sidebar-dark accordion" id="accordionSidebar">
+            <script src="js/sidebar-initial-state.js?v=20260929a"></script>
 
             <a class="sidebar-brand d-flex align-items-center justify-content-center" href="index.html">
                 <div class="sidebar-brand-icon">
@@ -36,43 +38,55 @@
 
             <li class="nav-item nav-item-home">
                 <a class="nav-link" href="index.html">
-                    <i class="fas fa-fw fa-home"></i>
-                    <span>Главная</span>
+                    <i class="fas fa-fw fa-home"></i><span>Главная</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="tables.html">
-                    <i class="fas fa-fw fa-table"></i>
-                    <span>Замесы</span>
+                    <i class="fas fa-fw fa-table"></i><span>Замесы</span>
+                </a>
+            </li>
+
+            <li class="nav-item nav-violations">
+                <a class="nav-link" href="violations.html">
+                    <i class="fas fa-fw fa-exclamation-triangle"></i><span>Нарушения</span>
+                </a>
+            </li>
+
+            <li class="nav-item">
+                <a class="nav-link" href="reports.html">
+                    <i class="fas fa-fw fa-chart-bar"></i><span>Отчеты</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="rations.html">
-                    <i class="fas fa-fw fa-utensils"></i>
-                    <span>Рационы</span>
+                    <i class="fas fa-fw fa-utensils"></i><span>Рационы</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="groups.html">
-                    <i class="fas fa-fw fa-tractor"></i>
-                    <span>Группы</span>
+                    <i class="fas fa-fw fa-tractor"></i><span>Группы</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="map-zones.html">
-                    <i class="fas fa-fw fa-map"></i>
-                    <span>Зоны</span>
+                    <i class="fas fa-fw fa-map"></i><span>Зоны</span>
                 </a>
             </li>
 
-            <li class="nav-item active">
-                <a class="nav-link" href="telemetry-admin.html">
-                    <i class="fas fa-fw fa-broadcast-tower"></i>
-                    <span>Админ панель</span>
+            <li class="nav-item nav-digest">
+                <a class="nav-link" href="digest-settings.html">
+                    <i class="fas fa-fw fa-envelope-open-text"></i><span>Уведомления</span>
+                </a>
+            </li>
+
+            <li class="nav-item nav-admin active">
+                <a class="nav-link" href="telemetry-admin.html" aria-current="page">
+                    <i class="fas fa-fw fa-broadcast-tower"></i><span>Админ панель</span>
                 </a>
             </li>
 
@@ -112,6 +126,9 @@
                                 <i class="fas fa-users mr-1"></i>
                                 Пользователи
                             </a>
+                        </li>
+                        <li class="nav-item" role="presentation">
+                            <a class="nav-link" id="adminTerminalsTab" data-toggle="tab" href="#adminTerminalsPanel" role="tab" aria-controls="adminTerminalsPanel" aria-selected="false"><i class="fas fa-tablet-alt mr-2"></i>Планшеты</a>
                         </li>
                     </ul>
 
@@ -652,6 +669,21 @@
 
                         </div>
 
+                        <div class="tab-pane fade" id="adminTerminalsPanel" role="tabpanel" aria-labelledby="adminTerminalsTab">
+                            <div class="card shadow mb-4">
+                                <div class="card-header py-3 d-sm-flex align-items-center justify-content-between">
+                                    <div><h6 class="m-0 font-weight-bold text-primary">Планшеты погрузчика</h6><div class="small text-muted mt-1" id="status" role="status">Загрузка…</div></div>
+                                    <button id="reload" type="button" class="btn btn-primary btn-sm mt-3 mt-sm-0">Обновить список</button>
+                                </div>
+                                <div class="card-body">
+                                    <p class="text-muted">Удалённое обслуживание планшетов: снимок рабочего экрана, обновление приложения и отзыв доступа.</p>
+                                    <div id="terminals"></div>
+                                    <p class="small text-muted mt-4 mb-0">Команда хранится до 24 часов и выполняется, когда ВИ-КОРМ открыт и интернет доступен. Обновление ждёт завершения задания. Снимок показывает только ВИ-КОРМ, не экран Android и не поля PIN. Новый планшет регистрируется из приложения после входа под директором или администратором. Отзыв доступа действует на последующие запросы; сохранённые задания и история остаются. Смена пароля учётной записи также отключает её терминалы.</p>
+                                </div>
+                            </div>
+                            <dialog id="revoke-dialog" aria-labelledby="revoke-title"><form method="dialog"><h5 id="revoke-title">Отключить планшет?</h5><p id="revoke-name"></p><p>Для восстановления доступа понадобится снова войти в приложении. История заданий сохранится.</p><div class="d-flex flex-wrap justify-content-end" style="gap: .75rem"><button class="btn btn-light border" value="cancel" autofocus>Оставить доступ</button><button class="btn btn-danger" value="revoke">Отключить</button></div></form></dialog>
+                        </div>
+
                         <div class="tab-pane fade" id="adminUsersPanel" role="tabpanel" aria-labelledby="adminUsersTab">
                     <div class="card shadow mb-4">
                         <div class="card-header py-3 d-sm-flex align-items-center justify-content-between">
@@ -781,9 +813,10 @@
     <script src="vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
-    <script src="js/sidebar-enhancements.js?v=20260726a"></script>
+    <script src="js/sidebar-enhancements.js?v=20260929b"></script>
     <script src="js/telemetry.js?v=20260822a"></script>
     <script src="js/admin-users.js?v=20260501a"></script>
+    <script src="js/loader-terminals.js?v=20260929remote"></script>
 
 </body>
 

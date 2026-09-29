@@ -3,7 +3,7 @@ import { buildLoaderPlan, isLoaderGroupAvailable } from './loader-plan.js'
 import { TaskError } from './loader-task-store.js'
 
 // Authentication is mounted by index.js; the factory also enables isolated HTTP tests.
-export function createLoaderRouter({ prisma, store, weightHandler }) {
+export function createLoaderRouter({ prisma, store, weightHandler, remote }) {
   const router = Router()
   router.use((req, res, next) => {
     if (!req.user || !['ADMIN', 'DIRECTOR', 'GUEST'].includes(req.user.role)) return res.status(403).json({ error: 'Нет доступа к заданиям' })
@@ -18,6 +18,11 @@ export function createLoaderRouter({ prisma, store, weightHandler }) {
   const wrap = fn => async (req, res, next) => { try { await fn(req, res) } catch (error) { next(error) } }
   const writer = (req, res, next) => ['ADMIN', 'DIRECTOR'].includes(req.user.role) ? next() : res.status(403).json({ error: 'Для ведения заданий нужны права директора или администратора' })
   router.get('/session', (req,res) => res.json({ userId:req.user.id, terminalId:req.user.terminalId || null, deviceId:req.user.terminalDeviceId || null, name:req.user.terminalName || null }))
+  if (remote) {
+    const terminalOnly = (req,res,next) => req.user.terminalId ? next() : res.status(403).json({error:'Нужен ключ планшета'})
+    router.post('/remote/poll', terminalOnly, wrap(async(req,res) => res.json({command:remote.heartbeat(req.user.terminalId,req.body||{})})))
+    router.post('/remote/result', terminalOnly, wrap(async(req,res) => {remote.result(req.user.terminalId,req.body||{});res.json({ok:true})}))
+  }
   if (weightHandler) router.get('/weight', assignedDevice, weightHandler)
   const include = { ration: { include: { ingredients: true } } }
   router.get('/groups', wrap(async (req, res) => {

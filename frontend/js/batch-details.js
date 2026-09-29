@@ -113,7 +113,6 @@ $(document).ready(function () {
         { key: "maxLoadTransitionSec", label: "Макс. загрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
         { key: "maxUnloadTransitionSec", label: "Макс. выгрузка, с", min: 5, max: 1000000, step: 5, group: "main" },
         { key: "anchorSec", label: "Плато-якорь, с", min: 5, max: 90, step: 5, group: "main" },
-        { key: "weightScale", label: "Калибр. вес", min: 0.1, max: 3, step: 0.001, group: "main" },
         { key: "loadDriftMaxKg", label: "Дрейф + до, кг", min: 5, max: 200, step: 5, group: "main" },
         { key: "loadForceKg", label: "Всегда загрузка, кг", min: 20, max: 500, step: 5, group: "main" },
         { key: "loadMovingSpeedKmh", label: "Загрузка v >", min: 0, max: 15, step: 0.1, group: "main" },
@@ -147,13 +146,10 @@ $(document).ready(function () {
         { key: "startSoftMinLoadKg", label: "Старт мин. загр, кг", min: 0, max: 150, step: 5, group: "advanced" },
         { key: "startSoftPlateauMinSec", label: "Старт мин. плато, с", min: 0, max: 120, step: 5, group: "advanced" },
         { key: "startSoftPlateauRangeKg", label: "Старт шум, кг", min: 0, max: 100, step: 5, group: "advanced" },
-        { key: "rawCutoffKg", label: "Raw обрыв <, кг", min: -5000, max: 5000, step: 50, group: "advanced" },
-        { key: "rawCutoffDropKg", label: "Raw обрыв падение, кг", min: 0, max: 5000, step: 50, group: "advanced" },
         { key: "excludeBounceDips", label: "Не считать дрейф/просадки на ходу", type: "checkbox", group: "advanced" },
     ];
     const POSTPROCESS_DEBUG_TOGGLES = [
-        { key: "showFiltered", label: "filtered rawWeight", color: "#2563eb" },
-        { key: "showRaw", label: "rawWeight", color: "#dc2626" },
+        { key: "showFiltered", label: "Вес пакета (5 кг)", color: "#2563eb" },
         { key: "showTelemetryWeight", label: "Telemetry.weight", color: "#16a34a" },
         { key: "showPlateaus", label: "плато", color: "#111827" },
         { key: "showRestPlateaus", label: "плато покоя", color: "#7c3aed" },
@@ -848,7 +844,7 @@ $(document).ready(function () {
         }
 
         if (isPostprocessProcessing(state.batch)) {
-            ingredientListBody.innerHTML = '<tr><td colspan="5" class="batch-detail-empty">Обрабатывается postprocess по rawWeight</td></tr>';
+            ingredientListBody.innerHTML = '<tr><td colspan="5" class="batch-detail-empty">Обрабатывается postprocess по весу пакета</td></tr>';
             return;
         }
 
@@ -1044,7 +1040,7 @@ $(document).ready(function () {
         }
 
         if (isPostprocessProcessing(state.batch)) {
-            planFactBody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Обрабатывается postprocess по rawWeight</td></tr>';
+            planFactBody.innerHTML = '<tr><td colspan="5" class="dashboard-mini-table-empty">Обрабатывается postprocess по весу пакета</td></tr>';
             setText(planTotal, "--");
             setText(factTotal, "Обрабатывается");
             setText(deviationTotal, "--");
@@ -1276,6 +1272,7 @@ $(document).ready(function () {
         return {
             hostTrack: Array.isArray(payload?.hostTrack) ? payload.hostTrack : [],
             hostContextTrack: Array.isArray(payload?.hostContextTrack) ? payload.hostContextTrack : [],
+            tabletMarkers: Array.isArray(payload?.tabletMarkers) ? payload.tabletMarkers : [],
             loaderTrack: Array.isArray(payload?.loaderTrack) ? payload.loaderTrack : [],
             events: Array.isArray(payload?.events) ? payload.events : [],
             plateaus: Array.isArray(payload?.plateaus) ? payload.plateaus : [],
@@ -2825,15 +2822,6 @@ $(document).ready(function () {
         }));
         const view = state.postprocessDebugView;
         const datasets = [];
-        if (view.showRaw) {
-            datasets.push(...buildPostprocessDebugContinuousDatasets({
-                label: "rawWeight",
-                timeline,
-                valueForRow: (row) => row.hostPoint?.rawWeight,
-                color: "#dc2626",
-                borderWidth: 1,
-            }));
-        }
         if (view.showTelemetryWeight) {
             datasets.push(...buildPostprocessDebugContinuousDatasets({
                 label: "Telemetry.weight",
@@ -2845,7 +2833,7 @@ $(document).ready(function () {
         }
         if (view.showFiltered) {
             datasets.push(...buildPostprocessDebugContinuousDatasets({
-                label: "filtered rawWeight",
+                label: "Вес пакета (5 кг)",
                 timeline,
                 valueForRow: (row) => row.hostPoint?.filteredWeight ?? row.hostPoint?.weight,
                 color: "#2563eb",
@@ -2875,6 +2863,7 @@ $(document).ready(function () {
             plugins: [
                 buildPostprocessDebugOverlayPlugin(timelinePoints, debug?.events, debug?.bounds),
                 buildComponentZonePlugin(),
+                buildTabletMarkerPlugin(timelinePoints),
             ],
             options: {
                 responsive: true,
@@ -3005,7 +2994,7 @@ $(document).ready(function () {
         const filter = debug.filter || {};
         const speedFilter = debug.speedFilter || {};
         if (postprocessDebugFilterMeta) {
-            postprocessDebugFilterMeta.textContent = `Вес: rawWeight → Hampel r${filter.hampelRadius ?? "—"}, σ${filter.hampelSigma ?? "—"} → median r${filter.rollingMedianRadius ?? "—"} → ${filter.roundToKg ?? "—"} кг · Скорость host: Hampel r${speedFilter.hampelRadius ?? "—"}, σ${speedFilter.hampelSigma ?? "—"} → median r${speedFilter.rollingMedianRadius ?? "—"}`;
+            postprocessDebugFilterMeta.textContent = `Вес: обычный из пакета, шаг 5 кг; без дополнительной калибровки · Скорость host: Hampel r${speedFilter.hampelRadius ?? "—"}, σ${speedFilter.hampelSigma ?? "—"} → median r${speedFilter.rollingMedianRadius ?? "—"}`;
         }
         if (postprocessDebugGeneratedAt) {
             postprocessDebugGeneratedAt.textContent = debug.generatedAt ? `Обновлено: ${formatDateTime(debug.generatedAt)}` : "";
@@ -3064,6 +3053,51 @@ $(document).ready(function () {
         }
     }
 
+    function tabletMarkerGroups() {
+        const groups = new Map();
+        for (const marker of state.telemetryPayload?.tabletMarkers || []) {
+            const key = marker.eventId;
+            if (!groups.has(key)) groups.set(key, { ...marker, labels: [] });
+            groups.get(key).labels.push(marker.label);
+        }
+        return Array.from(groups.values());
+    }
+
+    function renderTabletMarkerLegend() {
+        const container = document.getElementById("batchTabletMarkers");
+        if (!container) return;
+        container.replaceChildren();
+        const markers = tabletMarkerGroups();
+        container.hidden = !markers.length;
+        markers.forEach((marker, index) => {
+            const line = document.createElement("div");
+            line.textContent = `${index + 1}. ${formatTime(marker.timestamp)} — ${marker.labels.join(" · ")}${marker.groupName ? " (" + marker.groupName + ")" : ""}`;
+            container.appendChild(line);
+        });
+    }
+
+    function buildTabletMarkerPlugin(rows) {
+        const times = rows.map(row => parseTimestampMs(row.timestamp));
+        return { afterDatasetsDraw(chart) {
+            const xScale = chart.scales?.["x-axis-0"], area = chart.chartArea, ctx = chart.chart?.ctx;
+            if (!xScale || !area || !ctx || times.length < 2) return;
+            ctx.save();
+            tabletMarkerGroups().forEach((marker, index) => {
+                const at = Date.parse(marker.timestamp);
+                if (at < times[0] || at > times[times.length - 1]) return;
+                const right = times.findIndex(time => time >= at);
+                const left = Math.max(0, right - 1);
+                const fraction = times[right] > times[left] ? (at - times[left]) / (times[right] - times[left]) : 0;
+                const x = xScale.getPixelForValue(null, left) + fraction * (xScale.getPixelForValue(null, right) - xScale.getPixelForValue(null, left));
+                ctx.strokeStyle = "#7c3aed"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+                ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke();
+                ctx.setLineDash([]); ctx.fillStyle = "#7c3aed"; ctx.font = "bold 12px sans-serif";
+                ctx.fillText(String(index + 1), Math.min(x + 4, area.right - 12), area.top + 14 + (index % 2) * 16);
+            });
+            ctx.restore();
+        }};
+    }
+
     function renderTelemetry(points) {
         if (!telemetryCanvas || !telemetryEmpty) {
             return;
@@ -3071,6 +3105,7 @@ $(document).ready(function () {
 
         const rows = Array.isArray(points) ? points : [];
         const actualRows = Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : [];
+        renderTabletMarkerLegend();
         const chartIngredientRows = actualRows.length
             ? actualRows
             : (Array.isArray(state.telemetryPayload?.postprocessIngredients) ? state.telemetryPayload.postprocessIngredients : []);
@@ -3138,7 +3173,7 @@ $(document).ready(function () {
                     ...componentDatasets,
                 ],
             },
-            plugins: [componentZonePlugin],
+            plugins: [componentZonePlugin, buildTabletMarkerPlugin(visibleRows)],
             options: {
                 responsive: true,
                 maintainAspectRatio: false,

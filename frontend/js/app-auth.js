@@ -32,8 +32,8 @@
         "map-zones.html",
         ADMIN_TELEMETRY_PAGE,
     ]);
-    const ADMIN_ONLY_PAGES = new Set([ADMIN_TELEMETRY_PAGE]);
-    const GUEST_RESTRICTED_PAGES = new Set([DIGEST_SETTINGS_PAGE, "loader-terminals.html"]);
+    const ADMIN_ONLY_PAGES = new Set([ADMIN_TELEMETRY_PAGE, "loader-terminals.html"]);
+    const GUEST_RESTRICTED_PAGES = new Set([DIGEST_SETTINGS_PAGE]);
 
     const WRITE_ROLES = new Set([ROLE_ADMIN, ROLE_DIRECTOR]);
 
@@ -503,7 +503,7 @@
             return;
         }
 
-        document.querySelectorAll('a[href="telemetry-admin.html"]').forEach((link) => {
+        document.querySelectorAll('a[href="telemetry-admin.html"], a[href="loader-terminals.html"]').forEach((link) => {
             const navItem = link.closest(".nav-item");
             if (navItem) {
                 navItem.style.display = "none";
@@ -518,7 +518,7 @@
             return;
         }
 
-        document.querySelectorAll('a[href="digest-settings.html"], a[href="/digest/settings"], a[href="loader-terminals.html"]').forEach((link) => {
+        document.querySelectorAll('a[href="digest-settings.html"], a[href="/digest/settings"]').forEach((link) => {
             const navItem = link.closest(".nav-item");
             if (navItem) {
                 navItem.style.display = "none";

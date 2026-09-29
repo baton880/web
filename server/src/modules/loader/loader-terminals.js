@@ -69,7 +69,7 @@ export function createLoaderAuthentication({ authenticate, prisma, terminals }) 
 }
 
 // Mounted before terminal-capable routes, with regular site JWT authentication only.
-export function createTerminalManagementRouter({ prisma, terminals }) {
+export function createTerminalManagementRouter({ prisma, terminals, remote }) {
   const router = Router()
   router.use((req,res,next) => {
     res.set('Cache-Control','no-store')
@@ -77,12 +77,22 @@ export function createTerminalManagementRouter({ prisma, terminals }) {
     next()
   })
   const wrap = action => async (req,res,next) => { try { await action(req,res) } catch(error) { next(error) } }
-  router.get('/', wrap(async (req,res) => res.json({terminals:await terminals.list(req.user)})))
+  const adminOnly = (req,res,next) => req.user?.role === 'ADMIN' ? next() : res.status(403).json({error:'Доступ запрещен: только для администраторов'})
+  const visible = async (req) => {
+    const terminal = (await terminals.list(req.user)).find(t => t.id === req.params.id)
+    if (!terminal || terminal.revokedAt) throw new TaskError(404, 'Терминал недоступен')
+  }
+  if (remote) {
+    router.get('/:id/remote', adminOnly, wrap(async (req,res) => {await visible(req);res.json(remote.status(req.params.id))}))
+    router.post('/:id/remote', adminOnly, wrap(async (req,res) => {await visible(req);res.json({command:remote.enqueue(req.params.id,req.body?.type,req.user)})}))
+    router.get('/:id/screenshot', adminOnly, wrap(async (req,res) => {await visible(req);res.type('png').send(remote.screenshot(req.params.id))}))
+  }
+  router.get('/', adminOnly, wrap(async (req,res) => res.json({terminals:await terminals.list(req.user)})))
   router.post('/', wrap(async (req,res) => {
     const user = await prisma.user.findUnique({where:{id:req.user.id},select:{id:true,role:true,password:true}})
     res.status(201).json({terminal:await terminals.register(req.body,user)})
   }))
-  router.post('/:id/revoke', wrap(async(req,res) => {await terminals.revoke(req.params.id,req.user);res.json({ok:true})}))
+  router.post('/:id/revoke', adminOnly, wrap(async(req,res) => {await terminals.revoke(req.params.id,req.user);res.json({ok:true})}))
   router.use((error,req,res,next) => res.status(error instanceof TaskError ? error.status : 500).json({error:error instanceof TaskError ? error.message:'Не удалось обработать регистрацию'}))
   return router
 }

@@ -1,3 +1,4 @@
+import { getTabletMarkers } from './tablet-markers.js';
 import { Router } from 'express';
 import prisma from "../../database.js";
 import { authenticate, requireAdmin, requireReadAccess, requireWriteAccess } from "../../middleware/auth.js";
@@ -787,6 +788,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
 
         if (!batch) return res.status(404).json({ error: 'Замес не найден' });
 
+        const tabletMarkers = await getTabletMarkers(prisma, batch);
         const includeRtk = req.query.includeRtk === 'true' || req.query.includeRtk === '1';
         const loaderLookbackSeconds = parsePositiveInteger(req.query.loaderLookbackSeconds, 180);
         const hostLookbackSeconds = parsePositiveInteger(req.query.hostLookbackSeconds, 180);
@@ -809,6 +811,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
 
             return res.json({
                 hostTrack: normalizedHostTrack,
+                tabletMarkers,
                 hostContextTrack: normalizedHostTrack,
                 loaderTrack,
                 postprocess: postprocessMeta,
@@ -912,6 +915,7 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
 
         res.json({
             hostTrack: normalizedHostTrack,
+                tabletMarkers,
             hostContextTrack: normalizedHostContextTrack,
             loaderTrack,
             postprocess: buildPostprocessMeta(postprocess),

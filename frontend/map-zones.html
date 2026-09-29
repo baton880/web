@@ -13,7 +13,7 @@
     <link href="vendor/fontawesome-free/css/all.min.css" rel="stylesheet">
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260506e" rel="stylesheet">
+    <link href="css/custom.css?v=20260929b" rel="stylesheet">
     <link href="css/responsive.css" rel="stylesheet">
     <script src="js/app-auth.js?v=20260419a"></script>
     <script src="https://api-maps.yandex.ru/2.1/?apikey=3c050799-23a3-4bd9-a14a-b7eaf2e05511&lang=ru_RU"></script>
@@ -303,6 +303,7 @@
     <div id="wrapper">
 
         <ul class="navbar-nav bg-gradient-primary sidebar sidebar-dark accordion" id="accordionSidebar">
+            <script src="js/sidebar-initial-state.js?v=20260929a"></script>
             <a class="sidebar-brand d-flex align-items-center justify-content-center" href="index.html">
                 <div class="sidebar-brand-icon">
                     <img class="sidebar-brand-logo" src="img/cow.svg" alt="">
@@ -314,43 +315,55 @@
 
             <li class="nav-item nav-item-home">
                 <a class="nav-link" href="index.html">
-                    <i class="fas fa-fw fa-home"></i>
-                    <span>Главная</span>
+                    <i class="fas fa-fw fa-home"></i><span>Главная</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="tables.html">
-                    <i class="fas fa-fw fa-table"></i>
-                    <span>Замесы</span>
+                    <i class="fas fa-fw fa-table"></i><span>Замесы</span>
+                </a>
+            </li>
+
+            <li class="nav-item nav-violations">
+                <a class="nav-link" href="violations.html">
+                    <i class="fas fa-fw fa-exclamation-triangle"></i><span>Нарушения</span>
+                </a>
+            </li>
+
+            <li class="nav-item">
+                <a class="nav-link" href="reports.html">
+                    <i class="fas fa-fw fa-chart-bar"></i><span>Отчеты</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="rations.html">
-                    <i class="fas fa-fw fa-utensils"></i>
-                    <span>Рационы</span>
+                    <i class="fas fa-fw fa-utensils"></i><span>Рационы</span>
                 </a>
             </li>
 
             <li class="nav-item">
                 <a class="nav-link" href="groups.html">
-                    <i class="fas fa-fw fa-tractor"></i>
-                    <span>Группы</span>
+                    <i class="fas fa-fw fa-tractor"></i><span>Группы</span>
                 </a>
             </li>
 
             <li class="nav-item active">
-                <a class="nav-link" href="map-zones.html">
-                    <i class="fas fa-fw fa-map"></i>
-                    <span>Зоны</span>
+                <a class="nav-link" href="map-zones.html" aria-current="page">
+                    <i class="fas fa-fw fa-map"></i><span>Зоны</span>
                 </a>
             </li>
 
-            <li class="nav-item">
+            <li class="nav-item nav-digest">
+                <a class="nav-link" href="digest-settings.html">
+                    <i class="fas fa-fw fa-envelope-open-text"></i><span>Уведомления</span>
+                </a>
+            </li>
+
+            <li class="nav-item nav-admin">
                 <a class="nav-link" href="telemetry-admin.html">
-                    <i class="fas fa-fw fa-broadcast-tower"></i>
-                    <span>Админ панель</span>
+                    <i class="fas fa-fw fa-broadcast-tower"></i><span>Админ панель</span>
                 </a>
             </li>
 
@@ -605,7 +618,7 @@
     <script src="vendor/bootstrap/js/bootstrap.bundle.min.js"></script>
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
-    <script src="js/sidebar-enhancements.js?v=20260726a"></script>
+    <script src="js/sidebar-enhancements.js?v=20260929b"></script>
     <script src="js/storage-zones.js?v=20260822a"></script>
 </body>
 

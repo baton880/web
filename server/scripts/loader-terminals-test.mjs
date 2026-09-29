@@ -35,9 +35,17 @@ app.use('/api/loader/terminals',authenticate,createTerminalManagementRouter({pri
 app.use('/api/loader',createLoaderAuthentication({authenticate,prisma,terminals}),createLoaderRouter({prisma,store:tasks,weightHandler:(req,res)=>res.json({deviceId:req.query.deviceId,weight:500})}))
 app.get('/api/users',authenticate,(req,res)=>res.json({ok:true}))
 const server=app.listen(0,'127.0.0.1');await new Promise(r=>server.once('listening',r));const base='http://127.0.0.1:'+server.address().port
+const adminWeb=jwt.sign({id:2,role:'ADMIN'},webSecret,{expiresIn:'1h'})
+const guestWeb=jwt.sign({id:3,role:'GUEST'},webSecret,{expiresIn:'1h'})
 const web=jwt.sign({id:1,role:'DIRECTOR'},webSecret,{expiresIn:'1h'})
 async function request(route,token=registration.key,body){const r=await fetch(base+route,{method:body?'POST':'GET',headers:{Authorization:'Bearer '+token,'Content-Type':'application/json'},body:body?JSON.stringify(body):undefined});return{status:r.status,data:await r.json()}}
 try{
+ assert.equal((await request('/api/loader/terminals',web)).status,403)
+ assert.equal((await request('/api/loader/terminals',guestWeb)).status,403)
+ assert.equal((await request('/api/loader/terminals/'+first.id+'/revoke',web,{})).status,403)
+ assert.equal((await request('/api/loader/terminals/'+first.id+'/revoke',guestWeb,{})).status,403)
+ assert.equal((await request('/api/loader/terminals',adminWeb)).status,200)
+ assert.equal((await request('/api/loader/terminals',adminWeb)).data.terminals.length,1)
  assert.equal((await request('/api/loader/groups')).status,200)
  assert.equal((await request('/api/loader/weight?deviceId=host')).status,200)
  assert.equal((await request('/api/loader/weight?deviceId=other')).status,403)
@@ -64,7 +72,7 @@ try{
  assert.equal((await request('/api/loader/groups',expired)).status,401)
  assert.equal((await request('/api/loader/groups')).status,200)
  assert.equal((await request('/api/loader/terminals',web,registration)).status,201,'Lost registration response can retry')
- assert.equal((await request('/api/loader/terminals/'+first.id+'/revoke',web,{})).status,200)
+ assert.equal((await request('/api/loader/terminals/'+first.id+'/revoke',adminWeb,{})).status,200)
  assert.equal((await request('/api/loader/groups')).status,401)
  assert.equal((await request('/api/loader/terminals',web,registration)).status,409,'Revocation cannot be undone by replay')
  const changed=candidate();terminals.register(changed,actor);users.set(1,{...actor,password:'password-hash-v2'})

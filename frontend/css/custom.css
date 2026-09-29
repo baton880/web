@@ -16,7 +16,7 @@
 }
 
 .sidebar .nav-item .nav-link {
-    transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease, padding 0.2s ease;
+    transition: background-color 0.2s ease, color 0.2s ease, box-shadow 0.2s ease;
 }
 
 .sidebar .nav-item .nav-link i {
@@ -4408,3 +4408,11 @@ body.bg-gradient-primary .alert-danger {
   background: var(--danger-bg) !important;
   border-color: var(--danger-border) !important;
 }
+
+/* Navigation is complete in HTML; apply role visibility before the first paint. */
+#accordionSidebar:not([data-role="ADMIN"]) .nav-admin,
+#accordionSidebar[data-role="GUEST"] .nav-digest,
+#accordionSidebar[data-role="DIRECTOR"] .nav-violations {
+    display: none !important;
+}
+html { scrollbar-gutter: stable; }

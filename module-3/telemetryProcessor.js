@@ -48,9 +48,6 @@ const HOST_ZONE_INTERSECTION_RADIUS_METERS = 20;
 const MIN_TRACKABLE_WEIGHT_KG = -100;
 const MAX_TRACKABLE_WEIGHT_KG = 8000;
 const RAW_WEIGHT_LEAD_THRESHOLD_KG = 80;
-const RAW_WEIGHT_SMOOTHING_WINDOW = 5;
-const RAW_WEIGHT_SMOOTHING_ALPHA = 0.45;
-const RAW_WEIGHT_CONVERGED_CONFIRM_PACKETS = 3;
 const PRE_LOADING_RECOVERY_MAX_AGE_MS = 45 * 60 * 1000;
 const FORCE_CURRENT_ZONE_INGREDIENT_KEYS = new Set([
   normalizeIngredientName('Комбикорм')
@@ -234,9 +231,6 @@ export class TelemetryProcessor {
       lastKnownNormalLat: null,
       lastKnownNormalLon: null,
       processingWeightMode: 'normal',
-      normalRawConvergedCount: 0,
-      rawWeightSamples: [],
-      rawWeightSmoothed: null,
       preLoadingCandidate: null,
       preLoadingBatchStartTimeMs: null,
       batchStartWeightOverride: null,
@@ -567,14 +561,6 @@ export class TelemetryProcessor {
     return null;
   }
 
-  _getRawWeightTrustThreshold(thresholds = {}) {
-    return Math.max(
-      RAW_WEIGHT_LEAD_THRESHOLD_KG,
-      Number(thresholds.anomalyConfirmDeltaKg || 0) * 2,
-      Number(thresholds.batchStartThresholdKg || 0) * 2
-    );
-  }
-
   _median(values = []) {
     const sorted = values
       .map((value) => Number(value))
@@ -588,106 +574,15 @@ export class TelemetryProcessor {
       : (sorted[middle - 1] + sorted[middle]) / 2;
   }
 
-  _resolveSmoothedRawWeight(state, rawWeight, thresholds = {}) {
-    const parsedRaw = Number(rawWeight);
-    if (!state || !Number.isFinite(parsedRaw) || parsedRaw < MIN_TRACKABLE_WEIGHT_KG) {
-      return Number.isFinite(parsedRaw) ? parsedRaw : null;
-    }
-
-    if (!Array.isArray(state.rawWeightSamples)) {
-      state.rawWeightSamples = [];
-    }
-    state.rawWeightSamples.push(parsedRaw);
-    if (state.rawWeightSamples.length > RAW_WEIGHT_SMOOTHING_WINDOW) {
-      state.rawWeightSamples.shift();
-    }
-
-    const medianRaw = this._median(state.rawWeightSamples);
-    if (!Number.isFinite(Number(medianRaw))) {
-      return parsedRaw;
-    }
-
-    const previousSmoothed = Number(state.rawWeightSmoothed);
-    if (!Number.isFinite(previousSmoothed)) {
-      state.rawWeightSmoothed = Number(medianRaw);
-      return state.rawWeightSmoothed;
-    }
-
-    const maxStep = Math.max(
-      Number(thresholds.anomalyThresholdKg || 0),
-      Number(thresholds.unloadDropThresholdKg || 0),
-      RAW_WEIGHT_LEAD_THRESHOLD_KG * 3
-    );
-    const rawDelta = Number(medianRaw) - previousSmoothed;
-    const boundedDelta = Math.max(-maxStep, Math.min(maxStep, rawDelta));
-    state.rawWeightSmoothed = previousSmoothed + boundedDelta * RAW_WEIGHT_SMOOTHING_ALPHA;
-    return state.rawWeightSmoothed;
-  }
-
   _resolveProcessingWeight(packet, thresholds = {}, state = null) {
-    const normalWeightRaw = Number(packet?.weight);
-    const rawWeightRaw = Number(packet?.rawWeight ?? packet?.raw_weight ?? packet?.raw);
-    const weightValid = this._parsePacketBoolean(packet?.weightValid ?? packet?.weight_valid);
-    const normalTrackable = Number.isFinite(normalWeightRaw)
-      && normalWeightRaw >= MIN_TRACKABLE_WEIGHT_KG
-      && normalWeightRaw <= MAX_TRACKABLE_WEIGHT_KG;
-    const rawTrackable = Number.isFinite(rawWeightRaw)
-      && rawWeightRaw >= MIN_TRACKABLE_WEIGHT_KG
-      && rawWeightRaw <= MAX_TRACKABLE_WEIGHT_KG;
-    const rawTrustThreshold = this._getRawWeightTrustThreshold(thresholds);
-    const smoothedRawWeight = rawTrackable
-      ? this._resolveSmoothedRawWeight(state, rawWeightRaw, thresholds)
-      : null;
-
-    if (normalTrackable && rawTrackable) {
-      const rawDiffKg = rawWeightRaw - normalWeightRaw;
-      const weightsConverged = Math.abs(rawDiffKg) <= rawTrustThreshold;
-
-      if (state) {
-        if (weightsConverged && weightValid !== false) {
-          state.normalRawConvergedCount = Number(state.normalRawConvergedCount || 0) + 1;
-        } else {
-          state.normalRawConvergedCount = 0;
-          state.processingWeightMode = 'raw';
-        }
-
-        if (
-          state.processingWeightMode === 'raw' &&
-          !state.isUnloading &&
-          state.normalRawConvergedCount >= RAW_WEIGHT_CONVERGED_CONFIRM_PACKETS
-        ) {
-          state.processingWeightMode = 'normal';
-        }
-      }
-
-      if (weightsConverged && (!state || state.processingWeightMode !== 'raw')) {
-        return { usable: true, value: normalWeightRaw, source: 'normal' };
-      }
-
-      if (Number.isFinite(Number(smoothedRawWeight))) {
-        return { usable: true, value: Number(smoothedRawWeight), source: 'raw-smoothed' };
-      }
-
-      if (weightValid === false) {
-        return { usable: true, value: rawWeightRaw, source: 'raw' };
-      }
-
-      return { usable: true, value: normalWeightRaw, source: 'normal' };
+    const value = packet?.weight;
+    const weight = value === null || value === undefined || value === '' ? NaN : Number(value);
+    const valid = this._parsePacketBoolean(packet?.weightValid ?? packet?.weight_valid) !== false;
+    if (state) state.processingWeightMode = 'normal';
+    if (!valid || !Number.isFinite(weight) || weight < MIN_TRACKABLE_WEIGHT_KG || weight > MAX_TRACKABLE_WEIGHT_KG) {
+      return { usable: false, value: null, source: null };
     }
-
-    if (normalTrackable) {
-      return { usable: true, value: normalWeightRaw, source: weightValid === false ? 'normal-invalid' : 'normal' };
-    }
-
-    if (rawTrackable) {
-      return {
-        usable: true,
-        value: Number.isFinite(Number(smoothedRawWeight)) ? Number(smoothedRawWeight) : rawWeightRaw,
-        source: Number.isFinite(Number(smoothedRawWeight)) ? 'raw-smoothed' : 'raw'
-      };
-    }
-
-    return { usable: false, value: null, source: null };
+    return { usable: true, value: roundWeight(weight), source: 'normal' };
   }
 
   _clearPreLoadingCandidate(state) {
