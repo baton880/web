@@ -7,6 +7,8 @@
     "dev": "nodemon src/index.js",
     "start": "node src/index.js",
     "test:order-alerts": "node scripts/order-alerts-test.mjs",
+    "test:tablet-ingredients": "node scripts/tablet-ingredients-test.mjs",
+    "backfill:tablet-ingredients": "node scripts/backfill-tablet-ingredients.mjs",
     "test:weight-boundary-stop": "node scripts/weight-step-boundary-stop-test.mjs",
     "test:geo-zone-radius": "node scripts/geo-zone-radius-test.mjs",
     "test:rest-plateau": "node scripts/rest-plateau-test.mjs",

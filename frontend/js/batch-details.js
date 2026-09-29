@@ -879,7 +879,7 @@ $(document).ready(function () {
                 tabindex="0"
             >
                 <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
-                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}</td>
+                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${row?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Подтверждено</span>' : ''}${row?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не подтверждено</span>' : ''}${row?.verificationStatus === 'low_confidence' ? '<span class="badge badge-warning ml-2">Низкая уверенность</span>' : ''}</td>
                 <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
                 <td class="text-center">${renderIngredientActionsCell(row)}</td>

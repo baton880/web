@@ -217,7 +217,7 @@ function buildPostprocessDebugPayload(postprocess) {
         plateaus: Array.isArray(analysis.plateaus) ? analysis.plateaus : [],
         restPlateaus: Array.isArray(analysis.restPlateaus) ? analysis.restPlateaus : [],
         events: Array.isArray(analysis.events) ? analysis.events : [],
-        ingredients: Array.isArray(postprocess?.ingredients) ? postprocess.ingredients : [],
+        ingredients: Array.isArray(postprocess?.algorithmIngredients) ? postprocess.algorithmIngredients : (Array.isArray(postprocess?.ingredients) ? postprocess.ingredients : []),
         replayFrames: Array.isArray(postprocess?.replayFrames) ? postprocess.replayFrames : [],
         summary: {
             loaded: analysis.loaded ?? null,
@@ -506,6 +506,9 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
             endTime: ing.addedAt,
             plan: roundWeight(ing.plannedWeight || 0),
             fact: roundWeight(ing.actualWeight || 0),
+            verificationStatus: ing.verificationStatus || null,
+            verificationReason: ing.verificationReason || null,
+            tabletTaskId: ing.tabletTaskId || null,
             deviation: ing.plannedWeight ? roundWeight(Number(ing.actualWeight || 0) - Number(ing.plannedWeight || 0)) : 0,
             isViolation: summaryViolationByKey.has(normalizeIngredientName(ing.ingredientName))
                 ? summaryViolationByKey.get(normalizeIngredientName(ing.ingredientName))
@@ -650,6 +653,8 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
             const violationStatus = hasOnlyStrawAlfalfaWarning
                 ? 'warning'
                 : (hasLoggedViolations ? 'critical' : 'none');
+            const hasUnverifiedTabletIngredient = b.actualIngredients.some(ingredient =>
+                ingredient.tabletTaskId && ingredient.verificationStatus !== 'confirmed');
 
             return {
                 id: b.id,
@@ -661,6 +666,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 hasViolations: hasLoggedViolations, // Единый источник статуса: журнал нарушений (все зафиксированные кейсы)
                 violationStatus,
                 violationLabel: hasStrawAlfalfaWarning ? 'Сол.+Люц.' : null,
+                hasUnverifiedTabletIngredient,
                 startWeight: roundWeight(b.startWeight || 0),
                 endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
                 totalActualWeight,

@@ -253,6 +253,9 @@ model BatchIngredient {
 
   plannedWeight   Float?   // Пока опционально
   actualWeight    Float
+  tabletTaskId    String?
+  verificationStatus String? // confirmed, unconfirmed, low_confidence; null means legacy
+  verificationReason String?
   startedAt       DateTime? @db.Timestamptz(3)
   startLat        Float?
   startLon        Float?

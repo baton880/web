@@ -7,6 +7,7 @@ import { buildPostprocessedHostTrack, detectWeightStepMarkup, resolveWeightStepO
 import { resolveEffectiveCoordinatesFromRtkPoint } from '../telemetry/telemetry-helpers.js'
 import { singleFlight } from '../../utils/single-flight.js'
 import { nearestTimestampIndex } from '../../utils/nearest-timestamp.js'
+import { findTabletTaskForBatch, verifyTabletSteps } from './tablet-ingredients.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
 const STRAW_INGREDIENT_KEY = normalizeIngredientName('Солома')
@@ -134,7 +135,7 @@ function findExistingIngredientName(batch, event, usedIds = new Set()) {
   return null
 }
 
-function buildCacheKey(batch, telemetryRows, rtkRows = [], resolvedOptions = {}, telemetrySettings = {}) {
+function buildCacheKey(batch, telemetryRows, rtkRows = [], resolvedOptions = {}, telemetrySettings = {}, tabletTask = null) {
   const last = telemetryRows[telemetryRows.length - 1]
   const lastRtk = rtkRows[rtkRows.length - 1]
   return [
@@ -148,7 +149,9 @@ function buildCacheKey(batch, telemetryRows, rtkRows = [], resolvedOptions = {},
     lastRtk?.id || '',
     lastRtk?.timestamp ? new Date(lastRtk.timestamp).toISOString() : '',
     JSON.stringify(resolvedOptions),
-    JSON.stringify(telemetrySettings)
+    JSON.stringify(telemetrySettings),
+    tabletTask?.id || '',
+    tabletTask?.revision || 0
   ].join(':')
 }
 
@@ -790,7 +793,8 @@ async function calculateBatchPostprocess(prismaClient, batch, telemetrySettings 
     analysisStartMs: telemetryLoadStartMs
   })
   const rtkRows = options.rtkRows || await loadPostprocessRtk(prismaClient, telemetryRows, telemetrySettings)
-  const cacheKey = buildCacheKey(batch, telemetryRows, rtkRows, resolvedOptions, telemetrySettings)
+  const tabletTask = await findTabletTaskForBatch(prismaClient, batch)
+  const cacheKey = buildCacheKey(batch, telemetryRows, rtkRows, resolvedOptions, telemetrySettings, tabletTask)
   const cached = POSTPROCESS_CACHE.get(batch.id)
   if (!options.disableCache && cached?.cacheKey === cacheKey && (!options.requirePersisted || cached.persisted)) {
     return cached.result
@@ -851,7 +855,9 @@ async function calculateBatchPostprocess(prismaClient, batch, telemetrySettings 
     status: 'complete',
     reason: null,
     analysis,
-    ingredients: postprocessed.ingredients,
+    ingredients: tabletTask ? verifyTabletSteps(tabletTask, postprocessed.ingredients) : postprocessed.ingredients,
+    algorithmIngredients: postprocessed.ingredients,
+    tabletTaskId: tabletTask?.id || null,
     replayFrames: postprocessed.replayFrames,
     hostTrack: buildGraphHostTrack(analysis, telemetryRows),
     generatedAt: new Date()
@@ -887,6 +893,9 @@ export async function postprocessCompletedBatch(prismaClient, batchId, telemetry
           batchId: batch.id,
           ingredientName: ingredient.ingredientName,
           actualWeight: roundWeight(ingredient.actualWeight || 0),
+          tabletTaskId: ingredient.tabletTaskId || null,
+          verificationStatus: ingredient.verificationStatus || null,
+          verificationReason: ingredient.verificationReason || null,
           startedAt: ingredient.startedAt,
           startLat: ingredient.startLat,
           startLon: ingredient.startLon,

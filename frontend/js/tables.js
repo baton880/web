@@ -281,19 +281,21 @@ $(document).ready(function () {
     }
 
     function renderBatchViolationBadge(row, value) {
+        const verificationBadge = row?.hasUnverifiedTabletIngredient
+            ? '<span class="dashboard-bool-badge is-warning">Проверить компоненты</span>' : '';
         const warningLabel = row?.violationLabel || null;
         if (String(row?.violationStatus || "").toLowerCase() === "warning") {
-            return `<span class="batch-violation-badges"><span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel || "Сол.+Люц.")}</span></span>`;
+            return `<span class="batch-violation-badges"><span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel || "Сол.+Люц.")}</span>${verificationBadge}</span>`;
         }
 
         if (warningLabel && asBoolean(value)) {
             return `<span class="batch-violation-badges">${[
                 `<span class="dashboard-bool-badge is-warning">${escapeHtml(warningLabel)}</span>`,
-                renderBooleanBadge(true)
+                renderBooleanBadge(true), verificationBadge
             ].join(" ")}</span>`;
         }
 
-        return `<span class="batch-violation-badges">${renderBooleanBadge(asBoolean(value))}</span>`;
+        return `<span class="batch-violation-badges">${renderBooleanBadge(asBoolean(value))}${verificationBadge}</span>`;
     }
 
     function getPostprocessStatus(row) {
@@ -347,6 +349,9 @@ $(document).ready(function () {
                             <div class="font-weight-bold text-gray-800">
                                 ${name}
                                 ${asBoolean(ingredient?.isViolation) ? '<span class="badge badge-danger ml-2">Отклонение</span>' : ""}
+                                ${ingredient?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Подтверждено</span>' : ''}
+                                ${ingredient?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не подтверждено</span>' : ''}
+                                ${ingredient?.verificationStatus === 'low_confidence' ? '<span class="badge badge-warning ml-2">Низкая уверенность</span>' : ''}
                             </div>
                             <div class="text-muted">${metaParts.length ? metaParts.join(" &middot; ") : "Без деталей по компоненту"}</div>
                         </div>

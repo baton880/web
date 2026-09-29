@@ -252,6 +252,9 @@ model BatchIngredient {
   
   plannedWeight   Float?   // Пока опционально
   actualWeight    Float    
+  tabletTaskId    String?
+  verificationStatus String?
+  verificationReason String?
   startedAt       DateTime?
   startLat        Float?
   startLon        Float?

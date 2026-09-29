@@ -250,6 +250,15 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
         ...plan.ingredients.map((item) => [normalizeIngredientName(item.name), item.name])
     ]);
     const persistedViolationMap = new Map((batch?.actualIngredients || []).map((item) => [normalizeIngredientName(item.ingredientName), item.isViolation]));
+    const verificationMap = new Map();
+    for (const item of batch?.actualIngredients || []) {
+        const key = normalizeIngredientName(item.ingredientName);
+        const current = verificationMap.get(key);
+        const status = item.verificationStatus || null;
+        if (!current || (status === 'unconfirmed') || (status === 'low_confidence' && current.status === 'confirmed')) {
+            verificationMap.set(key, { status, reason: item.verificationReason || null });
+        }
+    }
     const names = new Set([...planMap.keys(), ...factMap.keys()]);
 
     return Array.from(names).map((key) => {
@@ -275,6 +284,8 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             name,
             plan: roundWeight(planWeight),
             fact: roundWeight(factWeight),
+            verificationStatus: verificationMap.get(key)?.status || null,
+            verificationReason: verificationMap.get(key)?.reason || null,
             deviation_percent: deviationPercent,
             is_violation: isViolation,
             isCompound: Boolean(planItem?.isCompound),
