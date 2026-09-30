@@ -255,6 +255,8 @@ model BatchIngredient {
   tabletTaskId    String?
   verificationStatus String?
   verificationReason String?
+  algorithmIngredientName String?
+  algorithmWeight Float?
   startedAt       DateTime?
   startLat        Float?
   startLon        Float?

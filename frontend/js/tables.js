@@ -118,6 +118,10 @@ $(document).ready(function () {
                         return type === "display" ? statusMarkup : "";
                     }
 
+                    if (row?.hasIngredientFacts === false) {
+                        return type === "display" ? '<span class="text-muted">Нет данных</span>' : "";
+                    }
+
                     const formattedWeight = formatWeight(data);
                     if (type !== "display") {
                         return Number.isFinite(Number(data)) ? Number(data) : "";
@@ -266,6 +270,9 @@ $(document).ready(function () {
     }
 
     function formatWeight(value) {
+        if (value === null || value === undefined || value === "") {
+            return "";
+        }
         const numericValue = Number(value);
         if (!Number.isFinite(numericValue)) {
             return "";
@@ -319,6 +326,10 @@ $(document).ready(function () {
             return statusMarkup;
         }
 
+        if (row?.hasIngredientFacts === false) {
+            return '<span class="text-muted">Нет данных о компонентах</span>';
+        }
+
         if (!ingredients.length) {
             return '<span class="text-muted">Нет компонентов</span>';
         }
@@ -341,7 +352,19 @@ $(document).ready(function () {
                     }
 
                     if (fact) {
-                        metaParts.push(`Факт: ${escapeHtml(fact)}`);
+                        metaParts.push(`${ingredient?.verificationStatus ? 'Планшет' : 'Факт'}: ${escapeHtml(fact)}`);
+                    }
+                    if (ingredient?.verificationStatus === 'unconfirmed') {
+                        const suspected = ingredient?.algorithmIngredientName
+                            ? `${escapeHtml(ingredient.algorithmIngredientName)}${ingredient.algorithmWeight == null ? '' : `, ${escapeHtml(formatWeight(ingredient.algorithmWeight))}`}`
+                            : 'компонент не определён';
+                        metaParts.push(`Алгоритм предполагает: ${suspected}`);
+                    }
+                    if (ingredient?.verificationStatus === 'low_confidence') {
+                        metaParts.push('Положение погрузчика не определено');
+                        if (ingredient?.algorithmIngredientName) {
+                            metaParts.push(`Алгоритм предполагает: ${escapeHtml(ingredient.algorithmIngredientName)}`);
+                        }
                     }
 
                     return `
@@ -349,8 +372,8 @@ $(document).ready(function () {
                             <div class="font-weight-bold text-gray-800">
                                 ${name}
                                 ${asBoolean(ingredient?.isViolation) ? '<span class="badge badge-danger ml-2">Отклонение</span>' : ""}
-                                ${ingredient?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Подтверждено</span>' : ''}
-                                ${ingredient?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не подтверждено</span>' : ''}
+                                ${ingredient?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Согласны</span>' : ''}
+                                ${ingredient?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не согласны</span>' : ''}
                                 ${ingredient?.verificationStatus === 'low_confidence' ? '<span class="badge badge-warning ml-2">Низкая уверенность</span>' : ''}
                             </div>
                             <div class="text-muted">${metaParts.length ? metaParts.join(" &middot; ") : "Без деталей по компоненту"}</div>

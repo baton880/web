@@ -256,6 +256,8 @@ model BatchIngredient {
   tabletTaskId    String?
   verificationStatus String? // confirmed, unconfirmed, low_confidence; null means legacy
   verificationReason String?
+  algorithmIngredientName String?
+  algorithmWeight Float?
   startedAt       DateTime? @db.Timestamptz(3)
   startLat        Float?
   startLon        Float?

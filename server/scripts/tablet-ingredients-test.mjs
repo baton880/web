@@ -12,6 +12,11 @@ const task = {
 }
 assert.equal(selectTabletTask(batch, [{ state: JSON.stringify(task) }])?.id, 'tablet-task')
 assert.equal(selectTabletTask({ ...batch, groupId: 6 }, [{ state: JSON.stringify(task) }]), null)
+const delayedTask = { ...task, steps: task.steps.map((step, index) => ({ ...step,
+  baseline: { timestampMs: start + (index ? 14 : 11) * 60000 },
+  end: { timestampMs: start + (index ? 16 : 13) * 60000 }
+})), lastEventAt: start + 16 * 60000 }
+assert.equal(selectTabletTask(batch, [{ state: JSON.stringify(delayedTask) }])?.id, 'tablet-task')
 const detected = [
   { ingredientName: 'Силос', actualWeight: 1015, startedAt: new Date(start + 10000), addedAt: new Date(start + 160000) },
   { ingredientName: 'Солома', actualWeight: 100, startedAt: new Date(start + 245000), addedAt: new Date(start + 290000), determination: { positionDebug: { loaderEligible: false } } }
@@ -25,4 +30,6 @@ const contradictoryLoader = [{ ingredientName: 'Люцерна', actualWeight: 1
   startedAt: new Date(start + 245000), addedAt: new Date(start + 290000),
   determination: { positionDebug: { loaderEligible: true } } }]
 assert.equal(verifyTabletSteps(task, contradictoryLoader)[1].verificationStatus, 'unconfirmed')
+assert.equal(verifyTabletSteps(task, contradictoryLoader)[1].algorithmIngredientName, 'Люцерна')
+assert.equal(verifyTabletSteps(task, contradictoryLoader)[1].algorithmWeight, 100)
 console.log('Tablet facts and verification: OK')

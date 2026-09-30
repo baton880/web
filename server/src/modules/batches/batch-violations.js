@@ -256,7 +256,12 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
         const current = verificationMap.get(key);
         const status = item.verificationStatus || null;
         if (!current || (status === 'unconfirmed') || (status === 'low_confidence' && current.status === 'confirmed')) {
-            verificationMap.set(key, { status, reason: item.verificationReason || null });
+            verificationMap.set(key, {
+                status,
+                reason: item.verificationReason || null,
+                algorithmIngredientName: item.algorithmIngredientName || null,
+                algorithmWeight: item.algorithmWeight ?? null
+            });
         }
     }
     const names = new Set([...planMap.keys(), ...factMap.keys()]);
@@ -286,6 +291,12 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             fact: roundWeight(factWeight),
             verificationStatus: verificationMap.get(key)?.status || null,
             verificationReason: verificationMap.get(key)?.reason || null,
+            algorithmIngredientName: verificationMap.get(key)?.algorithmIngredientName
+                ? (normalizeIngredientName(verificationMap.get(key).algorithmIngredientName) === key
+                    ? name
+                    : toDisplayIngredientName(verificationMap.get(key).algorithmIngredientName))
+                : null,
+            algorithmWeight: verificationMap.get(key)?.algorithmWeight ?? null,
             deviation_percent: deviationPercent,
             is_violation: isViolation,
             isCompound: Boolean(planItem?.isCompound),

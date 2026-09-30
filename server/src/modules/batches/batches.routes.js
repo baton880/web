@@ -508,6 +508,12 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
             fact: roundWeight(ing.actualWeight || 0),
             verificationStatus: ing.verificationStatus || null,
             verificationReason: ing.verificationReason || null,
+            algorithmIngredientName: ing.algorithmIngredientName
+                ? (normalizeIngredientName(ing.algorithmIngredientName) === normalizeIngredientName(ing.ingredientName)
+                    ? toDisplayIngredientName(ing.ingredientName)
+                    : toDisplayIngredientName(ing.algorithmIngredientName))
+                : null,
+            algorithmWeight: ing.algorithmWeight ?? null,
             tabletTaskId: ing.tabletTaskId || null,
             deviation: ing.plannedWeight ? roundWeight(Number(ing.actualWeight || 0) - Number(ing.plannedWeight || 0)) : 0,
             isViolation: summaryViolationByKey.has(normalizeIngredientName(ing.ingredientName))
@@ -642,7 +648,8 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
         // Форматируем ответ для удобной таблицы фронтенда
         const formattedBatches = batches.map(b => {
             const ingredients = buildIngredientSummary(b, telemetrySettings);
-            const totalActualWeight = b.endTime
+            const hasIngredientFacts = b.actualIngredients.length > 0;
+            const totalActualWeight = b.endTime && hasIngredientFacts
                 ? roundWeight(ingredients.reduce((sum, ingredient) => sum + Number(ingredient?.fact || 0), 0))
                 : null;
             const hasLoggedViolations = (b.violations?.length || 0) > 0;
@@ -670,6 +677,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 startWeight: roundWeight(b.startWeight || 0),
                 endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
                 totalActualWeight,
+                hasIngredientFacts,
                 ingredients,
                 postprocess: {
                     status: b.endTime ? 'complete' : 'in_progress',

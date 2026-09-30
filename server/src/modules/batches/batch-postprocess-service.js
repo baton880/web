@@ -829,10 +829,13 @@ async function calculateBatchPostprocess(prismaClient, batch, telemetrySettings 
 
   if (analysis.status !== 'complete') {
     const result = {
-      status: analysis.status,
-      reason: analysis.reason,
+      status: tabletTask ? 'complete' : analysis.status,
+      reason: tabletTask ? 'tablet_facts_without_weight_analysis' : analysis.reason,
       analysis,
-      ingredients: [],
+      ingredients: tabletTask ? verifyTabletSteps(tabletTask) : [],
+      algorithmIngredients: [],
+      tabletTaskId: tabletTask?.id || null,
+      hostTrack: buildGraphHostTrack(analysis, telemetryRows),
       generatedAt: new Date()
     }
     if (!options.disableCache) {
@@ -896,6 +899,8 @@ export async function postprocessCompletedBatch(prismaClient, batchId, telemetry
           tabletTaskId: ingredient.tabletTaskId || null,
           verificationStatus: ingredient.verificationStatus || null,
           verificationReason: ingredient.verificationReason || null,
+          algorithmIngredientName: ingredient.algorithmIngredientName || null,
+          algorithmWeight: ingredient.algorithmWeight ?? null,
           startedAt: ingredient.startedAt,
           startLat: ingredient.startLat,
           startLon: ingredient.startLon,

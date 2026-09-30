@@ -1,4 +1,5 @@
 import { normalizeIngredientName } from '../../../../module-2/rationManager.js'
+import { roundWeight } from '../../../../module-2/weightRounding.js'
 
 const ASSOCIATION_TOLERANCE_MS = 3 * 60 * 1000
 const STRAW = normalizeIngredientName('Солома')
@@ -18,15 +19,14 @@ export function selectTabletTask(batch, tasks) {
     const first = ms(state?.steps?.[0]?.baseline?.timestampMs)
     const last = ms(state?.lastEventAt)
     if (state?.status !== 'completed' || !first || !last ||
-        first < start - ASSOCIATION_TOLERANCE_MS || first > start + ASSOCIATION_TOLERANCE_MS ||
+        first < start - ASSOCIATION_TOLERANCE_MS || first > end + ASSOCIATION_TOLERANCE_MS ||
         last > end + ASSOCIATION_TOLERANCE_MS || last < start) return []
     if (Number(state.groupId) !== Number(batch.groupId) || Number(state.rationId) !== Number(batch.rationId)) return []
     if (!state.steps?.length || state.steps.some(step => !step.end || !Number.isFinite(Number(step.actualKg)))) return []
     return [{ ...state, associationDistanceMs: Math.abs(first - start) }]
   }).sort((a, b) => a.associationDistanceMs - b.associationDistanceMs)
-  // A nearby competing task is ambiguous: never attribute its weights to this batch.
-  return candidates.length > 1 && candidates[1].associationDistanceMs - candidates[0].associationDistanceMs < 30000
-    ? null : candidates[0] || null
+  // Two completed tasks in one batch cannot be attributed safely by time alone.
+  return candidates.length === 1 ? candidates[0] : null
 }
 
 export async function findTabletTaskForBatch(prisma, batch) {
@@ -49,7 +49,8 @@ export async function findTabletTaskForBatch(prisma, batch) {
   const adjacentBatches = await prisma.batch.findMany({
     where: {
       deviceId: batch.deviceId, groupId: batch.groupId, rationId: batch.rationId,
-      startTime: { gte: new Date(first - ASSOCIATION_TOLERANCE_MS), lte: new Date(first + ASSOCIATION_TOLERANCE_MS) }
+      startTime: { lte: new Date(first + ASSOCIATION_TOLERANCE_MS) },
+      endTime: { gte: new Date(first - ASSOCIATION_TOLERANCE_MS) }
     },
     select: { id: true, startTime: true }
   })
@@ -63,26 +64,41 @@ export function verifyTabletSteps(task, detectedIngredients = []) {
     const start = ms(step.baseline?.timestampMs)
     const end = ms(step.end?.timestampMs)
     const tabletName = normalizeIngredientName(step.name)
-    const candidates = detectedIngredients.filter(detected => {
+    const candidates = detectedIngredients.flatMap(detected => {
       const detectedStart = new Date(detected.startedAt).getTime()
       const detectedEnd = new Date(detected.addedAt).getTime()
-      return Number.isFinite(detectedStart) && Number.isFinite(detectedEnd) &&
-        detectedEnd >= start && detectedStart <= end
+      if (!Number.isFinite(detectedStart) || !Number.isFinite(detectedEnd) ||
+          detectedEnd < start || detectedStart > end) return []
+      const duration = Math.max(1, detectedEnd - detectedStart)
+      const overlap = Math.max(0, Math.min(end, detectedEnd) - Math.max(start, detectedStart))
+      const fraction = detectedEnd === detectedStart ? 1 : overlap / duration
+      return [{ ...detected, contributionKg: Number(detected.actualWeight || 0) * fraction }]
     })
-    const matching = candidates.filter(detected => normalizeIngredientName(detected.ingredientName) === tabletName)
-    const detectedWeight = matching.reduce((sum, row) => sum + Number(row.actualWeight || 0), 0)
+    const guesses = new Map()
+    for (const row of candidates) {
+      const key = normalizeIngredientName(row.ingredientName)
+      if (!key || key === 'unknown') continue
+      const guess = guesses.get(key) || { name: row.ingredientName, weight: 0 }
+      guess.weight += row.contributionKg
+      guesses.set(key, guess)
+    }
+    const dominant = [...guesses.values()].sort((a, b) => b.weight - a.weight)[0] || null
+    const matching = guesses.get(tabletName)
+    const detectedWeight = matching?.weight || 0
     const actualWeight = Number(step.actualKg)
     const weightMatches = Math.abs(detectedWeight - actualWeight) <= Math.max(30, actualWeight * 0.1)
     const isStrawOrAlfalfa = tabletName === STRAW || tabletName === ALFALFA
     const loaderPositionReliable = candidates.some(row => row.determination?.positionDebug?.loaderEligible === true)
     let verificationStatus = 'unconfirmed'
-    let verificationReason = matching.length ? 'weight_mismatch' : 'ingredient_not_detected'
+    let verificationReason = matching ? 'weight_mismatch' : 'ingredient_not_detected'
     if (isStrawOrAlfalfa && !loaderPositionReliable) {
       verificationStatus = 'low_confidence'
       verificationReason = 'loader_position_uncertain'
-    } else if (matching.length && weightMatches) {
+    } else if (matching && dominant && normalizeIngredientName(dominant.name) === tabletName && weightMatches) {
       verificationStatus = 'confirmed'
       verificationReason = 'algorithm_match'
+    } else if (dominant && normalizeIngredientName(dominant.name) !== tabletName) {
+      verificationReason = 'ingredient_disagreement'
     }
     return {
       ingredientName: step.name,
@@ -92,6 +108,8 @@ export function verifyTabletSteps(task, detectedIngredients = []) {
       tabletTaskId: task.id,
       verificationStatus,
       verificationReason,
+      algorithmIngredientName: dominant?.name || null,
+      algorithmWeight: dominant ? roundWeight(dominant.weight) : null,
       startLat: null, startLon: null, endLat: null, endLon: null
     }
   })

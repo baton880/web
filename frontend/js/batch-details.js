@@ -840,6 +840,23 @@ $(document).ready(function () {
             </div>`;
     }
 
+    function renderTabletVerification(row) {
+        if (row?.verificationStatus === 'confirmed') {
+            return '<span class="badge badge-success ml-2">Согласны</span>';
+        }
+        if (row?.verificationStatus === 'low_confidence') {
+            const guess = row?.algorithmIngredientName ? `; алгоритм предполагает: ${escapeHtml(row.algorithmIngredientName)}` : '';
+            return `<span class="badge badge-warning ml-2">Низкая уверенность</span><small class="d-block text-warning">Положение погрузчика не определено${guess}</small>`;
+        }
+        if (row?.verificationStatus === 'unconfirmed') {
+            const suspected = row?.algorithmIngredientName
+                ? `${escapeHtml(row.algorithmIngredientName)}${row.algorithmWeight == null ? '' : `, ${escapeHtml(formatWeight(row.algorithmWeight))}`}`
+                : 'компонент не определён';
+            return `<span class="badge badge-warning ml-2">Не согласны</span><small class="d-block text-warning">Алгоритм предполагает: ${suspected}</small>`;
+        }
+        return '';
+    }
+
     function renderIngredientList(rows) {
         if (!ingredientListBody) {
             return;
@@ -879,8 +896,8 @@ $(document).ready(function () {
                 tabindex="0"
             >
                 <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
-                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${row?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Подтверждено</span>' : ''}${row?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не подтверждено</span>' : ''}${row?.verificationStatus === 'low_confidence' ? '<span class="badge badge-warning ml-2">Низкая уверенность</span>' : ''}</td>
-                <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}</td>
+                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${renderTabletVerification(row)}</td>
+                <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}${row?.tabletTaskId ? '<small class="d-block text-muted">Планшет</small>' : ''}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
                 <td class="text-center">${renderIngredientActionsCell(row)}</td>
             </tr>
