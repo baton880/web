@@ -310,6 +310,7 @@ $(document).ready(function () {
     }
 
     function renderPostprocessStatus(row) {
+        if (row?.processingMode === 'realtime-v1') return null;
         const status = getPostprocessStatus(row);
         if (status === "in_progress") {
             return '<span class="dashboard-bool-badge is-no">В процессе</span>';
@@ -318,6 +319,49 @@ $(document).ready(function () {
             return '<span class="dashboard-bool-badge is-no">Обрабатывается</span>';
         }
         return null;
+    }
+
+    function renderIngredientSignal(kind, icon, label) {
+        const safeLabel = escapeHtml(label);
+        return `<span class="ingredient-signal ingredient-signal--${kind}" role="img" tabindex="0" aria-label="${safeLabel}" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></span>`;
+    }
+
+    function getLowConfidenceText(reason) {
+        if (reason === "pair_tablet_hint") return "Солома/люцерна выбрана по планшету: погрузчик не подтвердил компонент";
+        if (reason === "calibration_changed") return "В ходе загрузки изменилась калибровка";
+        if (reason === "insufficient_telemetry") return "Недостаточно измерений веса";
+        if (reason === "host_position_missing" || reason === "rtk_unavailable" || reason === "ingredient_unknown") return "Недостаточно данных GPS для уверенного определения компонента";
+        return "Недостаточно данных для уверенного определения компонента";
+    }
+
+    function renderIngredientSignals(ingredient, verification) {
+        const signals = [];
+        if (verification.weightPlanViolation) {
+            signals.push(renderIngredientSignal("danger", "fa-exclamation", verification.weightViolationMessage || verification.criticalMessage));
+        }
+        if (verification.orderViolation) {
+            signals.push(renderIngredientSignal("danger", "fa-sort-amount-down", verification.orderMessage));
+        }
+        if (verification.weightConfirmed) {
+            signals.push(renderIngredientSignal("success", "fa-check", `Вес принят по алгоритму: допуск меньше ${verification.weightTolerancePercent}% либо до ${verification.weightToleranceMinKg} кг включительно`));
+        }
+        if (verification.weightMismatch) {
+            signals.push(renderIngredientSignal("warning", "fa-exclamation", `Вес алгоритма выходит за допуск: ${verification.weightTolerancePercent}% / минимум ${verification.weightToleranceMinKg} кг`));
+        }
+        if (verification.identityMismatch) {
+            signals.push(renderIngredientSignal("warning", "fa-exclamation", "Алгоритм определил другой компонент"));
+        } else if (verification.lowConfidence) {
+            signals.push(renderIngredientSignal("warning", "fa-exclamation", getLowConfidenceText(verification.reason)));
+        } else if (verification.algorithmWarning && !verification.weightMismatch) {
+            signals.push(renderIngredientSignal("warning", "fa-exclamation", "Алгоритм видит отклонение, которого нет по данным планшета"));
+        }
+        if (verification.pending) {
+            signals.push(renderIngredientSignal("info", "fa-clock", "Проверка ожидает следующее измерение HOST"));
+        }
+        if (!verification.hasTablet && ingredient?.verificationStatus === "confirmed") {
+            signals.push(renderIngredientSignal("info", "fa-map-marker-alt", "Компонент определён алгоритмом по GPS"));
+        }
+        return signals.join("");
     }
 
     function renderIngredients(ingredients, row) {
@@ -335,48 +379,34 @@ $(document).ready(function () {
         }
 
         return `
-            <div class="small">
+            <div class="ingredient-summary-list">
                 ${ingredients.map((ingredient, index) => {
                     const name = escapeHtml(ingredient?.name || "Без названия");
                     const ingredientTime = formatIngredientTime(ingredient?.time);
                     const plan = formatWeight(ingredient?.plan);
                     const fact = formatWeight(ingredient?.fact);
-                    const metaParts = [];
-
-                    if (ingredientTime) {
-                        metaParts.push(`Время: ${escapeHtml(ingredientTime)}`);
+                    const verification = window.IngredientVerificationUi.inspect(ingredient);
+                    const detailRows = [];
+                    if (verification.weightMismatch) {
+                        detailRows.push(`<span>Планшет: ${escapeHtml(formatWeight(verification.tabletWeight))}</span><span>Алгоритм: ${escapeHtml(formatWeight(verification.algorithmWeight))}</span>`);
                     }
-
-                    if (plan) {
-                        metaParts.push(`План: ${escapeHtml(plan)}`);
-                    }
-
-                    if (fact) {
-                        metaParts.push(`${ingredient?.verificationStatus ? 'Планшет' : 'Факт'}: ${escapeHtml(fact)}`);
-                    }
-                    if (ingredient?.verificationStatus === 'unconfirmed') {
-                        const suspected = ingredient?.algorithmIngredientName
-                            ? `${escapeHtml(ingredient.algorithmIngredientName)}${ingredient.algorithmWeight == null ? '' : `, ${escapeHtml(formatWeight(ingredient.algorithmWeight))}`}`
-                            : 'компонент не определён';
-                        metaParts.push(`Алгоритм предполагает: ${suspected}`);
-                    }
-                    if (ingredient?.verificationStatus === 'low_confidence') {
-                        metaParts.push('Положение погрузчика не определено');
-                        if (ingredient?.algorithmIngredientName) {
-                            metaParts.push(`Алгоритм предполагает: ${escapeHtml(ingredient.algorithmIngredientName)}`);
-                        }
+                    if (verification.identityMismatch) {
+                        detailRows.push(`<span class="ingredient-summary__note ingredient-summary__note--warning">Алгоритм считает, что загружен компонент «${escapeHtml(verification.algorithmName || "другой компонент")}»</span>`);
+                    } else if (verification.algorithmWarning && !verification.weightMismatch) {
+                        detailRows.push('<span class="ingredient-summary__note ingredient-summary__note--warning">Алгоритм видит отклонение от плана</span>');
                     }
 
                     return `
-                        <div class="${index < ingredients.length - 1 ? "mb-2 pb-2 border-bottom" : ""}">
-                            <div class="font-weight-bold text-gray-800">
-                                ${name}
-                                ${asBoolean(ingredient?.isViolation) ? '<span class="badge badge-danger ml-2">Отклонение</span>' : ""}
-                                ${ingredient?.verificationStatus === 'confirmed' ? '<span class="badge badge-success ml-2">Согласны</span>' : ''}
-                                ${ingredient?.verificationStatus === 'unconfirmed' ? '<span class="badge badge-warning ml-2">Не согласны</span>' : ''}
-                                ${ingredient?.verificationStatus === 'low_confidence' ? '<span class="badge badge-warning ml-2">Низкая уверенность</span>' : ''}
+                        <div class="ingredient-summary${index < ingredients.length - 1 ? " ingredient-summary--divided" : ""}">
+                            <div class="ingredient-summary__header">
+                                <span class="ingredient-summary__name">${name}</span>
+                                <span class="ingredient-summary__signals">${renderIngredientSignals(ingredient, verification)}</span>
                             </div>
-                            <div class="text-muted">${metaParts.length ? metaParts.join(" &middot; ") : "Без деталей по компоненту"}</div>
+                            <div class="ingredient-summary__metric${verification.weightPlanViolation ? " ingredient-summary__metric--danger" : ""}">
+                                <span title="Фактический вес">${escapeHtml(fact || "Нет данных")}</span>${plan ? `<span class="ingredient-summary__slash">/</span><span title="Вес по плану">${escapeHtml(plan)}</span>` : ""}
+                            </div>
+                            ${detailRows.length ? `<div class="ingredient-summary__details">${detailRows.join("")}</div>` : ""}
+                            ${ingredientTime ? `<div class="ingredient-summary__time">${escapeHtml(ingredientTime)}</div>` : ""}
                         </div>
                     `;
                 }).join("")}

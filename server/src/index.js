@@ -148,6 +148,7 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
       // Формируем красивый ответ
       res.json({
         status: 'ok',
+        batchCalculation: { mode: process.env.BATCH_PROCESSING_MODE || 'legacy', rtk: process.env.REALTIME_RTK_MODE || 'auto' },
         storage: { main: isPostgresDatabase ? 'postgres' : 'sqlite', ingress: usePostgresIngress ? 'postgres' : 'sqlite' },
         message: 'Сервер работает нормально',
         uptime: Math.floor(process.uptime()) + ' секунд',

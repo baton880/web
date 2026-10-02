@@ -228,7 +228,8 @@
             violationsCount,
             openViolationsCount: Number(item.openViolationsCount ?? 0) || 0,
             resolvedViolationsCount: Number(item.resolvedViolationsCount ?? 0) || 0,
-            hasViolations: violationsCount > 0 || Boolean(item.hasViolations),
+            hasViolations: item.openViolationsCount != null ? Number(item.openViolationsCount) > 0 : Boolean(item.hasViolations),
+            violationStatus: item.violationStatus || (item.hasViolations ? 'critical' : 'none'),
         };
     }
 
@@ -400,10 +401,10 @@
         }
 
         elements.batchesTableBody.innerHTML = state.batches.map((item) => {
-            const statusClassName = item.hasViolations
+            const statusClassName = item.violationStatus === 'warning' ? 'reports-status dashboard-bool-badge is-warning' : item.hasViolations
                 ? "reports-status reports-status--danger"
                 : "reports-status reports-status--success";
-            const statusLabel = item.hasViolations ? "Есть нарушения" : "Без нарушений";
+            const statusLabel = item.violationStatus === 'warning' ? 'Алгоритм не согласен' : item.hasViolations ? "Есть нарушения" : "Без нарушений";
             const batchHref = item.id
                 ? `batch-details.html?id=${encodeURIComponent(item.id)}&date=${encodeURIComponent(item.dateKey)}`
                 : "";
@@ -421,7 +422,7 @@
                     <td>${escapeHtml(item.groupName)}</td>
                     <td><span class="reports-number">${escapeHtml(formatWeight(item.planTotal))}</span></td>
                     <td><span class="reports-number">${escapeHtml(formatWeight(item.factTotal))}</span></td>
-                    <td><span class="reports-count-badge">${item.violationsCount}</span></td>
+                    <td><span class="reports-count-badge">${item.openViolationsCount}</span>${item.resolvedViolationsCount ? `<div class="small text-muted">Закрыто: ${item.resolvedViolationsCount}</div>` : ''}</td>
                     <td><span class="${statusClassName}">${statusLabel}</span></td>
                 </tr>
             `;
@@ -593,7 +594,7 @@
         ];
 
         const batches = [
-            ["Дата", "Замес", "Рацион", "Группа", "План", "Факт", "Нарушения", "Статус"],
+            ["Дата", "Замес", "Рацион", "Группа", "План", "Факт", "Активные нарушения", "Закрытые нарушения", "Статус"],
             ...state.batches.map((item) => [
                 formatDateTime(item.date),
                 item.label,
@@ -601,8 +602,9 @@
                 item.groupName,
                 formatWeight(item.planTotal),
                 formatWeight(item.factTotal),
-                String(item.violationsCount),
-                item.hasViolations ? "Есть нарушения" : "Без нарушений",
+                String(item.openViolationsCount),
+                String(item.resolvedViolationsCount),
+                item.violationStatus === 'warning' ? 'Алгоритм не согласен' : item.hasViolations ? "Есть нарушения" : "Без нарушений",
             ]),
         ];
 

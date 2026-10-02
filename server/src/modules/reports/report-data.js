@@ -61,6 +61,8 @@ function getBatchRationName(batch) {
 export function toUiViolationStatus(violation) {
     if (violation.status === 'RESOLVED') return 'closed';
     if (violation.status === 'CLOSED') return 'closed';
+    if (violation.source === 'tablet' || violation.code === 'TABLET_DEVIATION') return 'critical';
+    if (violation.source === 'algorithm' || String(violation.code).startsWith('ALGORITHM_')) return 'open';
     if (violation.status === 'IN_PROGRESS') return 'in_progress';
     if (violation.code === 'STRAW_ALFALFA_TOTAL_MISMATCH') return 'critical';
     if (violation.code === 'STRAW_ALFALFA_RATIO_MISMATCH') return 'open';
@@ -153,6 +155,11 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                     ingredientName: true,
                     plannedWeight: true,
                     actualWeight: true,
+                    tabletTaskId: true,
+                    verificationStatus: true,
+                    verificationReason: true,
+                    algorithmIngredientName: true,
+                    algorithmWeight: true,
                     isViolation: true,
                     startedAt: true,
                     addedAt: true
@@ -167,7 +174,10 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 where: { status: { in: WORKFLOW_STATUSES_ALL } },
                 select: {
                     id: true,
-                    status: true
+                    status: true,
+                    source: true,
+                    code: true,
+                    deviationPercent: true
                 }
             }
         },
@@ -179,15 +189,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
 
     const violations = await prisma.violation.findMany({
         where: {
-            batch: {
-                is: { endTime: { not: null } }
-            },
-            ...(fromDate || toDate ? {
-                detectedAt: {
-                    ...(fromDate ? { gte: fromDate } : {}),
-                    ...(toDate ? { lte: toDate } : {})
-                }
-            } : {}),
+            // Report the same batches as the table, even when a historical
+            // recalculation gave their violations a newer detectedAt.
+            batchId: { in: batches.map(batch => batch.id) },
             status: { in: WORKFLOW_STATUSES_ALL }
         },
         include: {
@@ -217,8 +221,11 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
 
     for (const batch of batches) {
         const plan = getBatchPlan(batch);
+        const componentRows = buildIngredientSummary(batch, telemetrySettings);
         const facts = aggregateFacts(batch.actualIngredients || []);
-        const factTotal = facts.reduce((sum, item) => sum + Number(item.actualWeight || 0), 0);
+        const factTotal = batch.processingMode === 'realtime-v1'
+            ? componentRows.reduce((sum, item) => sum + Number(item.fact || 0), 0)
+            : facts.reduce((sum, item) => sum + Number(item.actualWeight || 0), 0);
         const batchDate = buildBatchDate(batch);
         const feedingsPerDay = getBatchFeedingsPerDay(batch);
 
@@ -241,10 +248,11 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             violationsCount,
             openViolationsCount,
             resolvedViolationsCount: resolvedForBatchCount,
-            hasViolations: openViolationsCount > 0
+            hasViolations: openViolationsCount > 0,
+            violationStatus: batch.violations.some(row => WORKFLOW_STATUSES_ACTIVE.has(row.status) && toUiViolationStatus(row) === 'critical')
+                ? 'critical' : openViolationsCount > 0 ? 'warning' : 'none'
         });
 
-        const componentRows = buildIngredientSummary(batch, telemetrySettings);
         for (const componentRow of componentRows) {
             if (componentRow.isCompound && Array.isArray(componentRow.components) && componentRow.components.length > 0) {
                 for (const child of componentRow.components) {
@@ -261,7 +269,8 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                         fact: Number(child.fact || 0),
                         deviation: Number(child.fact || 0) - Number(child.plan || 0),
                         deviationPercent: child.deviation_percent ?? 0,
-                        isViolation: Boolean(child.isViolation ?? child.is_violation)
+                        isViolation: Boolean(child.isViolation ?? child.is_violation),
+                        violationStatus: componentRow.violationStatus || (child.isViolation ? 'critical' : 'none')
                     });
                 }
                 continue;
@@ -280,14 +289,15 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
                 fact: roundWeight(componentRow.fact || 0),
                 deviation: roundWeight((componentRow.fact || 0) - (componentRow.plan || 0)),
                 deviationPercent: componentRow.deviation_percent ?? 0,
-                isViolation: Boolean(componentRow.isViolation ?? componentRow.is_violation)
+                isViolation: Boolean(componentRow.isViolation ?? componentRow.is_violation),
+                violationStatus: componentRow.violationStatus || (componentRow.isViolation ? 'critical' : 'none')
             });
         }
     }
 
     for (const violation of violations) {
         const batch = violation.batch;
-        const batchDate = violation.detectedAt || buildBatchDate(batch);
+        const batchDate = buildBatchDate(batch);
         const severityStatus = toUiViolationStatus(violation);
         const workflowStatus = String(violation.status || 'OPEN').toUpperCase();
         const groupName = batch?.group?.name || 'Без группы';
@@ -306,6 +316,7 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
         incrementCounter(componentsCounter, componentName);
         incrementCounter(groupsCounter, groupName);
 
+        const orderViolation = violation.code === 'ORDER_MISMATCH';
         reportViolations.push({
             id: violation.id,
             batchId: violation.batchId,
@@ -317,9 +328,9 @@ export async function collectReportData({ fromDate = null, toDate = null, limit 
             component: componentName,
             type: violation.title,
             violationType: violation.title,
-            plan: roundWeight(violation.planWeight || 0),
-            fact: roundWeight(violation.actualWeight || 0),
-            deviation: roundWeight(violation.deviation || 0),
+            plan: orderViolation ? Number(violation.planWeight || 0) : roundWeight(violation.planWeight || 0),
+            fact: orderViolation ? Number(violation.actualWeight || 0) : roundWeight(violation.actualWeight || 0),
+            deviation: orderViolation ? Number(violation.deviation || 0) : roundWeight(violation.deviation || 0),
             status: severityStatus,
             workflowStatus,
             code: violation.code,

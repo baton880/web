@@ -2,6 +2,10 @@ import { calculatePlan, checkViolations, normalizeIngredientName } from '../../.
 import { roundWeight } from '../../../../module-2/weightRounding.js';
 import { syncBatchViolationLog } from '../violations/violation-service.js';
 import { getTelemetrySettings } from '../telemetry/telemetry-settings.js';
+import { buildRealtimeAssessment, effectiveRealtimeWeight, selectRealtimeFactRows } from './realtime-ingredient-verification.js';
+import { buildOrderViolations, sortPlanIngredients } from './ingredient-order.js';
+
+export { buildOrderViolations } from './ingredient-order.js';
 
 const STRAW_KEY = normalizeIngredientName('Солома');
 const ALFALFA_KEY = normalizeIngredientName('Люцерна');
@@ -29,83 +33,6 @@ function parseCompoundComponents(value) {
     } catch (error) {
         return [];
     }
-}
-
-function getIngredientSortOrder(ingredient, fallbackIndex = 0) {
-    const parsed = Number(ingredient?.sortOrder);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : fallbackIndex + 1;
-}
-
-function sortPlanIngredients(ingredients) {
-    return [...(Array.isArray(ingredients) ? ingredients : [])].sort((left, right) => {
-        const orderDiff = getIngredientSortOrder(left) - getIngredientSortOrder(right);
-        if (orderDiff !== 0) return orderDiff;
-
-        const leftId = Number(left?.id || 0);
-        const rightId = Number(right?.id || 0);
-        if (leftId !== rightId) return leftId - rightId;
-
-        return String(left?.name || '').localeCompare(String(right?.name || ''), 'ru');
-    });
-}
-
-function getIngredientTimestampMs(ingredient) {
-    const parsed = new Date(ingredient?.startedAt || ingredient?.addedAt || 0).getTime();
-    return Number.isFinite(parsed) ? parsed : 0;
-}
-
-export function buildOrderViolations(planIngredients, actualIngredients) {
-    const expectedSequence = sortPlanIngredients(planIngredients)
-        .filter((ingredient) => normalizeIngredientName(ingredient?.name))
-        .map((ingredient, index) => ({
-            key: normalizeIngredientName(ingredient.name),
-            name: toDisplayIngredientName(ingredient.name),
-            position: index + 1
-        }));
-
-    if (expectedSequence.length <= 1) {
-        return [];
-    }
-
-    const expectedByKey = new Map(expectedSequence.map((item) => [item.key, item]));
-    const actualSequence = [...(Array.isArray(actualIngredients) ? actualIngredients : [])]
-        .sort((left, right) => {
-            const timeDiff = getIngredientTimestampMs(left) - getIngredientTimestampMs(right);
-            if (timeDiff !== 0) return timeDiff;
-            return Number(left?.id || 0) - Number(right?.id || 0);
-        })
-        .map((ingredient) => ({
-            key: normalizeIngredientName(ingredient?.ingredientName),
-            name: toDisplayIngredientName(ingredient?.ingredientName),
-            weight: roundWeight(ingredient?.actualWeight || 0)
-        }))
-        .filter((ingredient) => ingredient.weight > 0 && expectedByKey.has(ingredient.key));
-
-    const violations = [];
-    const loadedKeys = new Set();
-    let maxExpectedPosition = 0;
-
-    actualSequence.forEach((actual, actualIndex) => {
-        const expected = expectedByKey.get(actual.key);
-        if (!expected) return;
-
-        if (!loadedKeys.has(actual.key)) {
-            if (expected.position < maxExpectedPosition) {
-                violations.push({
-                    code: 'ORDER_MISMATCH',
-                    ingredient: actual.name,
-                    plan: expected.position,
-                    fact: actualIndex + 1,
-                    deviationPercent: 0,
-                    message: `Компонент "${actual.name}" загружен ${actualIndex + 1}-м, но в рационе должен идти ${expected.position}-м`
-                });
-            }
-            maxExpectedPosition = Math.max(maxExpectedPosition, expected.position);
-            loadedKeys.add(actual.key);
-        }
-    });
-
-    return violations;
 }
 
 function buildCompoundComponentSummaries(planItem, parentPlanWeight, parentFactWeight, parentIsViolation = false) {
@@ -239,6 +166,12 @@ export function getBatchPlan(batch) {
 export function buildIngredientSummary(batch, deviationOptions = null) {
     const deviationSettings = resolveDeviationSettings(deviationOptions);
     const plan = getBatchPlan(batch);
+    if (batch.processingMode === 'realtime-v1') {
+        return buildRealtimeAssessment(batch, plan.ingredients, deviationSettings).summary.map(({ planItem, ...row }) => ({
+            ...row,
+            components: buildCompoundComponentSummaries(planItem, row.plan, row.fact, row.isViolation)
+        }));
+    }
     const facts = aggregateFacts(batch?.actualIngredients || []);
     const hasPlanContext = plan.ingredients.length > 0;
     const factMap = new Map(facts.map((item) => [normalizeIngredientName(item.name), item.actualWeight]));
@@ -281,9 +214,13 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
             : (hasPlanContext
                 ? factWeight > 0
                 : Boolean(factWeight > 0 || persistedViolationMap.get(key) || key === 'unknown'));
-        const isViolation = hasStrawAlfalfaPlan && isStrawAlfalfaKey(key)
-            ? false
-            : rawIsViolation;
+        const unresolvedRealtime = batch.processingMode === 'realtime-v1' && (batch.actualIngredients || []).some(row =>
+            ['rtk_unavailable', 'ingredient_unknown', 'host_position_missing', 'calibration_changed'].includes(row.verificationReason));
+        const unidentified = (batch.actualIngredients || []).some(row =>
+            normalizeIngredientName(row.ingredientName) === key &&
+            ['rtk_unavailable', 'ingredient_unknown', 'host_position_missing', 'calibration_changed'].includes(row.verificationReason));
+        const isViolation = (hasStrawAlfalfaPlan && isStrawAlfalfaKey(key)) || unidentified
+            ? false : rawIsViolation && (!unresolvedRealtime || factWeight > planWeight);
 
         return {
             name,
@@ -305,10 +242,12 @@ export function buildIngredientSummary(batch, deviationOptions = null) {
     });
 }
 
-export function buildUnloadProgress(batch, currentWeight, machineState = {}) {
+export function buildUnloadProgress(batch, currentWeight, machineState = {}, telemetrySettings = {}) {
     if (!batch) return null;
 
-    const factLoaded = aggregateFacts(batch.actualIngredients || []).reduce((sum, item) => sum + item.actualWeight, 0);
+    const factLoaded = batch.processingMode === 'realtime-v1'
+        ? selectRealtimeFactRows(batch.actualIngredients).reduce((sum, item) => sum + effectiveRealtimeWeight(item, telemetrySettings), 0)
+        : aggregateFacts(batch.actualIngredients || []).reduce((sum, item) => sum + item.actualWeight, 0);
     const peakWeight = Math.max(Number(machineState.peakWeight || 0), Number(batch.startWeight || 0) + factLoaded);
     const targetWeight = factLoaded > 0 ? factLoaded : Math.max(0, peakWeight - Number(batch.startWeight || 0));
     const unloadedFact = Math.max(0, peakWeight - Number(currentWeight || 0));
@@ -431,8 +370,45 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         return { status: 'missing', hasViolations: false };
     }
 
+    if (batch.processingMode === 'realtime-v1') {
+        const realtimeSettings = deviationOptions || await getTelemetrySettings(prisma);
+        const plan = getBatchPlan(batch);
+        const assessment = buildRealtimeAssessment(batch, plan.ingredients, realtimeSettings);
+        const byKey = new Map(assessment.summary.map(row => [normalizeIngredientName(row.name), row]));
+        for (const row of batch.actualIngredients) {
+            const summary = byKey.get(normalizeIngredientName(row.ingredientName));
+            await prisma.batchIngredient.update({ where: { id: row.id }, data: {
+                // The signed tablet plan is fixed at begin, like its fact.
+                ...(row.tabletTaskId ? {} : { plannedWeight: summary?.plan || 0 }),
+                isViolation: Boolean(summary?.isViolation)
+            } });
+        }
+        const detectedAt = batch.endTime || batch.actualIngredients.reduce((latest, row) =>
+            new Date(row.addedAt) > new Date(latest) ? row.addedAt : latest, batch.startTime);
+        await syncBatchViolationLog(prisma, batch, { violations: assessment.violations }, new Date(detectedAt));
+        const otherActiveViolations = await prisma.violation.count({
+            where: {
+                batchId: batch.id,
+                category: { not: 'BUSINESS' },
+                status: { in: ['OPEN', 'IN_PROGRESS'] }
+            }
+        });
+        const hasViolations = assessment.hasCritical || assessment.hasWarning || otherActiveViolations > 0;
+        await prisma.batch.update({ where: { id: batch.id }, data: {
+            hasViolations
+        } });
+        return { status: 'ok', hasViolations,
+            violations: assessment.violations };
+    }
+
+    const uncertainKeys = new Set(batch.processingMode === 'realtime-v1' ? batch.actualIngredients
+        .filter(row => ['rtk_unavailable', 'ingredient_unknown', 'host_position_missing', 'calibration_changed'].includes(row.verificationReason))
+        .map(row => normalizeIngredientName(row.ingredientName)) : []);
+    const unresolvedRealtime = uncertainKeys.size > 0;
+
     const plan = getBatchPlan(batch);
     if (!plan.ingredients.length) {
+        if (unresolvedRealtime) return { status: 'uncertain', hasViolations: false, violations: [] };
         const facts = aggregateFacts(batch.actualIngredients);
         const syntheticViolations = facts
             .filter((item) => !isStrawAlfalfaKey(normalizeIngredientName(item.name)))
@@ -479,12 +455,13 @@ export async function recalculateBatchViolations(prisma, batchId, deviationOptio
         percentThreshold: deviationSettings.percentThreshold,
         minDeviationKg: deviationSettings.minDeviationKg
     });
-    const strawAlfalfaViolation = buildStrawAlfalfaViolation(plan.ingredients, facts, deviationSettings);
+    const strawAlfalfaViolation = unresolvedRealtime ? null : buildStrawAlfalfaViolation(plan.ingredients, facts, deviationSettings);
     const hasStrawAlfalfaPlan = plan.ingredients.some((item) => isStrawAlfalfaKey(normalizeIngredientName(item.name)));
-    const weightViolations = check.violations.filter((item) => (
+    const weightViolations = check.violations.filter(item => !uncertainKeys.has(normalizeIngredientName(item.ingredient)) &&
+        (!unresolvedRealtime || Number(item.fact) > Number(item.plan))).filter((item) => (
         !(hasStrawAlfalfaPlan && isStrawAlfalfaKey(normalizeIngredientName(item.ingredient)))
     ));
-    const orderViolations = buildOrderViolations(plan.ingredients, batch.actualIngredients)
+    const orderViolations = (unresolvedRealtime ? [] : buildOrderViolations(plan.ingredients, batch.actualIngredients))
         .filter((item) => !(hasStrawAlfalfaPlan && isStrawAlfalfaKey(normalizeIngredientName(item.ingredient))));
     const ratioViolations = strawAlfalfaViolation
         ? [strawAlfalfaViolation]

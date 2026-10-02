@@ -9,6 +9,10 @@ function toViolationDescriptor(violation) {
     ? Math.round(((deviation / plan) * 100) * 10) / 10
     : (fact > 0 ? 100 : 0)
 
+  if (['TABLET_DEVIATION', 'ALGORITHM_DEVIATION', 'ALGORITHM_INGREDIENT_MISMATCH'].includes(violation?.code)) {
+    return { code: violation.code, title: violation.title, message: violation.message, deviation, deviationPercent }
+  }
+
   if (violation?.code === 'STRAW_ALFALFA_RATIO_MISMATCH') {
     return {
       code: 'STRAW_ALFALFA_RATIO_MISMATCH',
@@ -115,6 +119,10 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
     const componentKey = buildComponentKey(violation.ingredient)
     const compositeKey = `${descriptor.code}:${componentKey}`
     const existingItem = existingMap.get(compositeKey)
+    const positionViolation = descriptor.code === 'ORDER_MISMATCH'
+    const storedPlan = positionViolation ? Number(violation.plan || 0) : roundWeight(violation.plan)
+    const storedFact = positionViolation ? Number(violation.fact || 0) : roundWeight(violation.fact)
+    const storedDeviation = positionViolation ? Number(descriptor.deviation || 0) : roundWeight(descriptor.deviation)
     activeKeys.add(compositeKey)
 
     await db.violation.upsert({
@@ -131,9 +139,10 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         componentName: violation.ingredient || null,
         message: descriptor.message,
         category: 'BUSINESS',
-        planWeight: roundWeight(violation.plan),
-        actualWeight: roundWeight(violation.fact),
-        deviation: roundWeight(descriptor.deviation),
+        source: violation.source || 'system',
+        planWeight: storedPlan,
+        actualWeight: storedFact,
+        deviation: storedDeviation,
         deviationPercent: descriptor.deviationPercent,
         detectedAt,
         resolvedAt: null,
@@ -150,10 +159,11 @@ export async function syncBatchViolationLog(db, batch, checkResult, detectedAt =
         componentName: violation.ingredient || null,
         message: descriptor.message,
         category: 'BUSINESS',
+        source: violation.source || 'system',
         status: defaultWorkflowStatus,
-        planWeight: roundWeight(violation.plan),
-        actualWeight: roundWeight(violation.fact),
-        deviation: roundWeight(descriptor.deviation),
+        planWeight: storedPlan,
+        actualWeight: storedFact,
+        deviation: storedDeviation,
         deviationPercent: descriptor.deviationPercent,
         detectedAt
       }

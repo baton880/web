@@ -517,6 +517,7 @@ function renderActiveBatch(batch) {
         const fact = formatMetric(row?.fact, 1);
         const deviation = formatSignedPercent(row?.deviation_percent, 1);
         const isViolation = asBoolean(row?.is_violation);
+        const algorithmWarning = row?.violationStatus === 'warning';
 
         return `
             <tr>
@@ -525,8 +526,8 @@ function renderActiveBatch(batch) {
                 <td>${fact}</td>
                 <td>${deviation}</td>
                 <td>
-                    <span class="dashboard-bool-badge ${isViolation ? "is-yes" : "is-no"}">
-                        ${isViolation ? "Да" : "Нет"}
+                    <span class="dashboard-bool-badge ${isViolation ? "is-yes" : algorithmWarning ? 'is-warning' : "is-no"}">
+                        ${isViolation ? "Да" : algorithmWarning ? 'Алгоритм не согласен' : "Нет"}
                     </span>
                 </td>
             </tr>

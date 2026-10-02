@@ -34,6 +34,8 @@ const TELEMETRY_SETTINGS_NUMERIC_FIELDS = [
     "squareHeadingMaxAngleDeg",
     "deviationPercentThreshold",
     "deviationMinKgThreshold",
+    "tabletAlgorithmWeightTolerancePercent",
+    "tabletAlgorithmWeightToleranceMinKg",
 ];
 const TELEMETRY_SETTINGS_FLOAT_FIELDS = [
     "weightCalibrationFactor",
@@ -419,7 +421,7 @@ async function loadTelemetrySettings() {
 
         const updatedAt = settings?.updatedAt ? formatDateTime(settings.updatedAt) : "--";
         setTelemetrySettingsMeta(`Последнее изменение: ${updatedAt}`);
-        setText("telemetrySettingsState", "Настройки влияют на замес, нарушения, антишум и ежедневную очистку треков.");
+        setText("telemetrySettingsState", "Настройки влияют на замес, сверку алгоритма с планшетом, нарушения, антишум и ежедневную очистку треков.");
     } catch (error) {
         setTelemetrySettingsMeta("Не удалось загрузить настройки");
         setText("telemetrySettingsState", "Сервер не отдал настройки телеметрии.");
@@ -505,7 +507,7 @@ async function saveTelemetrySettings(event) {
         fillTelemetrySettingsForm(settings);
         const updatedAt = settings?.updatedAt ? formatDateTime(settings.updatedAt) : formatDateTime(new Date().toISOString());
         setTelemetrySettingsMeta(`Последнее изменение: ${updatedAt}`);
-        setText("telemetrySettingsState", "Настройки сохранены: антишум, пороги нарушений и расписание очистки треков применены.");
+        setText("telemetrySettingsState", "Настройки сохранены: сверка алгоритма с планшетом, антишум, пороги нарушений и очистка треков применены.");
         window.AppAuth?.showAlert?.("Настройки телеметрии сохранены", "success");
     } catch (error) {
         setText("telemetrySettingsState", "Не удалось сохранить настройки телеметрии.");

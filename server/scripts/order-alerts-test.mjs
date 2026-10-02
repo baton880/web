@@ -120,6 +120,24 @@ runCase('extra components do not break order validation', () => {
   assert.deepEqual(buildOrderViolations(plan, actual), [])
 })
 
+runCase('repeated fact rows do not inflate reported order position', () => {
+  const plan = [
+    { id: 1, name: 'Люцерна', sortOrder: 1 },
+    { id: 2, name: 'Комбикорм', sortOrder: 2 },
+    { id: 3, name: 'Зерносенаж', sortOrder: 3 }
+  ]
+  const actual = [
+    { id: 1, ingredientName: 'Зерносенаж', actualWeight: 500, addedAt: '2026-06-27T10:00:00.000Z' },
+    { id: 2, ingredientName: 'Зерносенаж', actualWeight: 100, addedAt: '2026-06-27T10:01:00.000Z' },
+    { id: 3, ingredientName: 'Зерносенаж', actualWeight: 50, addedAt: '2026-06-27T10:02:00.000Z' },
+    { id: 4, ingredientName: 'Комбикорм', actualWeight: 300, addedAt: '2026-06-27T10:03:00.000Z' }
+  ]
+
+  const violation = buildOrderViolations(plan, actual)[0]
+  assert.equal(violation.plan, 2)
+  assert.equal(violation.fact, 3)
+})
+
 runCase('daily ration weights are divided by feedings per day', () => {
   const plan = calculatePlan(
     [
@@ -343,6 +361,8 @@ await (async function runReportIntegrationCase() {
 
     assert.equal(reportViolations.length, 1, 'collectReportData should expose relative order violations')
     assert.ok(reportViolations.every((item) => item.status === 'critical'))
+    assert.equal(reportViolations[0].plan, 2)
+    assert.equal(reportViolations[0].fact, 3)
     assert.ok(reportData.summary.counts.violationsCritical >= 1)
   } finally {
     if (batch?.id) {
@@ -445,5 +465,33 @@ await (async function runFeedingsReportIntegrationCase() {
   console.error('FAIL report integration divides daily ration by feedings')
   throw error
 })
+
+await (async function reportUsesBatchPeriod() {
+  const deviceId = `__report_period_${Date.now()}`
+  const today = todayAt(12)
+  const old = addMinutes(today, -3 * 24 * 60)
+  const ids = []
+  try {
+    for (const [startTime, detectedAt] of [[today, old], [old, today]]) {
+      const batch = await prisma.batch.create({ data: {
+        deviceId, startTime, endTime: addMinutes(startTime, 3),
+        violations: { create: {
+          deviceId, code: 'ALGORITHM_DEVIATION', source: 'algorithm',
+          title: 'Period fixture', message: 'Period fixture', detectedAt
+        } }
+      } })
+      ids.push(batch.id)
+    }
+    const report = await collectReportData({ ...todayReportPeriod(), limit: 50 })
+    assert.ok(report.violations.some(row => row.batchId === ids[0]), 'Current batch stays in the report despite an older detection timestamp')
+    assert.ok(!report.violations.some(row => row.batchId === ids[1]), 'Historical recalculation must not move an old batch into today')
+    assert.equal(new Date(report.violations.find(row => row.batchId === ids[0]).date).getTime(), addMinutes(today, 3).getTime())
+    assert.ok(report.violations.every(row => report.batches.some(batch => batch.id === row.batchId)))
+    console.log('PASS report period follows batches, not recalculation timestamps')
+  } finally {
+    await prisma.violation.deleteMany({ where: { batchId: { in: ids } } })
+    await prisma.batch.deleteMany({ where: { id: { in: ids } } })
+  }
+})()
 
 console.log('PASS order alerts suite')

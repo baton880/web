@@ -604,6 +604,16 @@
                                         <small class="form-text text-muted">Даже при маленьком плане нарушение сработает только при отклонении выше этого минимума.</small>
                                     </div>
                                     <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryTabletAlgorithmWeightTolerancePercent">Алгоритм ↔ планшет, %</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryTabletAlgorithmWeightTolerancePercent" name="tabletAlgorithmWeightTolerancePercent" required>
+                                        <small class="form-text text-muted">Вес считается подтверждённым, если расхождение меньше этого процента.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
+                                        <label class="small font-weight-bold text-primary text-uppercase" for="telemetryTabletAlgorithmWeightToleranceMinKg">Алгоритм ↔ планшет, минимум кг</label>
+                                        <input type="number" min="1" step="1" class="form-control" id="telemetryTabletAlgorithmWeightToleranceMinKg" name="tabletAlgorithmWeightToleranceMinKg" required>
+                                        <small class="form-text text-muted">Расхождение до этого значения включительно допустимо даже для маленького веса.</small>
+                                    </div>
+                                    <div class="col-xl-4 col-md-6 mb-3">
                                         <label class="small font-weight-bold text-primary text-uppercase" for="telemetryRtkTrackResetTime">Автоочистка треков</label>
                                         <input type="time" step="60" class="form-control" id="telemetryRtkTrackResetTime" name="rtkTrackResetTime" required>
                                         <small class="form-text text-muted">Фоновая очистка треков «Хозяин» и «Погрузчик» каждый день по расписанию (часовой пояс сервера).</small>
@@ -660,7 +670,7 @@
                                     </div>
                                 </div>
                                 <div class="d-flex flex-wrap align-items-center justify-content-between gap-3">
-                                    <div class="small text-muted" id="telemetrySettingsState">Настройки влияют на замес, движения, нарушения, антишум и ежедневную очистку треков.</div>
+                                    <div class="small text-muted" id="telemetrySettingsState">Настройки влияют на замес, сверку алгоритма с планшетом, движения, нарушения, антишум и ежедневную очистку треков.</div>
                                     <button type="submit" class="btn btn-primary" id="telemetrySettingsSubmitButton">Сохранить настройки</button>
                                 </div>
                             </form>
@@ -814,7 +824,7 @@
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
     <script src="js/sidebar-enhancements.js?v=20260929b"></script>
-    <script src="js/telemetry.js?v=20260822a"></script>
+    <script src="js/telemetry.js?v=20261002weight-tolerance"></script>
     <script src="js/admin-users.js?v=20260501a"></script>
     <script src="js/loader-terminals.js?v=20260929remote"></script>
 

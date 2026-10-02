@@ -573,6 +573,17 @@ function testReplayRollbackAfterForcedFailure() {
     fs.copyFileSync(sourceDatabasePath, databasePath)
 
     let database = new Database(databasePath)
+    const telemetrySettingsColumns = new Set(database.pragma('table_info(TelemetrySettings)').map(row => row.name))
+    if (!telemetrySettingsColumns.has('tabletAlgorithmWeightTolerancePercent')) {
+      database.exec('ALTER TABLE TelemetrySettings ADD COLUMN tabletAlgorithmWeightTolerancePercent INTEGER NOT NULL DEFAULT 5')
+    }
+    if (!telemetrySettingsColumns.has('tabletAlgorithmWeightToleranceMinKg')) {
+      database.exec('ALTER TABLE TelemetrySettings ADD COLUMN tabletAlgorithmWeightToleranceMinKg INTEGER NOT NULL DEFAULT 5')
+    }
+    const batchColumns = new Set(database.pragma('table_info(Batch)').map(row => row.name))
+    if (!batchColumns.has('processingMode')) {
+      database.exec("ALTER TABLE Batch ADD COLUMN processingMode TEXT NOT NULL DEFAULT 'legacy'")
+    }
     database.prepare(`
       INSERT INTO Batch (deviceId, startTime, startWeight, hasViolations)
       VALUES ('rollback-sentinel', ?, 0, 0)

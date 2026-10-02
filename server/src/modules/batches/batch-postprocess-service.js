@@ -8,6 +8,8 @@ import { resolveEffectiveCoordinatesFromRtkPoint } from '../telemetry/telemetry-
 import { singleFlight } from '../../utils/single-flight.js'
 import { nearestTimestampIndex } from '../../utils/nearest-timestamp.js'
 import { findTabletTaskForBatch, verifyTabletSteps } from './tablet-ingredients.js'
+import { REALTIME_REVISION } from './realtime-processor-adapter.js'
+import { effectiveRealtimeWeight, selectRealtimeFactRows } from './realtime-ingredient-verification.js'
 
 const POSTPROCESS_CONTEXT_MS = 10 * 60 * 1000
 const STRAW_INGREDIENT_KEY = normalizeIngredientName('Солома')
@@ -875,6 +877,34 @@ export async function postprocessCompletedBatch(prismaClient, batchId, telemetry
   const batch = options.batch || await loadBatchForPostprocess(prismaClient, batchId)
   if (!batch) {
     return { status: 'missing', reason: 'batch_missing' }
+  }
+
+  if (batch.processingMode === REALTIME_REVISION && options.debugPreview === true) {
+    // The admin laboratory may compare the historical detector, read-only.
+    return buildBatchPostprocess(prismaClient, batch, telemetrySettings, { ...options, persist: false })
+  }
+  if (batch.processingMode === REALTIME_REVISION) {
+    const ingredients = batch.actualIngredients || await prismaClient.batchIngredient.findMany({
+      where: { batchId: batch.id }, orderBy: [{ startedAt: 'asc' }, { id: 'asc' }]
+    })
+    const rows = await prismaClient.telemetry.findMany({ where: { deviceId: batch.deviceId,
+      timestamp: { gte: new Date(new Date(batch.startTime).getTime() - 180000),
+        lte: new Date(new Date(batch.endTime || Date.now()).getTime() + 180000) } },
+      select: { id: true, timestamp: true, weight: true, weightValid: true, lat: true, lon: true, speedKmh: true },
+      orderBy: [{ timestamp: 'asc' }, { id: 'asc' }] })
+    const effectiveIngredients = selectRealtimeFactRows(ingredients).map(row => ({
+      ...row,
+      tabletWeight: row.tabletTaskId ? roundWeight(row.actualWeight || 0) : null,
+      actualWeight: effectiveRealtimeWeight(row, telemetrySettings)
+    }))
+    const loaded = roundWeight(effectiveIngredients.reduce((sum, row) => sum + row.actualWeight, 0))
+    const remaining = Math.max(0, Number(batch.endWeight ?? rows.at(-1)?.weight ?? batch.startWeight))
+    return { status: batch.endTime ? 'complete' : 'in_progress', reason: 'realtime_saved_facts', persisted: true,
+      ingredients: effectiveIngredients, hostTrack: rows.map(row => ({ ...row, weight: row.weightValid ? row.weight : null })),
+      analysis: { loaded, unloaded: Math.max(0, loaded - remaining), net: remaining,
+        first: batch.startWeight, last: batch.endWeight, bounds: { startTime: batch.startTime, endTime: batch.endTime },
+        includedEvents: effectiveIngredients.map(row => ({ id: row.id, startTime: row.startedAt, endTime: row.addedAt,
+          delta: row.actualWeight, kind: 'load', artifact: false })), points: [], plateaus: [], restPlateaus: [] } }
   }
 
   const result = await buildBatchPostprocess(prismaClient, batch, telemetrySettings, options)

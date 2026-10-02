@@ -149,6 +149,8 @@ model TelemetrySettings {
   squareHeadingMaxAngleDeg Int    @default(90)
   deviationPercentThreshold Int   @default(10)
   deviationMinKgThreshold   Int   @default(10)
+  tabletAlgorithmWeightTolerancePercent Int @default(5)
+  tabletAlgorithmWeightToleranceMinKg   Int @default(5)
   rtkTrackResetTime         String @default("03:00")
   rtkHeadingOffsetDeg       Float  @default(0)
   weightCalibrationFactor   Float  @default(1)
@@ -224,6 +226,7 @@ model LivestockGroup {
 model Batch {
   id              Int      @id @default(autoincrement())
   deviceId        String
+  processingMode  String   @default("legacy")
 
   startTime       DateTime @default(now()) @db.Timestamptz(3)
   endTime         DateTime? @db.Timestamptz(3)

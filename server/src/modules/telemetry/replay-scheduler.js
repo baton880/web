@@ -387,7 +387,7 @@ export class CalculatedReplayScheduler {
 }
 
 const replayScheduler = new CalculatedReplayScheduler({
-  enabled: String(process.env.RTK_BUFFER_REPLAY_ENABLED || '1').trim() !== '0',
+  enabled: process.env.BATCH_PROCESSING_MODE !== 'realtime' && String(process.env.RTK_BUFFER_REPLAY_ENABLED || '1').trim() !== '0',
   replayDebounceMs: process.env.RTK_BUFFER_REPLAY_DEBOUNCE_MS,
   bufferQuietDebounceMs: process.env.TELEMETRY_BUFFER_REPLAY_DEBOUNCE_MS,
   bufferDrainedDebounceMs: process.env.RTK_BUFFER_DRAINED_REPLAY_DEBOUNCE_MS,

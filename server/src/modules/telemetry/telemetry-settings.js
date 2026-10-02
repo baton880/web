@@ -34,6 +34,8 @@ export const DEFAULT_TELEMETRY_SETTINGS = {
   squareHeadingMaxAngleDeg: 90,
   deviationPercentThreshold: 10,
   deviationMinKgThreshold: 10,
+  tabletAlgorithmWeightTolerancePercent: 5,
+  tabletAlgorithmWeightToleranceMinKg: 5,
   rtkTrackResetTime: '03:00',
   rtkHeadingOffsetDeg: 0,
   weightCalibrationFactor: 1,
@@ -146,6 +148,8 @@ export function coerceTelemetrySettings(row = {}) {
     squareHeadingMaxAngleDeg: toBoundedInteger(row.squareHeadingMaxAngleDeg, DEFAULT_TELEMETRY_SETTINGS.squareHeadingMaxAngleDeg, 1, 180),
     deviationPercentThreshold: toPositiveInteger(row.deviationPercentThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationPercentThreshold),
     deviationMinKgThreshold: toPositiveInteger(row.deviationMinKgThreshold, DEFAULT_TELEMETRY_SETTINGS.deviationMinKgThreshold),
+    tabletAlgorithmWeightTolerancePercent: toPositiveInteger(row.tabletAlgorithmWeightTolerancePercent, DEFAULT_TELEMETRY_SETTINGS.tabletAlgorithmWeightTolerancePercent),
+    tabletAlgorithmWeightToleranceMinKg: toPositiveInteger(row.tabletAlgorithmWeightToleranceMinKg, DEFAULT_TELEMETRY_SETTINGS.tabletAlgorithmWeightToleranceMinKg),
     rtkTrackResetTime: normalizeTime(row.rtkTrackResetTime, DEFAULT_TELEMETRY_SETTINGS.rtkTrackResetTime),
     rtkHeadingOffsetDeg: normalizeHeadingOffset(row.rtkHeadingOffsetDeg, DEFAULT_TELEMETRY_SETTINGS.rtkHeadingOffsetDeg),
     weightCalibrationFactor: toPositiveNumber(row.weightCalibrationFactor, DEFAULT_TELEMETRY_SETTINGS.weightCalibrationFactor),
@@ -205,6 +209,8 @@ export function validateTelemetrySettingsInput(payload = {}, { partial = false }
     'zoneDwellScoreCapSeconds',
     'deviationPercentThreshold',
     'deviationMinKgThreshold',
+    'tabletAlgorithmWeightTolerancePercent',
+    'tabletAlgorithmWeightToleranceMinKg',
     'loaderMaxDistanceMeters',
     'loaderOfflineTimeoutMinutes'
   ]

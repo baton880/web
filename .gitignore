@@ -10,6 +10,8 @@ server/*.db
 server/data/*.db
 server/prisma/dev.db
 *.db
+*.db-wal
+*.db-shm
 *.db-journal*
 *.db.backup*
 
@@ -47,3 +49,12 @@ server/tmp/
 server/runtime/
 
 server/private-terminal-remote/
+
+# Local transferred repositories, deployment scratch and debug laboratories
+loader-tablet/
+migration/
+server/labs/
+server/scripts/serve-rtk-scoreboard-lab.mjs
+server/scripts/loader-workflow-device-test.mjs
+server/scripts/zero-weight-batch-postprocess-test.mjs
+TRANSFER_TO_LAPTOP_RU.md

@@ -600,7 +600,7 @@ $(document).ready(function () {
     }
 
     function isPostprocessInProgress(batch) {
-        return getPostprocessStatus(batch) === "in_progress";
+        return batch?.processingMode !== 'realtime-v1' && getPostprocessStatus(batch) === "in_progress";
     }
 
     function renderStatusBadge(label) {
@@ -694,6 +694,7 @@ $(document).ready(function () {
     }
 
     function renderBatchSummary(batch) {
+        postprocessDebugCard?.classList.toggle('d-none', batch?.processingMode === 'realtime-v1' || !canAdmin);
         const title = batch?.id ? `Замес #${batch.id}` : "Замес";
         document.title = `${title} | Детали`;
 
@@ -840,21 +841,66 @@ $(document).ready(function () {
             </div>`;
     }
 
+    function renderIngredientSignal(kind, icon, label) {
+        const safeLabel = escapeHtml(label);
+        return `<span class="ingredient-signal ingredient-signal--${kind}" role="img" tabindex="0" aria-label="${safeLabel}" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></span>`;
+    }
+
+    function getLowConfidenceText(reason) {
+        if (reason === 'pair_tablet_hint') return 'Солома/люцерна выбрана по планшету: погрузчик не подтвердил компонент';
+        if (reason === 'calibration_changed') return 'В ходе загрузки изменилась калибровка';
+        if (reason === 'insufficient_telemetry') return 'Недостаточно измерений веса';
+        return 'Недостаточно данных GPS для уверенного определения компонента';
+    }
+
     function renderTabletVerification(row) {
-        if (row?.verificationStatus === 'confirmed') {
-            return '<span class="badge badge-success ml-2">Согласны</span>';
+        const verification = window.IngredientVerificationUi.inspect(row);
+        const signals = [];
+        const details = [];
+
+        if (verification.weightConfirmed) {
+            signals.push(renderIngredientSignal('success', 'fa-check', `Вес принят по алгоритму: допуск меньше ${verification.weightTolerancePercent}% либо до ${verification.weightToleranceMinKg} кг включительно`));
         }
-        if (row?.verificationStatus === 'low_confidence') {
-            const guess = row?.algorithmIngredientName ? `; алгоритм предполагает: ${escapeHtml(row.algorithmIngredientName)}` : '';
-            return `<span class="badge badge-warning ml-2">Низкая уверенность</span><small class="d-block text-warning">Положение погрузчика не определено${guess}</small>`;
+        if (verification.weightMismatch) {
+            signals.push(renderIngredientSignal('warning', 'fa-exclamation', `Вес алгоритма выходит за допуск: ${verification.weightTolerancePercent}% / минимум ${verification.weightToleranceMinKg} кг`));
         }
-        if (row?.verificationStatus === 'unconfirmed') {
-            const suspected = row?.algorithmIngredientName
-                ? `${escapeHtml(row.algorithmIngredientName)}${row.algorithmWeight == null ? '' : `, ${escapeHtml(formatWeight(row.algorithmWeight))}`}`
-                : 'компонент не определён';
-            return `<span class="badge badge-warning ml-2">Не согласны</span><small class="d-block text-warning">Алгоритм предполагает: ${suspected}</small>`;
+        if (verification.identityMismatch) {
+            signals.push(renderIngredientSignal('warning', 'fa-exclamation', 'Алгоритм определил другой компонент'));
+            details.push(`Алгоритм считает, что загружен компонент «${escapeHtml(verification.algorithmName || 'другой компонент')}»`);
+        } else if (verification.lowConfidence) {
+            signals.push(renderIngredientSignal('warning', 'fa-exclamation', getLowConfidenceText(verification.reason)));
+            details.push(escapeHtml(getLowConfidenceText(verification.reason)));
         }
-        return '';
+        if (verification.pending) {
+            signals.push(renderIngredientSignal('info', 'fa-clock', 'Проверка ожидает следующее измерение HOST'));
+            details.push('Ожидается измерение HOST');
+        }
+        if (!verification.hasTablet && row?.verificationStatus === 'confirmed') {
+            signals.push(renderIngredientSignal('info', 'fa-map-marker-alt', 'Компонент определён алгоритмом по GPS'));
+        }
+
+        if (!signals.length && !details.length) return '';
+        return `<div class="ingredient-verification-inline"><span class="ingredient-summary__signals">${signals.join('')}</span>${details.map(item => `<small class="ingredient-summary__note ingredient-summary__note--warning">${item}</small>`).join('')}</div>`;
+    }
+
+    function renderIngredientWeight(row, verification) {
+        const acceptedWeight = row?.fact ?? row?.actualWeight;
+        if (!verification.hasTablet) {
+            return `${escapeHtml(formatWeight(acceptedWeight))}<small class="d-block text-muted">Алгоритм</small>`;
+        }
+
+        const acceptedByAlgorithm = verification.weightConfirmed;
+        const acceptedSource = acceptedByAlgorithm ? 'Алгоритм' : 'Планшет';
+        const comparisonSource = acceptedByAlgorithm ? 'планшет' : 'алгоритм';
+        const comparisonWeight = acceptedByAlgorithm ? verification.tabletWeight : verification.algorithmWeight;
+        const acceptedNumber = Number(acceptedWeight);
+        const comparisonNumber = Number(comparisonWeight);
+        const hasDifferentComparison = Number.isFinite(comparisonNumber)
+            && (!Number.isFinite(acceptedNumber) || Math.abs(acceptedNumber - comparisonNumber) > 1e-7);
+        const comparison = hasDifferentComparison
+            ? ` <span class="batch-ingredient-weight-comparison">(${comparisonSource}: ${escapeHtml(formatWeight(comparisonWeight))})</span>`
+            : '';
+        return `${escapeHtml(formatWeight(acceptedWeight))}<small class="d-block text-muted">${acceptedSource}${comparison}</small>`;
     }
 
     function renderIngredientList(rows) {
@@ -887,6 +933,7 @@ $(document).ready(function () {
         ingredientListBody.innerHTML = rows.map((row) => {
             const ingredientId = normalizeNullableId(row?.id);
             const isSelected = ingredientId !== null && ingredientId === state.selectedIngredientId;
+            const verification = window.IngredientVerificationUi.inspect(row);
 
             return `
             <tr
@@ -897,7 +944,7 @@ $(document).ready(function () {
             >
                 <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
                 <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${renderTabletVerification(row)}</td>
-                <td>${escapeHtml(formatWeight(row?.fact ?? row?.actualWeight))}${row?.tabletTaskId ? '<small class="d-block text-muted">Планшет</small>' : ''}</td>
+                <td>${renderIngredientWeight(row, verification)}</td>
                 <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
                 <td class="text-center">${renderIngredientActionsCell(row)}</td>
             </tr>
@@ -937,6 +984,27 @@ $(document).ready(function () {
     }
 
     function renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge) {
+        if (state.batch?.processingMode === 'realtime-v1') {
+            if (row?.violationStatus === 'critical') {
+                const verification = window.IngredientVerificationUi.inspect(row);
+                const signals = [];
+                if (verification.weightPlanViolation) {
+                    signals.push(renderIngredientSignal('danger', 'fa-exclamation', verification.weightViolationMessage || verification.criticalMessage));
+                }
+                if (verification.orderViolation) {
+                    signals.push(renderIngredientSignal('danger', 'fa-sort-amount-down', verification.orderMessage));
+                }
+                return signals.join('') || renderIngredientSignal('danger', 'fa-exclamation', verification.criticalMessage);
+            }
+            if (row?.violationStatus === 'warning') {
+                const verification = window.IngredientVerificationUi.inspect(row);
+                const label = verification.identityMismatch
+                    ? 'Алгоритм определил другой компонент'
+                    : 'Алгоритм видит отклонение от плана, которого нет по данным планшета';
+                return renderIngredientSignal('warning', 'fa-exclamation', label);
+            }
+            return '<span class="text-muted" title="Нарушений нет">—</span>';
+        }
         if (isPostprocessProcessing(state.batch)) {
             return renderStatusBadge("Обрабатывается");
         }
@@ -1104,7 +1172,10 @@ $(document).ready(function () {
                     fact: component?.fact,
                     deviation_percent: component?.deviation_percent ?? component?.deviationPercent,
                     isViolation: component?.isViolation ?? component?.is_violation ?? row?.isViolation ?? row?.is_violation,
-                    is_violation: component?.is_violation ?? component?.isViolation ?? row?.is_violation ?? row?.isViolation
+                    is_violation: component?.is_violation ?? component?.isViolation ?? row?.is_violation ?? row?.isViolation,
+                    violationStatus: row?.violationStatus,
+                    violationCodes: row?.violationCodes,
+                    violationMessages: row?.violationMessages
                 }))
                 : [];
 
@@ -1117,7 +1188,15 @@ $(document).ready(function () {
                 <td>${escapeHtml(formatWeight(row?.plan))}</td>
                 <td>${escapeHtml(formatWeight(row?.fact))}</td>
                 <td>${escapeHtml(formatSignedPercent(row?.deviation_percent ?? row?.deviationPercent))}</td>
-                <td>${renderViolationBadge(asBoolean(row?.isViolation ?? row?.is_violation))}</td>
+                <td>${state.batch?.processingMode === 'realtime-v1' && asBoolean(row?.isViolation ?? row?.is_violation)
+                    ? (() => {
+                        const verification = window.IngredientVerificationUi.inspect(row);
+                        if (verification.orderViolation && !verification.weightPlanViolation) {
+                            return renderIngredientSignal('danger', 'fa-sort-amount-down', verification.orderMessage);
+                        }
+                        return renderIngredientSignal('danger', 'fa-exclamation', verification.weightViolationMessage || verification.criticalMessage);
+                    })()
+                    : renderViolationBadge(asBoolean(row?.isViolation ?? row?.is_violation))}</td>
             </tr>
         `).join("");
     }
@@ -3088,10 +3167,15 @@ $(document).ready(function () {
         const groups = new Map();
         for (const marker of state.telemetryPayload?.tabletMarkers || []) {
             const key = marker.eventId;
-            if (!groups.has(key)) groups.set(key, { ...marker, labels: [] });
-            groups.get(key).labels.push(marker.label);
+            if (!groups.has(key)) groups.set(key, { ...marker, labels: [], kinds: [] });
+            const group = groups.get(key);
+            group.labels.push(marker.label);
+            if (!group.kinds.includes(marker.kind)) group.kinds.push(marker.kind);
         }
-        return Array.from(groups.values());
+        return Array.from(groups.values()).map(marker => ({
+            ...marker,
+            boundary: marker.kinds.includes('component-end') ? 'end' : 'start'
+        }));
     }
 
     function renderTabletMarkerLegend() {
@@ -3114,18 +3198,21 @@ $(document).ready(function () {
             const right = times.findIndex(time => time >= at);
             const left = Math.max(0, right - 1);
             const fraction = times[right] > times[left] ? (at - times[left]) / (times[right] - times[left]) : 0;
-            return { at, index, right, left, fraction };
+            return { at, index, right, left, fraction, boundary: marker.boundary };
         }).filter(marker => marker.at >= times[0] && marker.at <= times[times.length - 1]);
         return { afterDatasetsDraw(chart) {
             const xScale = chart.scales?.["x-axis-0"], area = chart.chartArea, ctx = chart.chart?.ctx;
             if (!xScale || !area || !ctx || times.length < 2) return;
             ctx.save();
-            markers.forEach(({index, right, left, fraction}) => {
+            markers.forEach(({index, right, left, fraction, boundary}) => {
                 const x = xScale.getPixelForValue(null, left) + fraction * (xScale.getPixelForValue(null, right) - xScale.getPixelForValue(null, left));
-                ctx.strokeStyle = "#7c3aed"; ctx.lineWidth = 1.5; ctx.setLineDash([5, 4]);
+                const isEnd = boundary === 'end';
+                ctx.strokeStyle = isEnd ? "#0f766e" : "#7c3aed";
+                ctx.lineWidth = 1.5;
+                ctx.setLineDash(isEnd ? [2, 3] : [5, 4]);
                 ctx.beginPath(); ctx.moveTo(x, area.top); ctx.lineTo(x, area.bottom); ctx.stroke();
-                ctx.setLineDash([]); ctx.fillStyle = "#7c3aed"; ctx.font = "bold 12px sans-serif";
-                ctx.fillText(String(index + 1), Math.min(x + 4, area.right - 12), area.top + 14 + (index % 2) * 16);
+                ctx.setLineDash([]); ctx.fillStyle = isEnd ? "#0f766e" : "#7c3aed"; ctx.font = "bold 12px sans-serif";
+                ctx.fillText(`${isEnd ? 'К' : 'Н'}${index + 1}`, Math.min(x + 4, area.right - 24), area.top + 14 + (index % 2) * 16);
             });
             ctx.restore();
         }};
@@ -4278,7 +4365,7 @@ $(document).ready(function () {
             renderTelemetry(telemetryPayload.hostTrack);
             await renderBatchTrack(telemetryPayload, actualRows);
             renderBatchEditor(batch);
-            if (canAdmin && !postprocessDebugBody?.classList.contains("d-none")) {
+            if (canAdmin && batch.processingMode !== 'realtime-v1' && !postprocessDebugBody?.classList.contains("d-none")) {
                 loadPostprocessDebug();
             }
             return true;

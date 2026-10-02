@@ -4158,6 +4158,147 @@ textarea.form-control,
   color: var(--text-secondary) !important;
 }
 
+/* Compact, independent signals for component weight, identity and plan checks. */
+.ingredient-summary-list {
+  font-size: 0.86rem;
+  line-height: 1.35;
+}
+
+.ingredient-summary {
+  padding: 0.15rem 0 0.65rem;
+}
+
+.ingredient-summary--divided {
+  margin-bottom: 0.65rem;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.ingredient-summary__header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5rem;
+}
+
+.ingredient-summary__name {
+  min-width: 0;
+  color: var(--text-main);
+  font-weight: 700;
+  overflow-wrap: break-word;
+  word-break: normal;
+}
+
+.ingredient-summary__signals {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+  gap: 0.28rem;
+  vertical-align: middle;
+}
+
+.ingredient-signal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1.38rem;
+  height: 1.38rem;
+  flex: 0 0 1.38rem;
+  border-radius: 50%;
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: help;
+  transition: transform 120ms ease, box-shadow 120ms ease;
+}
+
+.ingredient-signal:hover,
+.ingredient-signal:focus-visible {
+  transform: translateY(-1px);
+  box-shadow: 0 0 0 3px rgba(72, 88, 78, 0.12);
+  outline: none;
+}
+
+.ingredient-signal--success {
+  color: #3f6d4c;
+  background: #e3eee5;
+}
+
+.ingredient-signal--warning {
+  color: #765912;
+  background: var(--accent-yellow-soft);
+}
+
+.ingredient-signal--danger {
+  color: var(--danger-main);
+  background: var(--danger-bg);
+}
+
+.ingredient-signal--info {
+  color: var(--vehicle-owner);
+  background: var(--vehicle-owner-soft);
+}
+
+.ingredient-summary__metric {
+  display: flex;
+  align-items: baseline;
+  gap: 0.28rem;
+  margin-top: 0.22rem;
+  color: var(--text-secondary);
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+}
+
+.ingredient-summary__metric--danger {
+  color: var(--danger-main);
+}
+
+.ingredient-summary__slash {
+  color: var(--text-muted);
+  font-weight: 400;
+}
+
+.ingredient-summary__details {
+  display: grid;
+  gap: 0.12rem;
+  margin-top: 0.3rem;
+  color: var(--text-muted);
+}
+
+.ingredient-summary__details > span:not(.ingredient-summary__note) {
+  display: inline-block;
+  margin-right: 0.5rem;
+}
+
+.ingredient-summary__note {
+  display: block;
+  margin-top: 0.2rem;
+  color: var(--text-muted);
+  font-weight: 500;
+  line-height: 1.35;
+}
+
+.ingredient-summary__note--warning {
+  color: #765912;
+}
+
+.ingredient-summary__time {
+  margin-top: 0.18rem;
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.ingredient-verification-inline {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.2rem 0.45rem;
+  margin-top: 0.28rem;
+}
+
+.ingredient-verification-inline .ingredient-summary__note {
+  flex-basis: 100%;
+  margin-top: 0.05rem;
+}
+
 .map-telemetry-chip__label,
 .dashboard-section-meta,
 .dashboard-warning-item__message,

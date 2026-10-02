@@ -1,5 +1,6 @@
 import { withCalculationDatabase } from '../../database.js'
 import { scaleMeasurement } from '../loader/scale-measurement.js'
+import { realtimeEnabled, processRealtimePacket, readRealtimeState, clearRealtimeBatchState } from '../batches/realtime-batch-service.js'
 import { getTelemetryWriteCoordinator } from './telemetry-write-coordinator.js'
 import { captureProcessorState, reloadProcessorCheckpoint, ensureProcessorCheckpointLoaded, persistProcessorCheckpoint, unloadGroupEvidenceByBatch, lastBarnPositionByDevice } from './processor-checkpoint.js'
 import { Router } from 'express'
@@ -379,6 +380,7 @@ async function resolveStickyBarnPosition(prismaClient, telemetryLike, activeZone
 }
 
 async function buildRealtimeWeight(data, telemetrySettings = {}) {
+  if (realtimeEnabled()) return { weight: data.weightValid === false ? null : data.weight, source: 'packet', sampleCount: 1 }
   const scale = scaleMeasurement(data)
   if (scale) return { weight: scale.valid ? scale.weightKg : null, source: 'pi-scale', sampleCount: 1 }
   if (!data?.deviceId || !data?.timestamp) return null
@@ -822,6 +824,26 @@ async function processHostTelemetryPacketInternal(body, receivedAt, identity) {
       ? Number(telemetrySettings.emptyVehicleThresholdKg)
       : DEFAULT_TELEMETRY_SETTINGS.emptyVehicleThresholdKg
     const loadingZones = activeZones.filter((zone) => isLoadingZone(zone, linkedBarnZoneIds))
+    if (realtimeEnabled()) {
+      const rtk = process.env.REALTIME_RTK_MODE === 'disabled' ? null : await prisma.rtkTelemetry.findFirst({
+        where: { timestamp: { gte: new Date(packet.timestamp.getTime() - 3000), lte: packet.timestamp } },
+        orderBy: [{ timestamp: 'desc' }, { id: 'desc' }]
+      })
+      const result = await prisma.$transaction(async tx => {
+        const telemetry = await tx.telemetry.create({ data: buildTelemetryCreateData(packet, receivedAt, rawPayload, identity) })
+        const realtime = await processRealtimePacket(tx, {
+          ...packet, id: telemetry.id, sourceStreamId: identity.streamId, sourcePacketId: identity.packetId,
+          packetIdentity: scaleMeasurement({ deviceId, rawPayload })?.packetId,
+          calibrationId: scaleMeasurement({ deviceId, rawPayload })?.calibrationId
+        }, { zones: activeZones, groups: packetGroups, settings: telemetrySettings, rtk,
+          expectedIngredients: resolveExpectedIngredientsFromBatch(activeBatchForHints) })
+        await updateDeviceCurrentTelemetry(telemetry, receivedAt, identity, tx)
+        for (const batchId of realtime.affected) await recalculateBatchViolations(tx, batchId, telemetrySettings)
+        return { id: telemetry.id, actions: realtime.actions, affected: [...realtime.affected] }
+      })
+      return { status: 'ok', id: result.id, outOfOrder: false, banner: null,
+        timestamp: packet.timestamp.toISOString(), processingMode: 'realtime-v1' }
+    }
     const stickyBarnPosition = await resolveStickyBarnPosition(
       prisma,
       packet,
@@ -1386,6 +1408,7 @@ router.post('/manual-stop', authenticate, requireAdmin, async (req, res) => {
       const telemetrySettings = await getTelemetrySettings(tx)
       await recalculateBatchViolations(tx, updatedBatch.id, telemetrySettings);
       await postprocessCompletedBatch(tx, updatedBatch.id, telemetrySettings, { persist: true })
+      if (updatedBatch.processingMode === 'realtime-v1') await clearRealtimeBatchState(tx, updatedBatch.deviceId, updatedBatch.id)
       telemetryProcessor.clearDeviceState(updatedBatch.deviceId);
       await persistProcessorCheckpoint(tx)
       return updatedBatch
@@ -1486,7 +1509,7 @@ export async function handleCurrentTelemetry(req, res) {
       data = applyWeightCalibration(data, telemetrySettings)
     }
     const realtimeWeight = await buildRealtimeWeight(data, telemetrySettings)
-    let effectivePosition = await resolveEffectiveCoordinates(prisma, data, {
+    let effectivePosition = realtimeEnabled() ? { lat: data.lat, lon: data.lon, source: 'host' } : await resolveEffectiveCoordinates(prisma, data, {
       deviceId: data.deviceId,
       referenceTime: data.timestamp,
       loaderMaxDistanceMeters: telemetrySettings.loaderMaxDistanceMeters,
@@ -1505,7 +1528,13 @@ export async function handleCurrentTelemetry(req, res) {
       }
     );
     let stickyBarnPosition = null
-    if (machineState?.isUnloading && !hasUsableHostCoordinates(data)) {
+    if (realtimeEnabled()) {
+      const state = await readRealtimeState(prisma, data.deviceId)
+      machineState = { currentZone: detectedZone?.name || null, peakWeight: state.active?.peak,
+        isUnloading: Boolean(state.active?.unloading), isMixing: Boolean(state.active && !state.active.unloading),
+        mode: state.active?.calibrationChanged ? 'Калибровка изменилась — требуется проверка' : data.weightValid === false ? 'Нет достоверного веса' : state.active?.unloading ? 'Выгрузка' : state.active ? 'Загрузка' : 'Ожидание' }
+    }
+    if (!realtimeEnabled() && machineState?.isUnloading && !hasUsableHostCoordinates(data)) {
       stickyBarnPosition = await resolveStickyBarnPosition(
         prisma,
         data,
@@ -1553,7 +1582,7 @@ export async function handleCurrentTelemetry(req, res) {
 
       if (machineState.isUnloading) {
         mode = 'Выгрузка';
-        unload_progress = buildUnloadProgress(activeBatch, roundWeight(realtimeWeight?.weight ?? data.weight), machineState);
+        unload_progress = buildUnloadProgress(activeBatch, roundWeight(realtimeWeight?.weight ?? data.weight), machineState, telemetrySettings);
       } else if (machineState.isMixing) {
         mode = 'Загрузка';
       }

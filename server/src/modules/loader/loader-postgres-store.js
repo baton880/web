@@ -1,5 +1,6 @@
 import { createHash, timingSafeEqual } from 'node:crypto'
 import { TaskError, check, uuid, canonical, reduceTask } from './loader-task-store.js'
+import { applyRealtimeTabletEvent } from '../batches/realtime-batch-service.js'
 
 const digest = value => createHash('sha256').update(value).digest('hex')
 const keyParts = key => typeof key === 'string' ? /^vkt1_([0-9a-f-]{36})_([A-Za-z0-9_-]{43})$/.exec(key) : null
@@ -79,6 +80,7 @@ export class PostgresLoaderTaskStore {
         await tx.loaderTaskEvent.create({ data: { id: event.id, taskId: id, revision: next.revision,
           receivedAt: BigInt(Date.now()), payload: canonical(event) } })
         await tx.loaderTask.update({ where: { id }, data: { status: next.status, state: JSON.stringify(next) } })
+        await applyRealtimeTabletEvent(tx, next, event)
       } catch (error) { if (error.code === 'P2002') throw new TaskError(409, 'Событие уже изменилось. Требуется сверка'); throw error }
       return { acknowledged: event.id, task: next }
     })

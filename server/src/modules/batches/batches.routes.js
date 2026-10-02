@@ -10,6 +10,8 @@ import telemetryProcessor from '../../../../module-3/telemetryProcessor.js';
 import { farmDateRange, getFarmDateString } from '../../utils/farm-date.js';
 import { buildPostprocessMeta, postprocessCompletedBatch } from './batch-postprocess-service.js';
 import { DEFAULT_WEIGHT_STEP_POSTPROCESS_OPTIONS } from './weight-step-postprocess.js';
+import { clearRealtimeBatchState } from './realtime-batch-service.js';
+import { effectiveRealtimeWeight, selectRealtimeFactRows } from './realtime-ingredient-verification.js';
 
 const router = Router();
 const ACTIVE_VIOLATION_STATUSES = ['OPEN', 'IN_PROGRESS'];
@@ -111,6 +113,9 @@ router.delete('/admin/truncate', authenticate, requireAdmin, requireWriteAccess,
             const deletedViolations = await tx.violation.deleteMany({});
             const deletedIngredients = await tx.batchIngredient.deleteMany({});
             const deletedBatches = await tx.batch.deleteMany({});
+            await tx.appState.deleteMany({ where: { OR: [
+                { key: { startsWith: 'realtime-batch:' } }, { key: { startsWith: 'realtime-task:' } }
+            ] } });
 
             return {
                 deletedViolations: deletedViolations.count,
@@ -440,7 +445,7 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
             target_weight: roundWeight(postprocessLoaded),
             unloaded_fact: roundWeight(postprocessUnloaded)
         }
-        : buildUnloadProgress(batch, weightContext.currentWeight, { peakWeight: weightContext.peakWeight });
+        : buildUnloadProgress(batch, weightContext.currentWeight, { peakWeight: weightContext.peakWeight }, telemetrySettings);
     const postprocessRemainingWeight = hasPostprocessUnload
         ? roundNonNegativeWeight(postprocessLoaded - postprocessUnloaded)
         : weightContext.remainingWeight;
@@ -454,6 +459,7 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
 
     return {
         id: batch.id,
+        processingMode: batch.processingMode,
         deviceId: batch.deviceId,
         startTime: batch.startTime,
         endTime: batch.endTime,
@@ -498,32 +504,46 @@ async function getDetailedBatchById(batchId, prismaClient = prisma, options = {}
             latestTelemetryAt: postprocessLatestTelemetryAt,
             progress: unloadProgress
         },
-        actualIngredients: batch.actualIngredients.map((ing) => ({
-            id: ing.id,
-            name: toDisplayIngredientName(ing.ingredientName),
-            startTime: ing.startedAt || null,
-            time: ing.addedAt,
-            endTime: ing.addedAt,
-            plan: roundWeight(ing.plannedWeight || 0),
-            fact: roundWeight(ing.actualWeight || 0),
-            verificationStatus: ing.verificationStatus || null,
-            verificationReason: ing.verificationReason || null,
-            algorithmIngredientName: ing.algorithmIngredientName
-                ? (normalizeIngredientName(ing.algorithmIngredientName) === normalizeIngredientName(ing.ingredientName)
-                    ? toDisplayIngredientName(ing.ingredientName)
-                    : toDisplayIngredientName(ing.algorithmIngredientName))
-                : null,
-            algorithmWeight: ing.algorithmWeight ?? null,
-            tabletTaskId: ing.tabletTaskId || null,
-            deviation: ing.plannedWeight ? roundWeight(Number(ing.actualWeight || 0) - Number(ing.plannedWeight || 0)) : 0,
-            isViolation: summaryViolationByKey.has(normalizeIngredientName(ing.ingredientName))
-                ? summaryViolationByKey.get(normalizeIngredientName(ing.ingredientName))
-                : ing.isViolation,
-            startLat: ing.startLat,
-            startLon: ing.startLon,
-            endLat: ing.endLat,
-            endLon: ing.endLon
-        })),
+        actualIngredients: (batch.processingMode === 'realtime-v1'
+            ? selectRealtimeFactRows(batch.actualIngredients)
+            : batch.actualIngredients).map((ing) => {
+            const summaryRow = ingredientSummary.find(row => normalizeIngredientName(row.name) === normalizeIngredientName(ing.ingredientName));
+            const displayedFact = batch.processingMode === 'realtime-v1'
+                ? effectiveRealtimeWeight(ing, telemetrySettings)
+                : roundWeight(ing.actualWeight || 0);
+            return {
+                id: ing.id,
+                name: toDisplayIngredientName(ing.ingredientName),
+                startTime: ing.startedAt || null,
+                time: ing.addedAt,
+                endTime: ing.addedAt,
+                plan: roundWeight(ing.plannedWeight || 0),
+                fact: displayedFact,
+                tabletWeight: ing.tabletTaskId ? roundWeight(ing.actualWeight || 0) : null,
+                weightTolerancePercent: summaryRow?.weightTolerancePercent ?? telemetrySettings.tabletAlgorithmWeightTolerancePercent,
+                weightToleranceMinKg: summaryRow?.weightToleranceMinKg ?? telemetrySettings.tabletAlgorithmWeightToleranceMinKg,
+                verificationStatus: ing.verificationStatus || null,
+                verificationReason: ing.verificationReason || null,
+                algorithmIngredientName: ing.algorithmIngredientName
+                    ? (normalizeIngredientName(ing.algorithmIngredientName) === normalizeIngredientName(ing.ingredientName)
+                        ? toDisplayIngredientName(ing.ingredientName)
+                        : toDisplayIngredientName(ing.algorithmIngredientName))
+                    : null,
+                algorithmWeight: ing.algorithmWeight ?? null,
+                tabletTaskId: ing.tabletTaskId || null,
+                deviation: ing.plannedWeight ? roundWeight(displayedFact - Number(ing.plannedWeight || 0)) : 0,
+                isViolation: summaryViolationByKey.has(normalizeIngredientName(ing.ingredientName))
+                    ? summaryViolationByKey.get(normalizeIngredientName(ing.ingredientName))
+                    : ing.isViolation,
+                violationStatus: summaryRow?.violationStatus || 'none',
+                violationCodes: summaryRow?.violationCodes || [],
+                violationMessages: summaryRow?.violationMessages || [],
+                startLat: ing.startLat,
+                startLon: ing.startLon,
+                endLat: ing.endLat,
+                endLon: ing.endLon
+            };
+        }),
         ingredients: ingredientSummary,
         postprocess: buildPostprocessMeta(postprocess)
     };
@@ -649,7 +669,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
         const formattedBatches = batches.map(b => {
             const ingredients = buildIngredientSummary(b, telemetrySettings);
             const hasIngredientFacts = b.actualIngredients.length > 0;
-            const totalActualWeight = b.endTime && hasIngredientFacts
+            const totalActualWeight = (b.endTime || b.processingMode === 'realtime-v1') && hasIngredientFacts
                 ? roundWeight(ingredients.reduce((sum, ingredient) => sum + Number(ingredient?.fact || 0), 0))
                 : null;
             const hasLoggedViolations = (b.violations?.length || 0) > 0;
@@ -657,22 +677,33 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
             const hasStrawAlfalfaWarning = activeViolationCodes.some(isStrawAlfalfaViolationCode);
             const hasOnlyStrawAlfalfaWarning = activeViolationCodes.length > 0 &&
                 activeViolationCodes.every(isStrawAlfalfaViolationCode);
-            const violationStatus = hasOnlyStrawAlfalfaWarning
-                ? 'warning'
-                : (hasLoggedViolations ? 'critical' : 'none');
-            const hasUnverifiedTabletIngredient = b.actualIngredients.some(ingredient =>
+            const algorithmWarnings = activeViolationCodes.some(code => code.startsWith('ALGORITHM_'));
+            const onlyWarnings = activeViolationCodes.length > 0 && activeViolationCodes.every(code =>
+                code.startsWith('ALGORITHM_') || isStrawAlfalfaViolationCode(code));
+            const realtimeCritical = b.processingMode === 'realtime-v1' && ingredients.some(item => item.violationStatus === 'critical');
+            const realtimeWarning = b.processingMode === 'realtime-v1' && ingredients.some(item => item.violationStatus === 'warning');
+            const violationStatus = realtimeCritical
+                ? 'critical'
+                : (onlyWarnings || hasOnlyStrawAlfalfaWarning || realtimeWarning)
+                    ? 'warning'
+                    : (hasLoggedViolations ? 'critical' : 'none');
+            const hasCurrentViolations = hasLoggedViolations || realtimeCritical || realtimeWarning;
+            const hasUnverifiedTabletIngredient = b.processingMode !== 'realtime-v1' && b.actualIngredients.some(ingredient =>
                 ingredient.tabletTaskId && ingredient.verificationStatus !== 'confirmed');
 
             return {
                 id: b.id,
+                processingMode: b.processingMode,
                 deviceId: b.deviceId,
                 startTime: b.startTime,
                 endTime: b.endTime,
                 rationName: b.ration?.name || 'Неизвестный рацион',
                 groupName: b.group?.name || 'Без группы',
-                hasViolations: hasLoggedViolations, // Единый источник статуса: журнал нарушений (все зафиксированные кейсы)
+                hasViolations: hasCurrentViolations,
                 violationStatus,
-                violationLabel: hasStrawAlfalfaWarning ? 'Сол.+Люц.' : null,
+                violationLabel: realtimeCritical
+                    ? null
+                    : algorithmWarnings || realtimeWarning ? 'Алгоритм не согласен' : hasStrawAlfalfaWarning ? 'Сол.+Люц.' : null,
                 hasUnverifiedTabletIngredient,
                 startWeight: roundWeight(b.startWeight || 0),
                 endWeight: b.endWeight === null || b.endWeight === undefined ? null : roundWeight(b.endWeight),
@@ -681,7 +712,7 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
                 ingredients,
                 postprocess: {
                     status: b.endTime ? 'complete' : 'in_progress',
-                    reason: b.endTime ? null : 'batch_in_progress'
+                    reason: b.processingMode === 'realtime-v1' ? 'realtime_saved_facts' : (b.endTime ? null : 'batch_in_progress')
                 }
             };
         });
@@ -705,14 +736,14 @@ router.get('/:id', authenticate, requireReadAccess, async (req, res) => {
 
         const existingBatch = await prisma.batch.findUnique({
             where: { id: batchId },
-            select: { id: true, endTime: true }
+            select: { id: true, endTime: true, processingMode: true }
         });
         if (!existingBatch) {
             return res.status(404).json({ error: 'Р—Р°РјРµСЃ РЅРµ РЅР°Р№РґРµРЅ' });
         }
 
         const telemetrySettings = await getTelemetrySettings(prisma);
-        const postprocess = existingBatch.endTime
+        const postprocess = existingBatch.endTime || existingBatch.processingMode === 'realtime-v1'
             ? await postprocessCompletedBatch(prisma, batchId, telemetrySettings, { persist: false })
             : { status: 'in_progress', reason: 'batch_in_progress' };
         const detailedBatch = await getDetailedBatchById(batchId, prisma, { telemetrySettings, postprocess });
@@ -743,7 +774,8 @@ router.get('/:id/postprocess-debug', authenticate, requireAdmin, async (req, res
                 id: true,
                 deviceId: true,
                 startTime: true,
-                endTime: true
+                endTime: true,
+                processingMode: true
             }
         });
         if (!batch) {
@@ -752,9 +784,10 @@ router.get('/:id/postprocess-debug', authenticate, requireAdmin, async (req, res
 
         const telemetrySettings = await getTelemetrySettings(prisma);
         const stepOptions = parsePostprocessDebugOptions(req.query);
-        const postprocess = batch.endTime
+        const postprocess = batch.endTime || batch.processingMode === 'realtime-v1'
             ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, {
                 persist: false,
+                debugPreview: true,
                 disableCache: true,
                 stepOptions
             })
@@ -808,11 +841,11 @@ router.get('/:id/telemetry', authenticate, requireReadAccess, async (req, res) =
         const hostLookbackSeconds = parsePositiveInteger(req.query.hostLookbackSeconds, 180);
         const hostLookaheadSeconds = parsePositiveInteger(req.query.hostLookaheadSeconds, 180);
         const telemetrySettings = await getTelemetrySettings(prisma);
-        const postprocess = batch.endTime
+        const postprocess = batch.endTime || batch.processingMode === 'realtime-v1'
             ? await postprocessCompletedBatch(prisma, batch.id, telemetrySettings, { persist: false })
             : { status: 'in_progress', reason: 'batch_in_progress' };
 
-        if (postprocess.status === 'complete') {
+        if (postprocess.status === 'complete' || batch.processingMode === 'realtime-v1') {
             const normalizedHostTrack = Array.isArray(postprocess.hostTrack) ? postprocess.hostTrack : [];
             if (!includeRtk) {
                 return res.json(normalizedHostTrack);
@@ -1036,6 +1069,7 @@ router.delete('/:id', authenticate, requireWriteAccess, async (req, res) => {
             await tx.batch.delete({
                 where: { id: batchId }
             });
+            if (!batch.endTime) await clearRealtimeBatchState(tx, batch.deviceId, batchId);
 
             return {
                 deletedViolations: deletedViolations.count
