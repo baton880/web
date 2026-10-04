@@ -727,6 +727,20 @@ router.get('/', authenticate, requireReadAccess, async (req, res) => {
 // ============================================================================
 // 4. GET /:id - Получить детальную информацию по одному замесу
 // ============================================================================
+router.get('/latest-date', authenticate, requireReadAccess, async (req, res) => {
+    try {
+        const latestBatch = await prisma.batch.findFirst({
+            select: { startTime: true },
+            orderBy: { startTime: 'desc' }
+        });
+
+        res.json({ date: latestBatch?.startTime ? getFarmDateString(latestBatch.startTime) : null });
+    } catch (error) {
+        console.error('[Ошибка GET /batches/latest-date]:', error);
+        res.status(500).json({ error: 'Не удалось определить дату последнего замеса' });
+    }
+});
+
 router.get('/:id', authenticate, requireReadAccess, async (req, res) => {
     try {
         const batchId = parseInt(req.params.id, 10);

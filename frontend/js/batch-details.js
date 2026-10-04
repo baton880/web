@@ -843,7 +843,7 @@ $(document).ready(function () {
 
     function renderIngredientSignal(kind, icon, label) {
         const safeLabel = escapeHtml(label);
-        return `<span class="ingredient-signal ingredient-signal--${kind}" role="img" tabindex="0" aria-label="${safeLabel}" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></span>`;
+        return `<button type="button" class="ingredient-signal ingredient-signal--${kind}" data-role="ingredient-signal" data-tooltip="${safeLabel}" aria-label="${safeLabel}" aria-expanded="false" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></button>`;
     }
 
     function getLowConfidenceText(reason) {
@@ -942,11 +942,11 @@ $(document).ready(function () {
                 data-ingredient-id="${ingredientId === null ? "" : ingredientId}"
                 tabindex="0"
             >
-                <td>${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
-                <td class="batch-ingredient-component-cell">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${renderTabletVerification(row)}</td>
-                <td>${renderIngredientWeight(row, verification)}</td>
-                <td>${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
-                <td class="text-center">${renderIngredientActionsCell(row)}</td>
+                <td data-label="Время">${escapeHtml(formatTime(row?.startTime || row?.time))}</td>
+                <td class="batch-ingredient-component-cell" data-label="Компонент">${renderIngredientCell(row, hasRation, hasReplacementOptions, replacementOptions)}${renderIngredientDetermination(row)}${renderTabletVerification(row)}</td>
+                <td data-label="Факт">${renderIngredientWeight(row, verification)}</td>
+                <td data-label="Нарушение">${renderIngredientViolationCell(row, componentViolationByKey, seenComponentViolationBadge)}</td>
+                <td class="text-center" data-label="Действия">${renderIngredientActionsCell(row)}</td>
             </tr>
         `;
         }).join("");
@@ -1041,7 +1041,6 @@ $(document).ready(function () {
             || state.deleteBatchInFlight
             || state.ingredientDeleteId !== null;
         const canEditFromRation = canWrite && ingredientId !== null && !isDisabled && hasReplacementOptions;
-        const canEditManual = canWrite && ingredientId !== null && !isDisabled && !hasRation;
         const disabledAttribute = canEditFromRation ? "" : " disabled";
         const optionsMarkup = replacementOptions
             .map((name) => `<option value="${escapeHtml(name)}">${escapeHtml(name)}</option>`)
@@ -1065,28 +1064,17 @@ $(document).ready(function () {
             : "Можно заменить компонент вручную.";
 
         if (!hasRation) {
-            hint = "Рацион не назначен: доступно ручное переименование компонента.";
+            hint = "Рацион для замеса не назначен.";
         } else if (!hasReplacementOptions) {
             hint = "В привязанном рационе нет ингредиентов для выбора.";
         } else if (isDisabled) {
             hint = "Подождите завершения текущего сохранения/загрузки.";
         }
 
-        if (canEditManual) {
+        if (!hasRation) {
             return `
                 <div class="batch-ingredient-editor">
-                    <div class="batch-ingredient-editor__controls">
-                        <span class="batch-ingredient-editor__trigger ${isUnknown ? "text-warning" : ""}">${escapeHtml(ingredientName || "Без названия")}</span>
-                        <button
-                            type="button"
-                            class="btn btn-sm btn-outline-primary"
-                            data-role="ingredient-rename"
-                            data-ingredient-id="${ingredientId}"
-                            data-current-name="${escapeHtml(ingredientName || "")}"
-                        >
-                            Переименовать
-                        </button>
-                    </div>
+                    <strong class="${isUnknown ? "text-warning" : ""}">${escapeHtml(ingredientName || "Без названия")}</strong>
                     <small class="text-muted d-block mt-1">${escapeHtml(hint)}</small>
                 </div>
             `;
@@ -3992,7 +3980,7 @@ $(document).ready(function () {
     }
 
     function shouldIgnoreIngredientTrackClick(target) {
-        return Boolean(target?.closest?.("button, select, input, textarea, a, label, [data-role='ingredient-replacement'], [data-role='ingredient-rename'], [data-role='ingredient-delete']"));
+        return Boolean(target?.closest?.("button, select, input, textarea, a, label, [data-role='ingredient-replacement'], [data-role='ingredient-delete']"));
     }
 
     async function refreshTrackSelection() {
@@ -4035,6 +4023,21 @@ $(document).ready(function () {
         }
 
         selectIngredientTrack(row.dataset.ingredientId);
+    }
+
+    function handleIngredientSignalClick(event) {
+        const signal = event.target?.closest?.("[data-role='ingredient-signal']");
+        if (!(signal instanceof HTMLButtonElement)) {
+            return;
+        }
+
+        const shouldOpen = !signal.classList.contains("is-open");
+        ingredientListBody?.querySelectorAll("[data-role='ingredient-signal'].is-open").forEach((item) => {
+            item.classList.remove("is-open");
+            item.setAttribute("aria-expanded", "false");
+        });
+        signal.classList.toggle("is-open", shouldOpen);
+        signal.setAttribute("aria-expanded", String(shouldOpen));
     }
 
     function handleIngredientTrackRowKeydown(event) {
@@ -4127,50 +4130,6 @@ $(document).ready(function () {
             state.stopBatchInFlight = false;
             updateStopButtonState(state.batch);
             updateDeleteButtonState(state.batch);
-        }
-    }
-
-    async function handleIngredientRenameClick(event) {
-        const button = event?.target?.closest?.("[data-role='ingredient-rename']");
-        if (!(button instanceof HTMLButtonElement)) {
-            return;
-        }
-
-        if (state.ingredientUpdateId !== null || state.ingredientDeleteId !== null || state.isBatchLoading || state.isSaving || state.stopBatchInFlight || state.deleteBatchInFlight) {
-            return;
-        }
-
-        const ingredientId = normalizeNullableId(button.dataset.ingredientId);
-        if (ingredientId === null) {
-            return;
-        }
-
-        const currentName = getIngredientDisplayName(button.dataset.currentName || "");
-        const nextNameRaw = window.prompt("Введите новое название компонента", currentName);
-        if (nextNameRaw === null) {
-            return;
-        }
-
-        const nextName = String(nextNameRaw).trim().replace(/\s+/g, " ");
-        if (!nextName) {
-            window.AppAuth?.showAlert?.("Название компонента не может быть пустым", "warning");
-            return;
-        }
-
-        state.ingredientUpdateId = ingredientId;
-        renderIngredientList(Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : []);
-
-        try {
-            await patchJson(`${batchUrl}/ingredients/${ingredientId}`, { ingredientName: nextName });
-            const didReload = await loadBatchDetails();
-            if (didReload) {
-                window.AppAuth?.showAlert?.("Ингредиент обновлен", "success");
-            }
-        } catch (error) {
-            window.AppAuth?.showAlert?.(error.message || "Не удалось обновить ингредиент", "danger");
-        } finally {
-            state.ingredientUpdateId = null;
-            renderIngredientList(Array.isArray(state.batch?.actualIngredients) ? state.batch.actualIngredients : []);
         }
     }
 
@@ -4467,9 +4426,9 @@ $(document).ready(function () {
 
     if (ingredientListBody) {
         ingredientListBody.addEventListener("click", handleIngredientTrackRowClick);
+        ingredientListBody.addEventListener("click", handleIngredientSignalClick);
         ingredientListBody.addEventListener("keydown", handleIngredientTrackRowKeydown);
         ingredientListBody.addEventListener("change", handleIngredientReplacementChange);
-        ingredientListBody.addEventListener("click", handleIngredientRenameClick);
         ingredientListBody.addEventListener("click", handleIngredientDeleteClick);
     }
 

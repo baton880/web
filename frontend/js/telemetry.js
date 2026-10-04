@@ -58,10 +58,6 @@ const endpoints = {
         history: window.AppAuth?.getApiUrl?.(`/api/telemetry/host/admin/history?limit=${HISTORY_LIMIT}`) || `/api/telemetry/host/admin/history?limit=${HISTORY_LIMIT}`,
         truncate: window.AppAuth?.getApiUrl?.("/api/telemetry/host/admin/truncate") || "/api/telemetry/host/admin/truncate",
     },
-    events: {
-        history: window.AppAuth?.getApiUrl?.("/api/events?limit=500") || "/api/events?limit=500",
-        truncate: window.AppAuth?.getApiUrl?.("/api/events/admin/truncate") || "/api/events/admin/truncate",
-    },
     rtk: {
         latest: window.AppAuth?.getApiUrl?.("/api/telemetry/rtk/admin/latest") || "/api/telemetry/rtk/admin/latest",
         history: window.AppAuth?.getApiUrl?.(`/api/telemetry/rtk/admin/history?limit=${HISTORY_LIMIT}`) || `/api/telemetry/rtk/admin/history?limit=${HISTORY_LIMIT}`,
@@ -292,7 +288,7 @@ async function readErrorMessage(response) {
 }
 
 function setClearButtonsVisibility() {
-    ["hostClearButton", "rtkClearButton", "eventsClearButton"].forEach((id) => {
+    ["hostClearButton", "rtkClearButton"].forEach((id) => {
         const button = document.getElementById(id);
         if (button) {
             button.hidden = !CAN_ADMIN_RESET;
@@ -560,55 +556,6 @@ function renderHostTable(rows) {
     `).join("");
 }
 
-function renderLatestSms(event) {
-    setText("latestSmsTimestamp", formatDateTime(event?.timestamp));
-    setText("latestSmsFrom", event?.fromNumber || "--");
-    setText("latestSmsType", event?.type || "--");
-    setText("latestSmsText", event?.text || "--");
-}
-
-function renderEventsTable(events) {
-    const tbody = document.getElementById("eventsTable");
-    if (!tbody) return;
-
-    if (!Array.isArray(events) || events.length === 0) {
-        tbody.innerHTML = '<tr><td colspan="6" class="telemetry-empty-state">За последний месяц событий нет.</td></tr>';
-        return;
-    }
-
-    tbody.innerHTML = events.map((event) => `
-        <tr>
-            <td>${event.id ?? "--"}</td>
-            <td>${event.type || "--"}</td>
-            <td>${formatDateTime(event.timestamp)}</td>
-            <td>${event.fromNumber || "--"}</td>
-            <td class="telemetry-extra">${event.text || "--"}</td>
-            <td>${formatDateTime(event.createdAt)}</td>
-        </tr>
-    `).join("");
-}
-
-async function loadEvents() {
-    try {
-        const events = await fetchJson(endpoints.events.history);
-        const rows = Array.isArray(events) ? events : [];
-        const monthAgo = Date.now() - (30 * 24 * 60 * 60 * 1000);
-        const monthEvents = rows.filter((event) => {
-            const timestamp = new Date(event.timestamp).getTime();
-            return !Number.isNaN(timestamp) && timestamp >= monthAgo;
-        });
-        const latestSms = monthEvents.find((event) => event.type === "sms") || null;
-
-        renderLatestSms(latestSms);
-        renderEventsTable(monthEvents);
-        setStatus("eventsPanelStatus", monthEvents.length ? "События загружены" : "Событий нет", monthEvents.length ? "ok" : "warn");
-    } catch (error) {
-        renderLatestSms(null);
-        renderEventsTable([]);
-        setStatus("eventsPanelStatus", "Нет доступа к событиям", "offline");
-    }
-}
-
 function renderRtkSummary(latest, missing) {
     const rtkState = getTelemetryState(latest, "rtk");
     const qualityValue = latest?.quality != null ? String(latest.quality) : "--";
@@ -744,7 +691,7 @@ function updateSyncTime() {
 }
 
 async function refreshTelemetry() {
-    await Promise.all([loadHost(), loadRtk(), loadEvents()]);
+    await Promise.all([loadHost(), loadRtk()]);
     updateSyncTime();
 }
 
@@ -768,16 +715,6 @@ document.getElementById("rtkClearButton")?.addEventListener("click", function ()
         confirmMessage: "Очистить историю потока «Погрузчик»?",
         successMessage: "История «Погрузчика» очищена",
         refreshFn: loadRtk,
-    });
-});
-
-document.getElementById("eventsClearButton")?.addEventListener("click", function () {
-    clearAdminData({
-        buttonId: "eventsClearButton",
-        endpoint: endpoints.events.truncate,
-        confirmMessage: "Очистить SMS и входящие звонки?",
-        successMessage: "Журнал событий очищен",
-        refreshFn: loadEvents,
     });
 });
 

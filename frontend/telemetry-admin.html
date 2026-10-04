@@ -196,31 +196,6 @@
                         </div>
 
                         <div class="card shadow mb-4">
-                            <div class="card-header py-3">
-                                <h6 class="m-0 font-weight-bold text-primary">Последняя SMS</h6>
-                            </div>
-                            <div class="card-body">
-                                <div class="row">
-                                    <div class="col-lg-3 col-md-6 mb-3 mb-lg-0">
-                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">timestamp</div>
-                                        <div class="font-weight-bold text-gray-800" id="latestSmsTimestamp">--</div>
-                                    </div>
-                                    <div class="col-lg-3 col-md-6 mb-3 mb-lg-0">
-                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">fromNumber</div>
-                                        <div class="font-weight-bold text-gray-800" id="latestSmsFrom">--</div>
-                                    </div>
-                                    <div class="col-lg-3 col-md-6">
-                                        <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">type</div>
-                                        <div class="font-weight-bold text-gray-800" id="latestSmsType">--</div>
-                                    </div>
-                                </div>
-                                <hr>
-                                <div class="text-xs font-weight-bold text-primary text-uppercase mb-1">text</div>
-                                <div class="text-gray-800 telemetry-sms-text" id="latestSmsText">--</div>
-                            </div>
-                        </div>
-
-                        <div class="card shadow mb-4">
                             <div class="card-header py-3 d-sm-flex align-items-center justify-content-between">
                                 <div>
                                     <h6 class="m-0 font-weight-bold text-primary">Поток «Хозяин»</h6>
@@ -267,41 +242,6 @@
                             </div>
                         </div>
 
-                        <div class="card shadow mb-4">
-                            <div class="card-header py-3 d-sm-flex align-items-center justify-content-between">
-                                <div>
-                                    <h6 class="m-0 font-weight-bold text-primary">SMS и входящие звонки за месяц</h6>
-                                </div>
-                                <div class="d-flex align-items-center mt-3 mt-sm-0">
-                                    <button id="eventsClearButton" type="button" class="btn btn-outline-danger btn-sm mr-2" data-requires-admin hidden>
-                                        <i class="fas fa-trash-alt mr-1"></i>
-                                        Очистить
-                                    </button>
-                                    <div class="telemetry-panel-status" id="eventsPanelStatus">Загрузка событий...</div>
-                                </div>
-                            </div>
-                            <div class="card-body">
-                                <div class="table-responsive telemetry-table-wrap">
-                                    <table class="table table-bordered telemetry-table" width="100%" cellspacing="0">
-                                        <thead>
-                                            <tr>
-                                                <th>id</th>
-                                                <th>type</th>
-                                                <th>timestamp</th>
-                                                <th>fromNumber</th>
-                                                <th>text</th>
-                                                <th>createdAt</th>
-                                            </tr>
-                                        </thead>
-                                        <tbody id="eventsTable">
-                                            <tr>
-                                                <td colspan="6" class="telemetry-empty-state">Загрузка событий...</td>
-                                            </tr>
-                                        </tbody>
-                                    </table>
-                                </div>
-                            </div>
-                        </div>
                     </section>
 
                     <section class="telemetry-panel" data-panel="rtk">
@@ -824,7 +764,7 @@
     <script src="vendor/jquery-easing/jquery.easing.min.js"></script>
     <script src="js/sb-admin-2.min.js"></script>
     <script src="js/sidebar-enhancements.js?v=20260929b"></script>
-    <script src="js/telemetry.js?v=20261002weight-tolerance"></script>
+    <script src="js/telemetry.js?v=20261004cleanup"></script>
     <script src="js/admin-users.js?v=20260501a"></script>
     <script src="js/loader-terminals.js?v=20260929remote"></script>
 

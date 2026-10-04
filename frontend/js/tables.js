@@ -36,10 +36,12 @@ $(document).ready(function () {
     });
 
     const initialUrl = new URL(window.location.href);
+    const hasExplicitInitialDate = Boolean(normalizeDateValue(initialUrl.searchParams.get("date")));
 
     let lastSnapshotKey = "";
     let activeRequestId = 0;
     let lastAlertKey = "";
+    let didUseLatestAvailableDate = false;
     const BATCH_COLUMN_LABELS = [
         "Время",
         "План",
@@ -323,7 +325,7 @@ $(document).ready(function () {
 
     function renderIngredientSignal(kind, icon, label) {
         const safeLabel = escapeHtml(label);
-        return `<span class="ingredient-signal ingredient-signal--${kind}" role="img" tabindex="0" aria-label="${safeLabel}" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></span>`;
+        return `<button type="button" class="ingredient-signal ingredient-signal--${kind}" data-role="ingredient-signal" data-tooltip="${safeLabel}" aria-label="${safeLabel}" aria-expanded="false" title="${safeLabel}"><i class="fas ${icon}" aria-hidden="true"></i></button>`;
     }
 
     function getLowConfidenceText(reason) {
@@ -463,6 +465,21 @@ $(document).ready(function () {
         }
 
         return url.toString();
+    }
+
+    async function getLatestAvailableDate() {
+        const baseUrl = window.AppAuth?.getApiUrl?.("/api/batches/latest-date") || "/api/batches/latest-date";
+        const response = await fetch(baseUrl, {
+            method: "GET",
+            headers: window.AppAuth?.getAuthHeaders?.() || {},
+        });
+
+        if (!response.ok) {
+            return "";
+        }
+
+        const payload = await response.json();
+        return normalizeDateValue(payload?.date);
     }
 
     function buildBatchDetailsUrl(batchId) {
@@ -615,6 +632,18 @@ $(document).ready(function () {
                 return;
             }
 
+            if (!hasExplicitInitialDate && !didUseLatestAvailableDate && rows.length === 0) {
+                didUseLatestAvailableDate = true;
+                const latestDate = await getLatestAvailableDate();
+
+                if (latestDate && latestDate !== dateValue) {
+                    if (dateInput) {
+                        dateInput.value = latestDate;
+                    }
+                    return loadBatches({ force: true });
+                }
+            }
+
             const nextSnapshotKey = `${dateValue}|${JSON.stringify(rows)}`;
             if (settings.force || nextSnapshotKey !== lastSnapshotKey) {
                 table.clear().rows.add(rows).draw(false);
@@ -649,6 +678,23 @@ $(document).ready(function () {
 
         const rowData = table.row(this).data();
         openBatchDetails(rowData?.id);
+    });
+
+    $("#batchesTable tbody").on("click", "button[data-role='ingredient-signal']", function (event) {
+        event.preventDefault();
+        event.stopPropagation();
+
+        const signal = this;
+        const willOpen = !signal.classList.contains("is-open");
+        document.querySelectorAll("#batchesTable button[data-role='ingredient-signal'].is-open").forEach((openSignal) => {
+            openSignal.classList.remove("is-open");
+            openSignal.setAttribute("aria-expanded", "false");
+        });
+
+        if (willOpen) {
+            signal.classList.add("is-open");
+            signal.setAttribute("aria-expanded", "true");
+        }
     });
 
     $("#batchesTable tbody").on("keydown", "tr", function (event) {

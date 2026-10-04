@@ -194,7 +194,7 @@ import { getHostIngressStore } from './modules/telemetry/host-ingress-store.js'
   const loaderTasks = isPostgresDatabase ? new PostgresLoaderTaskStore(prisma) : new LoaderTaskStore()
   const loaderTerminals = isPostgresDatabase ? new PostgresLoaderTerminalStore(prisma) : new LoaderTerminalStore(loaderTasks.db)
   app.use('/api/loader/terminals', authenticate, createTerminalManagementRouter({ prisma, terminals: loaderTerminals, remote: terminalRemote }))
-  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, remote: terminalRemote, weightHandler: handleLoaderScaleWeight }))
+  app.use('/api/loader', createLoaderAuthentication({ authenticate, prisma, terminals: loaderTerminals }), createLoaderRouter({ prisma, store: loaderTasks, terminals: loaderTerminals, remote: terminalRemote, weightHandler: handleLoaderScaleWeight }))
 
   app.use('/api/reports', authenticate, requireReadAccess, reportsRoutes)
   app.use('/api/violations', authenticate, requireReadAccess, violationsRoutes)

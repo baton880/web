@@ -4,7 +4,7 @@ import { TaskError } from './loader-task-store.js'
 import { signPlan, verifyPlan } from './offline-plan.js'
 
 // Authentication is mounted by index.js; the factory also enables isolated HTTP tests.
-export function createLoaderRouter({ prisma, store, weightHandler, remote, offlineKey = process.env.LOADER_OFFLINE_PLAN_KEY || process.env.JWT_SECRET }) {
+export function createLoaderRouter({ prisma, store, terminals, weightHandler, remote, offlineKey = process.env.LOADER_OFFLINE_PLAN_KEY || process.env.JWT_SECRET }) {
   const router = Router()
   router.use((req, res, next) => {
     if (!req.user || !['ADMIN', 'DIRECTOR', 'GUEST'].includes(req.user.role)) return res.status(403).json({ error: 'Нет доступа к заданиям' })
@@ -19,6 +19,31 @@ export function createLoaderRouter({ prisma, store, weightHandler, remote, offli
   const wrap = fn => async (req, res, next) => { try { await fn(req, res) } catch (error) { next(error) } }
   const writer = (req, res, next) => ['ADMIN', 'DIRECTOR'].includes(req.user.role) ? next() : res.status(403).json({ error: 'Для ведения заданий нужны права директора или администратора' })
   router.get('/session', (req,res) => res.json({ userId:req.user.id, terminalId:req.user.terminalId || null, deviceId:req.user.terminalDeviceId || null, name:req.user.terminalName || null }))
+  router.get('/dashboard', wrap(async (req, res) => {
+    if (req.user.terminalId) return res.status(403).json({ error: 'Только для сайта' })
+    const registered = prisma.loaderTerminal
+      ? await prisma.loaderTerminal.findMany({ where: { revokedAt: null }, select: { id: true, name: true, deviceId: true, lastSeenAt: true }, orderBy: { createdAt: 'desc' }, take: 20 })
+      : (terminals ? (await terminals.list({ ...req.user, role: 'ADMIN' })).filter(item => !item.revokedAt) : [])
+    const devices = await Promise.all(registered.map(async terminal => {
+      const row = prisma.loaderTask
+        ? await prisma.loaderTask.findFirst({ where: { deviceId: terminal.deviceId, status: { in: ['ready', 'active'] } }, orderBy: { createdAt: 'desc' }, select: { state: true } })
+        : null
+      const task = row ? JSON.parse(row.state) : (prisma.loaderTask ? null : (await store.list(terminal.deviceId, { ...req.user, role: 'ADMIN' })).find(item => ['ready', 'active'].includes(item.status)) || null)
+      const heartbeat = remote ? remote.status(terminal.id) : null
+      return {
+        id: terminal.id, name: terminal.name, deviceId: terminal.deviceId,
+        lastSeenAt: Number(heartbeat?.lastSeenAt || terminal.lastSeenAt || 0) || null,
+        version: heartbeat?.version || null,
+        task: task ? {
+          status: task.status, groupName: task.groupName, rationName: task.rationName,
+          currentIndex: task.currentIndex, totalKg: task.totalKg,
+          steps: task.steps.map(step => ({ name: step.name, targetKg: step.targetKg,
+            actualKg: step.actualKg ?? null, baselineKg: step.baseline?.weightKg ?? null }))
+        } : null
+      }
+    }))
+    res.json({ devices })
+  }))
   if(remote) {
     const terminalOnly=(req,res,next)=>req.user.terminalId?next():res.status(403).json({error:'Нужен ключ планшета'})
     router.post('/remote/poll',terminalOnly,wrap(async(req,res)=>res.json({command:remote.heartbeat(req.user.terminalId,req.body||{})})))

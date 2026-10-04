@@ -14,7 +14,7 @@
     <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 
     <link href="css/sb-admin-2.min.css" rel="stylesheet">
-    <link href="css/custom.css?v=20260929b" rel="stylesheet">
+    <link href="css/custom.css?v=20261004a" rel="stylesheet">
     <link href="css/responsive.css?v=20260929a" rel="stylesheet">
     <script src="js/auth-route-alias.js?v=20260428b"></script>
     <script src="js/app-auth.js?v=20260904term"></script>
@@ -232,6 +232,17 @@
                     </div>
 
 
+                    <section class="card shadow mb-4" aria-labelledby="dashboardTabletTitle">
+                        <div class="card-header py-3">
+                            <h2 id="dashboardTabletTitle" class="h6 m-0 font-weight-bold text-primary">Планшет</h2>
+                        </div>
+                        <div class="card-body">
+                            <div id="dashboardTabletList" class="dashboard-tablet-list" aria-live="polite">
+                                <div class="dashboard-tablet-empty">Загружаем состояние планшета…</div>
+                            </div>
+                        </div>
+                    </section>
+
                     <!-- ТЕКУЩЕЕ СОСТОЯНИЕ -->
                     <h1 class="h3 mb-4 text-gray-800">Текущее состояние</h1>
 
@@ -363,6 +374,7 @@
 
     <script src="js/host-track-visual-filter.js?v=20260928a"></script>
     <script src="js/dashboard.js?v=20260824d"></script>
+    <script src="js/dashboard-tablet.js?v=20261004a"></script>
     <script src="js/dashboard-current-state.js?v=20260824b"></script>
 
 </body>

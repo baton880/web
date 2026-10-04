@@ -1,5 +1,32 @@
 # AGENTS.md — рабочие правила проекта site_korovki
 
+## Планшет на главной — 2026-10-04
+
+- Под картой добавлена карточка каждого зарегистрированного планшета: свежесть связи, версия, активное задание, группа и рацион. При активной загрузке показываются шаг и шкала компонента по свежему весу HOST относительно сохранённой планшетной базы; измерение старше 15 секунд не отображается как текущий прогресс. В ожидании шкала остаётся пустой с пояснением.
+- Данные отдаёт read-only `/api/loader/dashboard`; ключи терминалов, удалённые команды и снимки экрана в ответ не включаются. Обновление страницы идёт каждые 5 секунд при видимой вкладке. Локальный сервер 127.0.0.1:3000 перезапущен.
+- Проверены `loader-tasks-test.mjs`, `loader-terminals-test.mjs`, синтаксис JS, `git diff --check`, главная в браузере Codex на мобильной ширине. Локальная БД `farm_main_fresh_20261003` содержит два зарегистрированных планшета, оба сейчас не на связи и без активного задания; живую шкалу на реальном активном замесе проверить пока нельзя. Production не менялся.
+
+## HOST track packet order — 2026-09-28
+
+- HOST фактически отправляет 2 пакета/с с timestamp до целой секунды. В визуальном фильтре равные timestamps сортируются по sourcePacketId одного stream/device, затем receivedAt/id; для проверки скорости при равном времени используется порядок точек с номинальным шагом 0,5 с. Исходное время и raw данные не меняются; миллисекунды протокола отложены пользователем.
+- Проверки: host-track-visual-filter-test (2 Гц, обратный порядок, backlog, GPS-скачок, точное время), JS syntax; на 64238 сегодняшних строках восстановленных разрывов фильтра 136 -> 8. Артефакты: projects/tmp/host-track-20260928.csv и analyze-host-track.mjs.
+- Production frontend обновлён без restart в двух каталогах: активный API release `20260926-with-tablet` и фактический nginx static root `20260919-postgres-ingress/frontend`. Backup: `/opt/backups/farm-site/host-track-order-20260928` (nginx копия в `nginx-frontend`). Public index отдаёт filter `v=20260928a`; checksum JS совпал, health ok, HOST pending/retry=0. Nginx root не переключался.
+
+## with-tablet, 2026-09-21
+
+Пользователь разрешил совместную реализацию Pi/Android/backend и push веток.
+Для серверной части создана отдельная рабочая копия `C:\Users\Windows\projects\web-with-tablet`,
+ветка `with-tablet` от `54ab8bc` PostgreSQL-платформы. Основной checkout не изменять.
+Новый план/установка: `server/docs/with-tablet.md`. Production обновлён 26.09.2026: release `20260926-with-tablet`, PM2 `farm-server-tablet`; backup и PostgreSQL-проверки выполнены.
+Новая Pi выдаёт `scale_measurement` с общими для LAN/server packetId, timestampMs,
+weightKg и calibrationId. Не применять к этому объекту серверную калибровку или
+realtime-фильтр. Не ретаймстампить backlog. `/loader/weight` использует лёгкий
+обработчик исходного веса; legacy fallback сохранён.
+Автономные планы подписаны постоянным LOADER_OFFLINE_PLAN_KEY (fallback JWT_SECRET),
+привязаны к owner/terminal/device. Ключ не ротировать до сверки offline очередей.
+Тесты: loader-tasks-test, loader-terminals-test, with-tablet-test и
+host-current-pointer-test с отдельным тестовым JWT_SECRET. Схема БД не менялась.
+
 ## Назначение
 
 Этот файл — краткая карта проекта для Codex и других разработчиков. Перед изменениями нужно проверить `git status`, прочитать этот файл и не затирать чужие незакоммиченные изменения.
