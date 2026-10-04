@@ -7,6 +7,7 @@
 - [`server-platform/LOCAL-REALTIME-20261001.md`](server-platform/LOCAL-REALTIME-20261001.md) — realtime-расчёт замесов, независимая проверка веса, нарушения и локальная приёмка;
 - [`server-platform/LOCAL-UPDATE-20261004.md`](server-platform/LOCAL-UPDATE-20261004.md) — актуальная локальная база, мобильные правки и блок планшета на главной;
 - [`server-platform/RELEASE-20261002.md`](server-platform/RELEASE-20261002.md) — состав и проверки realtime-релиза;
+- [`server-platform/DEPLOY-20261002.md`](server-platform/DEPLOY-20261002.md) — фактическое production-развёртывание realtime-релиза и проверенные backup;
 - [`server-platform/BATCH-PACKET-WEIGHT-20260929.md`](server-platform/BATCH-PACKET-WEIGHT-20260929.md) — источник веса и границы планшетных шагов;
 - [`../server/docs/loader-tasks.md`](../server/docs/loader-tasks.md) и [`../server/docs/loader-terminals.md`](../server/docs/loader-terminals.md) — контракт заданий и терминалов планшета.
 
